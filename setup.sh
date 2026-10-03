@@ -27,6 +27,8 @@ step() { printf '\n\033[36m▸\033[0m \033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m⚠\033[0m %s\n' "$*" >&2; }
 die()  { printf '\n\033[31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
+# A command the user should run by hand. stderr, like the warnings around it.
+note() { printf '      \033[36m%s\033[0m\n' "$*" >&2; }
 
 bold "╭──────────────────────────────────────────────╮"
 bold "│  ZIMZILLA · setup                         │"
@@ -34,6 +36,46 @@ bold "╰───────────────────────�
 
 [[ -x "$VENV_PY" ]] || die "venv missing — run ./install.sh first."
 command -v curl >/dev/null 2>&1 || die "curl is required."
+
+# The harness itself must be importable, or this script would wire up a proxy
+# for something that cannot start. This is the state install.sh leaves behind
+# when pip failed and the user was told to install by hand: the venv and the
+# launcher exist, the package does not. Tell them the one command that fixes it
+# rather than letting them discover it at launch.
+#
+# Run the check from / on purpose: `python -c` puts the working directory on
+# sys.path, so from the checkout this would import the zimzilla/ *source
+# directory* and pass even when nothing is installed.
+if ! ( cd / && "$VENV_PY" -c 'import zimzilla' ) >/dev/null 2>&1; then
+  # A root-owned venv is the usual reason the previous install failed, so fix
+  # that first (sudo prompts), then retry once before giving up.
+  STRAY="$(find "$VENV" ! -user "$(id -un)" 2>/dev/null | wc -l)"
+  if [[ "$STRAY" -gt 0 ]]; then
+    printf '  %s files in the venv belong to another user — sudo will ask for your password.\n' "$STRAY" >&2
+    if command -v sudo >/dev/null 2>&1 && { sudo -n true 2>/dev/null || [[ -t 0 ]]; }; then
+      sudo chown -R "$(id -u):$(id -g)" "$VENV" \
+        && ok "took ownership of $VENV" || warn "chown failed"
+    else
+      warn "no terminal for a sudo prompt"
+    fi
+  fi
+
+  printf '  installing zimzilla into the venv...\n' >&2
+  if "$VENV_PY" -m pip install --quiet -e "$SELF" \
+     && ( cd / && "$VENV_PY" -c 'import zimzilla' ) >/dev/null 2>&1; then
+    ok "installed zimzilla"
+  else
+    printf '\n\033[31m✖ zimzilla is not installed in %s\033[0m\n\n' "$VENV" >&2
+    printf '  Install it, then re-run ./setup.sh:\n\n' >&2
+    note "$VENV_PY -m pip install -e \"$SELF\""
+    printf '\n  If that reports "Permission denied" on a .pyc under the venv, the\n' >&2
+    printf '  venv holds root-owned files (it was built with sudo):\n\n' >&2
+    note "sudo chown -R $(id -un):$(id -gn) \"$VENV\""
+    printf '\n  Do not just "rm -rf" it: the root-owned __pycache__ makes the delete\n' >&2
+    printf '  stop halfway and leaves a broken venv. Remove it with sudo if you must.\n\n' >&2
+    exit 1
+  fi
+fi
 
 # --- 1. locate a credential --------------------------------------------------
 

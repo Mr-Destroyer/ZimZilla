@@ -7,6 +7,11 @@
 # LiteLLM proxy), copies the logfare proxy files into ~/.zimzilla/logfare,
 # and puts a `zimzilla` command on your PATH.
 #
+# The launcher goes on PATH *before* the dependency install, so `zimzilla` is
+# reachable even when pip cannot finish. If pip does fail, this script prints
+# the exact commands to run by hand and stops; `./setup.sh` afterwards picks up
+# where it left off.
+#
 # Idempotent: safe to re-run after a `git pull`.
 # No credential is read, written or echoed here — that is setup.sh's job.
 
@@ -24,6 +29,8 @@ step() { printf '\n\033[36m▸\033[0m \033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m⚠\033[0m %s\n' "$*" >&2; }
 die()  { printf '\n\033[31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
+# A command the user should run by hand. stderr, like the warnings around it.
+note() { printf '      \033[36m%s\033[0m\n' "$*" >&2; }
 
 bold "╭──────────────────────────────────────────────╮"
 bold "│  ZIMZILLA · install                       │"
@@ -50,7 +57,7 @@ step "Checking curl"
 command -v curl >/dev/null 2>&1 || die "curl is required (used to health-check the proxy)."
 ok "curl present"
 
-# --- 3. venv + dependencies --------------------------------------------------
+# --- 3. venv -----------------------------------------------------------------
 
 step "Creating the virtualenv"
 if [[ -d "$VENV" ]]; then
@@ -63,12 +70,102 @@ fi
 VENV_PY="$VENV/bin/python"
 [[ -x "$VENV_PY" ]] || die "venv python missing at $VENV_PY"
 
+# A venv built (or populated) with sudo leaves root-owned files behind. pip can
+# still *unlink* inside site-packages, but it cannot write the __pycache__ next
+# to a root-owned one, and the install dies with a "Permission denied" naming a
+# .pyc path that looks nothing like the real cause. Reclaim the tree up front.
+step "Checking venv ownership"
+STRAY="$(find "$VENV" ! -user "$(id -un)" 2>/dev/null | wc -l)"
+if [[ "$STRAY" -eq 0 ]]; then
+  ok "all files owned by $(id -un)"
+else
+  warn "$STRAY files in $VENV belong to another user (built with sudo?)"
+  printf '  Taking them back needs root — sudo will ask for your password.\n' >&2
+  # Prompt only when there is a terminal to prompt on (or sudo is already
+  # passwordless). Without either, sudo would hang or fail, so print the fix.
+  if command -v sudo >/dev/null 2>&1 && { sudo -n true 2>/dev/null || [[ -t 0 ]]; }; then
+    if sudo chown -R "$(id -u):$(id -g)" "$VENV"; then
+      ok "took ownership of $VENV"
+    else
+      warn "chown failed — pip will likely fail below"
+      note "sudo chown -R $(id -un):$(id -gn) \"$VENV\""
+    fi
+  else
+    warn "no terminal for a sudo prompt — pip will likely fail below"
+    note "sudo chown -R $(id -un):$(id -gn) \"$VENV\""
+  fi
+fi
+
+# --- 4. launcher on PATH -----------------------------------------------------
+# Deliberately before the dependency install: wiring PATH does not depend on
+# pip, and the user should end up with a `zimzilla` command either way.
+
+step "Installing the launcher"
+mkdir -p "$BIN_DIR"
+# A shim that points back at this checkout: the launcher must live next to the
+# venv it uses, and this way re-running install.sh after a `git pull` picks up
+# any launcher changes automatically.
+{
+  printf '#!/usr/bin/env bash\n'
+  printf '# ZimZilla launcher shim (written by install.sh).\n'
+  printf '# Points at the checkout so the real launcher can find its venv.\n'
+  printf 'export ZIMZILLA_ROOT=%q\n' "$SELF"
+  printf 'exec %q "$@"\n' "$SELF/packaging/zimzilla"
+} > "$BIN_DIR/zimzilla"
+chmod +x "$BIN_DIR/zimzilla"
+ok "$BIN_DIR/zimzilla -> $SELF"
+
+# Put BIN_DIR on PATH. Skips silently when it is already there.
+if ! case ":$PATH:" in *":$BIN_DIR:"*) true ;; *) false ;; esac; then
+  warn "$BIN_DIR is not on your PATH"
+  SHELL_RC=""
+  case "${SHELL:-}" in
+    */zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    */bash) SHELL_RC="$HOME/.bashrc" ;;
+  esac
+  # $SHELL is unset under cron and some launchers; fall back to whichever
+  # profile actually exists rather than giving up with just a warning.
+  if [[ -z "$SHELL_RC" ]]; then
+    for cand in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile"; do
+      [[ -f "$cand" ]] && { SHELL_RC="$cand"; break; }
+    done
+  fi
+  [[ -n "$SHELL_RC" ]] || SHELL_RC="$HOME/.profile"
+
+  if grep -qs "ZimZilla launcher" "$SHELL_RC" 2>/dev/null; then
+    ok "$BIN_DIR already exported in $SHELL_RC"
+  else
+    {
+      printf '\n# ZimZilla launcher\nexport PATH="%s:$PATH"\n' "$BIN_DIR"
+    } >> "$SHELL_RC"
+    ok "added $BIN_DIR to PATH in $SHELL_RC (open a new shell, or: . $SHELL_RC)"
+  fi
+fi
+
+# --- 5. dependencies ---------------------------------------------------------
+
 step "Installing the harness and its dependencies"
 "$VENV_PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || warn "could not upgrade pip (continuing)"
-"$VENV_PY" -m pip install --quiet -e "$SELF" || die "pip install failed"
-ok "zimzilla + anthropic, textual, rich, pyyaml"
 
-# --- 4. the LiteLLM proxy ----------------------------------------------------
+if "$VENV_PY" -m pip install --quiet -e "$SELF"; then
+  ok "zimzilla + anthropic, textual, rich, pyyaml"
+else
+  printf '\n\033[31m✖ pip install failed\033[0m\n\n' >&2
+  printf '  Finish it by hand, then run \033[36m./setup.sh\033[0m to wire up the proxy:\n\n' >&2
+  note "$VENV_PY -m pip install --upgrade pip"
+  note "$VENV_PY -m pip install -e \"$SELF\""
+  printf '\n  If pip reported "Permission denied" on a .pyc under the venv, the\n' >&2
+  printf '  venv holds root-owned files (it was built with sudo). Take it back:\n\n' >&2
+  note "sudo chown -R $(id -un):$(id -gn) \"$VENV\""
+  printf '\n  Do not just "rm -rf" the venv: its __pycache__ is root-owned, so the\n' >&2
+  printf '  delete stops halfway and leaves a broken venv install.sh will reuse.\n' >&2
+  printf '  To rebuild it cleanly instead, remove it with sudo:\n\n' >&2
+  note "sudo rm -rf \"$VENV\"   # then re-run ./install.sh"
+  printf '\n' >&2
+  exit 1
+fi
+
+# --- 6. the LiteLLM proxy ----------------------------------------------------
 
 step "Installing the LiteLLM proxy"
 if command -v litellm >/dev/null 2>&1; then
@@ -79,11 +176,12 @@ else
   if "$VENV_PY" -m pip install --quiet "litellm[proxy]" >/dev/null 2>&1; then
     ok "installed litellm[proxy] into the harness venv"
   else
-    warn "could not install litellm — run setup.sh later once the network is up"
+    warn "could not install litellm — ./setup.sh retries it, or install it by hand:"
+    note "$VENV_PY -m pip install \"litellm[proxy]\""
   fi
 fi
 
-# --- 5. proxy files ----------------------------------------------------------
+# --- 7. proxy files ----------------------------------------------------------
 
 step "Installing logfare proxy files"
 mkdir -p "$ZIMZILLA_HOME/logfare"
@@ -105,44 +203,6 @@ elif [[ -f "$SELF/packaging/logfare/source" ]]; then
 else
   warn "no credential profile yet — setup.sh writes it"
 fi
-
-# --- 6. launcher on PATH -----------------------------------------------------
-
-step "Installing the launcher"
-mkdir -p "$BIN_DIR"
-# A shim that points back at this checkout: the launcher must live next to the
-# venv it uses, and this way re-running install.sh after a `git pull` picks up
-# any launcher changes automatically.
-{
-  printf '#!/usr/bin/env bash\n'
-  printf '# ZimZilla launcher shim (written by install.sh).\n'
-  printf '# Points at the checkout so the real launcher can find its venv.\n'
-  printf 'export ZIMZILLA_ROOT=%q\n' "$SELF"
-  printf 'exec %q "$@"\n' "$SELF/packaging/zimzilla"
-} > "$BIN_DIR/zimzilla"
-chmod +x "$BIN_DIR/zimzilla"
-ok "$BIN_DIR/zimzilla -> $SELF"
-
-# Warn if BIN_DIR is not on PATH (idempotent, exact match only).
-case ":$PATH:" in
-  *":$BIN_DIR:"*) ;;
-  *)
-    warn "$BIN_DIR is not on your PATH"
-    SHELL_RC=""
-    case "${SHELL:-}" in
-      */zsh)  SHELL_RC="$HOME/.zshrc" ;;
-      */bash) SHELL_RC="$HOME/.bashrc" ;;
-    esac
-    if [[ -n "$SHELL_RC" ]] && ! grep -qs "ZimZilla launcher" "$SHELL_RC"; then
-      {
-        printf '\n# ZimZilla launcher\nexport PATH="%s:$PATH"\n' "$BIN_DIR"
-      } >> "$SHELL_RC"
-      ok "added $BIN_DIR to PATH in $SHELL_RC (open a new shell, or: . $SHELL_RC)"
-    else
-      warn "add this to your shell profile:  export PATH=\"$BIN_DIR:\$PATH\""
-    fi
-    ;;
-esac
 
 # --- done --------------------------------------------------------------------
 
