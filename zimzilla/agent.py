@@ -339,7 +339,12 @@ class Agent:
                                                       meta={"mode_denied": True})
 
                     elif tools_mod.needs_permission(call.name):
-                        preview = tools_mod.build_preview(call.name, args, self.cfg)
+                        # Building a write/edit preview reads the target file and
+                        # diffs it — blocking I/O, and it runs on every gated
+                        # call. Off the loop for the same reason as execute().
+                        preview = await asyncio.to_thread(
+                            tools_mod.build_preview, call.name, args, self.cfg
+                        )
                         # Capture the diff NOW, before the tool mutates the file.
                         if preview.kind == "diff":
                             diff_body = preview.body
@@ -568,6 +573,27 @@ class Agent:
             self.messages.pop()
 
     @staticmethod
+    def _timeout_hint(e: Exception) -> str:
+        """Human wording for however long the stalled request actually waited.
+
+        The timeout value lives on the httpx exception (or the SDK wrapper),
+        and reporting the real number is the difference between "it hung" and
+        "it gave up after 120s, which is the configured ceiling".
+        """
+        for attr in ("timeout",):
+            v = getattr(e, attr, None)
+            if v is not None:
+                return f"{v}s"
+        req = getattr(e, "request", None)
+        if req is not None and getattr(req, "extensions", None):
+            v = req.extensions.get("timeout")
+            if isinstance(v, dict):
+                for key in ("read", "connect", "pool"):
+                    if v.get(key) is not None:
+                        return f"{v[key]}s"
+        return "the configured timeout"
+
+    @staticmethod
     def _friendly_error(e: Exception) -> str:
         import anthropic
 
@@ -592,6 +618,19 @@ class Agent:
             return (
                 f"cannot reach the API endpoint at {e.request.url if getattr(e,'request',None) else '?'}. "
                 "Is the LiteLLM proxy running?"
+            )
+        # A stall, not a failure: the connection was accepted and then went
+        # quiet. Distinct from APIConnectionError, which never connected.
+        # httpx raises ReadTimeout for this; the SDK does not wrap it.
+        if type(e).__name__ in ("ReadTimeout", "WriteTimeout", "PoolTimeout",
+                                "ConnectTimeout") or isinstance(
+                                    e, anthropic.APITimeoutError):
+            return (
+                "the endpoint accepted the request then sent nothing for "
+                f"{Agent._timeout_hint(e)} — the proxy is up but stalled.\n"
+                "  Check the proxy log (e.g. /tmp/litellm-zim.log) for the "
+                "upstream error; a model that is not served or an upstream "
+                "timeout both look like this."
             )
         return f"{type(e).__name__}: {e}"
 
