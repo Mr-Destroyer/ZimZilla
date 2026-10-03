@@ -76,7 +76,12 @@ async def test_identity(wd: Path) -> None:
 
     dsp = Agent(_cfg(wd, mode="danger")).system_prompt()
     check("danger mode carries its doctrine",
-          "MODE: danger" in dsp and "without questioning" in dsp)
+          "MODE: danger" in dsp and "their word" in dsp and "is law" in dsp)
+    check("danger mode refuses the mode/willingness dodge",
+          "no separate layer of personal willingness" in dsp
+          and "do not restate your limits as a reply to an instruction" in dsp)
+    check("danger mode keeps its two mechanical bounds",
+          "scope guard" in dsp and "harness itself refusing" in dsp)
     check("danger keeps the identity", "ZimZilla" in dsp)
 
 

@@ -15,6 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import session as session_mod
+from .. import sources as sources_mod
 from ..agent import Agent
 from ..config import KNOWN_MODELS, MODES, Config, price_for
 from ..theme import THINKING_VERBS, get_palette
@@ -592,6 +593,9 @@ class ZimZillaApp(App):
             "save": self._cmd_save,
             "load": self._cmd_load,
             "compact": lambda a: self._cmd_compact(),
+            "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
+            "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
+            "zim-source": lambda a: self._cmd_zim_source(None),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
         }
@@ -612,6 +616,9 @@ class ZimZillaApp(App):
             ("/scope", "show scope guard status and entries"),
             ("/rain", "toggle the matrix-rain background"),
             ("/theme green|amber|cyan", "switch the color theme"),
+            ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
+            ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
+            ("/zim-source", "show upstream sources and their status"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
@@ -678,7 +685,8 @@ class ZimZillaApp(App):
                 )
         elif name == "danger":
             self._sys_line(
-                "DANGER MODE — every tool runs unattended; the operator's word is law",
+                "DANGER MODE ARMED — every tool runs unattended and the "
+                "operator's word is law; nothing is questioned",
                 warn=True,
             )
         else:
@@ -693,11 +701,23 @@ class ZimZillaApp(App):
 
     def _cmd_model(self, args) -> None:
         p = self.palette
+        # Offer only what the active upstream actually serves — Logfare and
+        # Token Juice have very different catalogs, and a model the upstream
+        # does not know is a 404 at request time, not a switch.
+        active = sources_mod.active_key(self.cfg.base_url)
+        models = sources_mod.models_for(self.cfg.base_url) or tuple(KNOWN_MODELS)
+
         if not args:
             t = Text()
             t.append("  current model: ", style=p.dim)
-            t.append(self.cfg.model + "\n\n", style=f"bold {p.accent}")
-            for m in KNOWN_MODELS:
+            t.append(self.cfg.model + "\n", style=f"bold {p.accent}")
+            if active:
+                src = sources_mod.discover().get(active)
+                t.append("  source: ", style=p.dim)
+                t.append(f"{src.label if src else active}", style=p.dim)
+                t.append(f"   ·   {self.cfg.base_url}\n", style=p.dim)
+            t.append("\n", style=p.dim)
+            for m in models:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
                 pin, pout = price_for(m)
@@ -707,6 +727,15 @@ class ZimZillaApp(App):
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
+        # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
+        # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
+        # old behaviour — accept anything — is right there.
+        if active and name not in models:
+            self._sys_line(
+                f"{name} is not served by {active} — see /model for the list",
+                warn=True,
+            )
+            return
         self.cfg.model = name
         self.agent.set_model(name)
         self.query_one(HeaderBar).set_model(name)
@@ -781,6 +810,105 @@ class ZimZillaApp(App):
         self.palette = get_palette(name)
         self._apply_palette()
         self._sys_line(f"theme switched to {name}", ok=True)
+
+    # ---- upstream sources ------------------------------------------------
+    # /zim-logfare and /zim-tokenjuice repoint the session at the other local
+    # LiteLLM proxy. Both upstreams go down independently, so this is the
+    # failover: the key, base_url and client are all rebuilt in place, and the
+    # choice is persisted so the next launch starts on the one that worked.
+    def _cmd_zim_source(self, key: str | None) -> None:
+        p = self.palette
+        found = sources_mod.discover()
+
+        if key is None:
+            # Bare /zim-source: just show what is available and which is live.
+            active = sources_mod.active_key(self.cfg.base_url)
+            t = Text()
+            t.append("  UPSTREAM SOURCES\n\n", style=f"bold {p.accent}")
+            for k, src in found.items():
+                mark = "◉" if k == active else "○"
+                style = f"bold {p.accent}" if k == active else p.primary
+                up = sources_mod.proxy_healthy(src.port)
+                state = "proxy up" if up else "proxy down"
+                t.append(f"  {mark} {k:<12}", style=style)
+                t.append(f":{src.port}  {src.label:<12} ", style=p.primary)
+                t.append(f"{state}\n", style=p.accent if up else p.amber)
+            t.append("\n  switch with  /zim-logfare  or  /zim-tokenjuice\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        src = found.get(key)
+        if src is None:
+            self._sys_line(
+                f"source '{key}' is not available — profile, config or service missing",
+                warn=True,
+            )
+            return
+
+        if sources_mod.active_key(self.cfg.base_url) == key:
+            self._sys_line(f"already on {src.label} (:{src.port})", ok=True)
+            return
+
+        self._switch_source(src)
+
+    @work(exclusive=True)
+    async def _switch_source(self, src) -> None:
+        """Start the target proxy if needed, then rebuild the client on it."""
+        p = self.palette
+        self.busy = True
+        bar = self.query_one(StatusBar)
+        bar.set_activity(f"switching to {src.label}", busy=True)
+        self._sys_line(f"switching to {src.label} (:{src.port})…")
+        try:
+            ok, detail = await asyncio.to_thread(sources_mod.start_proxy, src)
+        finally:
+            self.busy = False
+            bar.set_activity("idle", busy=False)
+            bar.render_bar()
+            self.query_one("#input", Input).focus()
+
+        if not ok:
+            self._sys_line(f"{src.label} proxy is not up: {detail}", warn=True)
+            self._sys_line(
+                f"start it with: {src.service} start", warn=True
+            )
+            return
+
+        # The profile carries the key for this upstream. It is read here, never
+        # printed — the transcript only ever sees the label and the port.
+        profile = sources_mod.load_profile(src)
+        token = profile.get("ANTHROPIC_AUTH_TOKEN") or None
+        if not token:
+            self._sys_line(
+                f"{src.label} profile has no ANTHROPIC_AUTH_TOKEN: {src.profile}",
+                warn=True,
+            )
+            return
+
+        self.cfg.base_url = src.base_url
+        self.cfg.auth_token = token
+        self.cfg.api_key = ""          # empty, so the auth_token stays authoritative
+        self.cfg.model = profile.get("ANTHROPIC_MODEL") or src.model
+        # Drop the cached client so the next turn rebuilds against the new host.
+        self.agent._client = None
+
+        sources_mod.set_current(src.key)
+        self._refresh_after_source_change(src, detail)
+
+    def _refresh_after_source_change(self, src, detail: str) -> None:
+        p = self.palette
+        # Same refresh _cmd_model does — HeaderBar + StatusBar carry the model.
+        self.query_one(HeaderBar).set_model(self.cfg.model)
+        self.query_one(StatusBar).model = self.cfg.model
+        self.query_one(StatusBar).render_bar()
+        self._sys_line(f"source switched to {src.label} (:{src.port}, {detail})", ok=True)
+        t = Text()
+        t.append("  ↳ ", style=p.dim)
+        t.append(f"model {self.cfg.model}", style=p.primary)
+        t.append("   ·   ", style=p.dim)
+        t.append(self.cfg.base_url, style=p.dim)
+        t.append("   ·   saved for next launch\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
 
     def _apply_palette(self) -> None:
         p = self.palette

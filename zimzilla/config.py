@@ -97,6 +97,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "grok-4.6": (3.00, 15.00),
     "qwen-3.8-27b": (0.20, 0.60),
     "gemma-4-26b": (0.10, 0.30),
+    "ling-3.0-flash-vl": (0.10, 0.30),
     "mimo-v2.6-pro": (0.40, 1.60),
     "logfare/auto": (0.50, 1.50),
     "space-bunny-alpha": (0.50, 1.50),
@@ -106,20 +107,19 @@ PRICING: dict[str, tuple[float, float]] = {
 DEFAULT_PRICE = (1.00, 3.00)
 
 # Models offered by /model when the user types a bare index or `list`.
+#
+# These are the models the *upstream* actually serves, not a wish list: the
+# Logfare catalog advertises exactly these as chat-capable, and anything else
+# comes back "Model not found" (404) at request time. Per-source lists live in
+# sources.py — this is the default (Logfare) set, used when the endpoint is not
+# one of the known proxies.
 KNOWN_MODELS: list[str] = [
     "deepseek-v4.1-flash",
-    "deepseek-v3.2",
-    "claude-sonnet-5-5",
-    "claude-opus-5",
-    "claude-fable-5-1",
-    "gpt-6-astra",
-    "gpt-6-sol",
-    "gemini-3.8-flash",
-    "kimi-k2.7-code",
-    "glm-5.3",
-    "grok-4.6",
-    "qwen-3.8-27b",
+    "gemma-4-26b",
+    "ling-3.0-flash-vl",
     "logfare/auto",
+    "qwen-3.8-27b",
+    "space-bunny-alpha",
 ]
 
 

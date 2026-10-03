@@ -27,6 +27,32 @@ ZIMZILLA_ROOT="${ZIMZILLA_ROOT:-$_self_dir}"
 VENV_PY="$ZIMZILLA_ROOT/.venv/bin/python"
 
 ZIMZILLA_HOME="${ZIMZILLA_HOME:-$HOME/.zimzilla}"
+
+# Which upstream to use. An explicit environment variable always wins; failing
+# that, honour the source last chosen with /zim-logfare or /zim-tokenjuice, so
+# restarting lands back on whichever one was working. Absent either, Logfare.
+_env_override="${LITELLM_ENV_FILE:-}"
+_port_override="${LITELLM_PORT:-}"
+_svc_override="${LITELLM_SERVICE:-}"
+
+_current_source=""
+if [[ -r "$ZIMZILLA_HOME/current-source" ]]; then
+  _current_source="$(tr -d '[:space:]' < "$ZIMZILLA_HOME/current-source" 2>/dev/null || true)"
+fi
+
+if [[ "$_current_source" == "tokenjuice" ]]; then
+  _tj_profile="$HOME/claude-source/deepseek-claude"
+  _tj_service="$HOME/start-litellm.sh"
+  # Only switch if the Token Juice side is actually installed; otherwise fall
+  # through to Logfare rather than dying on a missing profile.
+  if [[ -r "$_tj_profile" && -x "$_tj_service" ]]; then
+    LITELLM_ENV_FILE="${_env_override:-$_tj_profile}"
+    LITELLM_PORT="${_port_override:-4000}"
+    LITELLM_SERVICE="${_svc_override:-$_tj_service}"
+    LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-tj.log}"
+  fi
+fi
+
 LITELLM_ENV_FILE="${LITELLM_ENV_FILE:-$ZIMZILLA_HOME/logfare/source}"
 LITELLM_PORT="${LITELLM_PORT:-4001}"
 LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"
