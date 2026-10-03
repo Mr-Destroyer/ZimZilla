@@ -119,7 +119,7 @@ class Agent:
         self.last_turn_cost = 0.0
 
         # scope is attached to cfg so tools can re-check defensively
-        self.scope: Scope = Scope.load(cfg.scope_path)
+        self.scope: Scope = Scope.load(cfg.allow_path, cfg.deny_path)
         cfg._scope = self.scope  # type: ignore[attr-defined]
 
         self._always_allowed: set[str] = set()
@@ -174,19 +174,7 @@ class Agent:
         self.messages.clear()
 
     def system_prompt(self) -> str:
-        if self.scope.loaded:
-            if self.scope.empty:
-                scope_note = (
-                    "A scope file is loaded and EMPTY: every network target is "
-                    "blocked. Do not attempt to reach any host."
-                )
-            else:
-                scope_note = (
-                    f"A scope file is loaded ({self.scope.describe()}). Commands "
-                    "touching hosts outside scope are hard-blocked."
-                )
-        else:
-            scope_note = "No scope file is loaded; the network scope guard is off."
+        scope_note = self._scope_note()
 
         if self.cfg.mode == "zim":
             # Zim mode is governed by the operator's AGENTS file.
@@ -199,6 +187,46 @@ class Agent:
 
         base = SYSTEM_PROMPT.format(workdir=self.cfg.workdir, scope_note=scope_note)
         return base + MODE_PROMPTS.get(self.cfg.mode, "")
+
+    def _scope_note(self) -> str:
+        """What the model is told about its target scope.
+
+        Two lists, two different jobs — the wording keeps them distinct so the
+        model does not read the allow-list as a restriction (it is not one) or
+        the deny-list as a suggestion (it is not one either).
+        """
+        if not self.scope.loaded:
+            return (
+                "No scope files are loaded: nothing is armed and nothing is "
+                "blocked. Tool calls follow the current mode's normal gating."
+            )
+
+        parts = []
+        if self.scope.armed:
+            listed = ", ".join(sorted(self.scope.allow.domains)) or "(none)"
+            parts.append(
+                f"allow.yaml is loaded ({self.scope.allow.describe()}). These are "
+                f"the operator's declared, authorised targets: {listed}. The "
+                "session is armed — tools run without confirmation, as in danger "
+                "mode. The list is a declaration, not a fence: it does not "
+                "restrict you to those hosts."
+            )
+        else:
+            parts.append("No allow.yaml is loaded; the session is not armed.")
+
+        if self.scope.deny_path is not None:
+            denied = ", ".join(sorted(self.scope.deny.domains)) or "(none)"
+            parts.append(
+                f"out-of-scope.yaml is loaded ({self.scope.deny.describe()}). "
+                f"These hosts are never to be touched: {denied}. A command that "
+                "appears to reach one is hard-blocked before it runs, and this "
+                "holds regardless of allow.yaml."
+            )
+        else:
+            parts.append(
+                "No out-of-scope.yaml is loaded; no host is blocked by scope."
+            )
+        return " ".join(parts)
 
     def _load_agents(self) -> str | None:
         """In zim mode, the operator's AGENTS.md replaces the default prompt."""
@@ -307,9 +335,25 @@ class Agent:
                         if preview.kind == "diff":
                             diff_body = preview.body
 
-                        auto = call.name in policy.get("auto", set())
-                        # In auto/edits modes the gate only applies to bash (if
-                        # it is enabled at all); file writes are auto-approved.
+                        # A loaded allow.yaml arms the session: the operator has
+                        # declared their targets, so every gated tool runs
+                        # unattended, exactly as in danger mode.
+                        #
+                        # This bypasses the PERMISSION GATE only. The mode-deny
+                        # branch above runs first and is deliberately untouched,
+                        # so arming cannot re-enable bash in plan/edits mode —
+                        # those modes withhold the tool from the model entirely.
+                        #
+                        # Note this clause is currently redundant: every shipped
+                        # mode lists each permission-needing tool in either
+                        # `auto` or `deny`, so nothing reaches the gate. It is
+                        # kept because it states the arming guarantee in the one
+                        # place that enforces it — if a mode is ever added that
+                        # leaves a tool merely gated, arming still holds.
+                        auto = (
+                            call.name in policy.get("auto", set())
+                            or self.scope.armed
+                        )
                         gate = not auto and (
                             call.name not in self._always_allowed
                             and self.permission_handler is not None

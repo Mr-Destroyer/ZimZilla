@@ -1,0 +1,30 @@
+# allow.yaml — the targets you have declared and are authorised to test.
+#
+# Copy to `allow.yaml` next to where you run the harness (or point at it with
+# --allow). ITS PRESENCE ARMS THE SESSION: with this file loaded, gated tools
+# run with no confirmation, exactly as in /mode danger.
+#
+# It is a DECLARATION, not a fence. It does not restrict you to these hosts —
+# nothing here blocks anything. The only thing that blocks is
+# out-of-scope.yaml. Listing your targets here is how the harness knows the
+# engagement is authorised and stops asking.
+#
+# For bug-bounty work this is the file you keep the programme's in-scope
+# assets in, so the transcript and the report can both name what was agreed.
+
+# Domains and subdomains. A listed domain also covers its subdomains.
+domain:
+  - example.com
+  - app.example.com
+  - api.example.org
+
+# Individual IP addresses.
+ip:
+  - 203.0.113.10
+
+# CIDR ranges.
+cidr:
+  - 198.51.100.0/24
+
+# `domains` / `ips` / `cidrs` (plural) and the older `in_scope` / `hosts` /
+# `networks` spellings are all accepted.

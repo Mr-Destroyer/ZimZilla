@@ -155,24 +155,42 @@ def test_web_tools(wd: Path) -> None:
           "color:red" not in websearch.html_to_text(
               "<style>p{color:red}</style><p>kept</p>") )
 
-    # ---- scope guard ------------------------------------------------------
-    def scoped(path: Path):
-        cfg = _cfg(wd)
-        cfg._scope = Scope.load(path)
+    # ---- scope guard (deny-only) ------------------------------------------
+    # In a scratch dir, so these files do not appear in the @-mention popup
+    # test that runs later against the shared workdir.
+    sd = Path(tempfile.mkdtemp())
+
+    def scoped(allow: Path | None = None, deny: Path | None = None):
+        cfg = _cfg(sd)
+        cfg._scope = Scope.load(allow, deny)
         return cfg
 
-    scoped_file = wd / "scope.yaml"
-    scoped_file.write_text("domains:\n  - example.com\n")
-    blocked = tools.execute("web_fetch", {"url": "https://docs.python.org/"}, scoped(scoped_file))
-    check("web_fetch blocks an out-of-scope host",
+    deny_file = sd / "out-of-scope.yaml"
+    deny_file.write_text("domain:\n  - evil.example.com\n")
+    allow_file = sd / "allow.yaml"
+    allow_file.write_text("domain:\n  - example.com\n")
+
+    blocked = tools.execute("web_fetch", {"url": "https://evil.example.com/x"},
+                            scoped(deny=deny_file))
+    check("web_fetch blocks a deny-listed host",
           blocked.is_error and blocked.meta.get("blocked") is True, blocked.output[:60])
 
-    empty_file = wd / "empty.yaml"
-    empty_file.write_text("domains: []\n")
-    ef = tools.execute("web_fetch", {"url": "https://example.com/"}, scoped(empty_file))
-    es = tools.execute("search_web", {"query": "anything"}, scoped(empty_file))
-    check("empty scope blocks web_fetch", ef.is_error and ef.meta.get("blocked") is True)
-    check("empty scope blocks search_web", es.is_error and es.meta.get("blocked") is True)
+    # The allow-list is a declaration, not a fence: an unlisted host is fine.
+    unlisted = tools.execute("web_fetch", {"url": "https://docs.python.org/"},
+                             scoped(allow=allow_file))
+    check("allow.yaml does not block an unlisted host",
+          not unlisted.is_error or unlisted.meta.get("blocked") is not True,
+          unlisted.output[:60])
+
+    # Deny beats allow.
+    both = tools.execute("web_fetch", {"url": "https://evil.example.com/"},
+                         scoped(allow=allow_file, deny=deny_file))
+    check("deny beats allow", both.is_error and both.meta.get("blocked") is True)
+
+    # search_web names no host, so scope never blocks it — even with a deny file.
+    es = tools.execute("search_web", {"query": "anything"}, scoped(deny=deny_file))
+    check("search_web is never blocked by scope",
+          not (es.is_error and es.meta.get("blocked") is True), es.output[:60])
 
     # ---- argument validation (never raises) -------------------------------
     check("search_web rejects an empty query",
@@ -194,7 +212,102 @@ def test_zim_agents(wd: Path) -> None:
     check("zim mode without file falls back", "ZimZilla" in Agent(_cfg(wd, mode="zim")).system_prompt())
 
 
+def test_scope_semantics(wd: Path) -> None:
+    """The allow/deny split: what arms, what blocks, and what neither does.
+
+    Uses its own directory: these files are named allow.yaml / out-of-scope.yaml,
+    which would otherwise show up in the @-mention popup test and displace the
+    fixtures it expects.
+    """
+    with tempfile.TemporaryDirectory() as sd:
+        wd = Path(sd)
+        _scope_semantics(wd)
+
+
+def _scope_semantics(wd: Path) -> None:
+    allow_f = wd / "allow.yaml"
+    allow_f.write_text("domain:\n  - example.com\n  - app.example.org\nip:\n  - 203.0.113.10\n")
+    deny_f = wd / "out-of-scope.yaml"
+    deny_f.write_text("domain:\n  - evil.example.com\ncidr:\n  - 198.51.100.0/24\n")
+
+    # ---- arming -----------------------------------------------------------
+    check("nothing loaded: not armed", not Scope.load(None, None).armed)
+    check("deny alone does NOT arm", not Scope.load(None, deny_f).armed)
+    check("allow.yaml arms the session", Scope.load(allow_f, None).armed)
+    check("armed+deny: still armed", Scope.load(allow_f, deny_f).armed)
+    check("nothing loaded: nothing loaded", not Scope.load(None, None).loaded)
+    check("deny alone counts as loaded", Scope.load(None, deny_f).loaded)
+
+    # ---- membership -------------------------------------------------------
+    s = Scope.load(allow_f, deny_f)
+    check("allow contains a listed domain", s.in_allow("example.com")[0])
+    check("allow contains a subdomain", s.in_allow("api.example.com")[0])
+    check("allow does not contain an unlisted host", not s.in_allow("other.net")[0])
+    check("in_allow is False without an allow file", not Scope.load(None, deny_f).in_allow("example.com")[0])
+
+    # ---- deny enforcement (the only thing that blocks) --------------------
+    check("allows() passes an unlisted host", s.allows("docs.python.org")[0])
+    check("allows() blocks a deny-listed domain", not s.allows("evil.example.com")[0])
+    check("allows() blocks a deny-listed subdomain", not s.allows("a.b.evil.example.com")[0])
+    check("allows() blocks an IP inside a denied CIDR", not s.allows("198.51.100.7")[0])
+    check("allows() passes an IP outside a denied CIDR", s.allows("198.51.101.1")[0])
+    check("deny beats allow", not s.allows("evil.example.com")[0])
+
+    # ---- command scanning is deny-only ------------------------------------
+    check("command to a denied host is refused",
+          bool(s.check_command("curl https://evil.example.com/x")))
+    check("command to an allowed host is NOT refused",
+          not s.check_command("curl https://example.com/x"))
+    check("command to an unlisted host is NOT refused",
+          not s.check_command("curl https://docs.python.org/"))
+    check("command substitution to a network tool is refused",
+          bool(s.check_command("curl https://$(cat target.txt)/")))
+    check("backtick substitution is refused",
+          bool(s.check_command("curl `cat target.txt`")))
+    check("variable-host substitution is refused",
+          bool(s.check_command("curl http://$TARGET/x")))
+    # A literal target alongside a substitution is still checked normally, so
+    # this is NOT refused for being unresolvable — but it IS refused, because
+    # the literal itself is deny-listed. (Proves the guard did not just
+    # fail-open on the substitution.)
+    check("substitution does not excuse a deny-listed literal",
+          bool(s.check_command("curl https://evil.example.com/$(cat t)")))
+    check("no deny file means no command is ever refused",
+          not Scope.load(allow_f, None).check_command("curl https://evil.example.com/"))
+
+    # ---- singular/plural/legacy keys --------------------------------------
+    singular = wd / "singular.yaml"
+    singular.write_text("domain:\n  - one.example.com\nip:\n  - 10.0.0.1\ncidr:\n  - 10.1.0.0/16\n")
+    ss = Scope.load(None, singular)
+    check("singular keys parse", len(ss.deny) == 3, ss.deny.describe())
+    plural = wd / "plural.yaml"
+    plural.write_text("domains:\n  - two.example.com\nips:\n  - 10.0.0.2\ncidrs:\n  - 10.2.0.0/16\n")
+    check("plural keys parse", len(Scope.load(None, plural).deny) == 3)
+    legacy = wd / "legacy.yaml"
+    legacy.write_text("in_scope:\n  - three.example.com\nhosts:\n  - 10.0.0.3\nnetworks:\n  - 10.3.0.0/16\n")
+    check("legacy keys still parse", len(Scope.load(None, legacy).deny) == 3)
+
+    # ---- presentation -----------------------------------------------------
+    check("badge reports armed+deny", s.badge() == "ARMED + deny 2", s.badge())
+    check("badge reports armed alone", Scope.load(allow_f, None).badge() == "ARMED")
+    check("badge reports deny alone", Scope.load(None, deny_f).badge() == "deny 2")
+    check("badge reports off", Scope.load(None, None).badge() == "off")
+
+    # ---- the agent's prompt tells the truth about both files --------------
+    prompt = Agent(_cfg(wd, allow_path=allow_f, deny_path=deny_f)).system_prompt()
+    check("prompt says the session is armed", "armed" in prompt.lower())
+    check("prompt says the allow-list is not a fence",
+          "not a fence" in prompt or "does not restrict" in prompt)
+    check("prompt names the deny list as hard-blocked", "never to be touched" in prompt)
+    unarmed = Agent(_cfg(wd)).system_prompt()
+    check("prompt says nothing is loaded when nothing is",
+          "No scope files are loaded" in unarmed)
+
+
 async def test_mode_gating(wd: Path) -> None:
+    # No shipped mode leaves bash merely gated: `auto`/`zim`/`danger` list it in
+    # their `auto` set, `edits`/`plan` deny it outright. So `gated` is False
+    # everywhere, and the observable difference is whether bash RUNS.
     expected = {"auto": (False, True), "edits": (False, False),
                 "plan": (False, False), "zim": (False, True),
                 "danger": (False, True)}
@@ -207,6 +320,24 @@ async def test_mode_gating(wd: Path) -> None:
         ran = "ZIMMODE_OK" in out
         check(f"{mode}: bash gated={exp_gated}", gated == exp_gated)
         check(f"{mode}: bash ran={exp_ran}", ran == exp_ran)
+
+    # The ordering constraint: arming bypasses the PERMISSION GATE only. The
+    # mode-deny branch runs first, so allow.yaml must NOT re-enable bash in
+    # plan or edits mode — those modes withhold the tool from the model.
+    allow_f = Path(tempfile.mkdtemp()) / "allow.yaml"
+    allow_f.write_text("domain:\n  - example.com\n")
+    for mode in ("plan", "edits"):
+        agent, calls = _stub_agent(mode, wd)
+        agent.cfg.allow_path = allow_f
+        agent.scope = Scope.load(allow_f, None)
+        agent.cfg._scope = agent.scope
+        events = [ev async for ev in agent.run_turn("do it")]
+        results = [e for e in events if e["type"] == "tool_result"]
+        out = results[0]["output"] if results else ""
+        check(f"{mode}: armed does NOT re-enable denied bash", "ZIMMODE_OK" not in out,
+              out[:50])
+        check(f"{mode}: armed bash is still mode-denied",
+              bool(results) and results[0].get("meta", {}).get("mode_denied") is True)
 
 
 async def test_ui(wd: Path) -> None:
@@ -275,6 +406,7 @@ async def main() -> int:
         test_mode_tools(wd)
         test_web_tools(wd)
         test_zim_agents(wd)
+        test_scope_semantics(wd)
         await test_mode_gating(wd)
         await test_ui(wd)
 

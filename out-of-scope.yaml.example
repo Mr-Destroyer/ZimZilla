@@ -1,0 +1,29 @@
+# out-of-scope.yaml — hosts that are never to be touched.
+#
+# Copy to `out-of-scope.yaml` next to where you run the harness (or point at it
+# with --deny). This list is ENFORCED: a bash command that appears to reach one
+# of these hosts is hard-blocked before it runs, and web_fetch to one is
+# refused. Deny beats allow — a host in both files is blocked.
+#
+# Unlike allow.yaml, this file does NOT arm anything. Loading it alone leaves
+# normal mode gating in place; it only subtracts.
+#
+# Typical use: the programme's explicit exclusions — third-party services,
+# shared infrastructure, anything the rules forbid testing.
+
+domain:
+  - out-of-scope.example.com
+  - third-party-cdn.example.net
+
+ip:
+  - 192.0.2.66
+
+cidr:
+  - 203.0.113.128/25
+
+# HONEST LIMIT — this is a static text scan of the command line, not a
+# sandbox. It matches hostnames and IPs it can see in the text. It does not
+# follow redirects, resolve DNS, or understand indirection, so a target built
+# at runtime (`python3 -c`, `$(...)`, backticks, base64) or reached through an
+# unlisted redirect is not detected. Treat it as a guard-rail that catches the
+# obvious mistake, not as a boundary that cannot be crossed.

@@ -22,7 +22,7 @@ DEFAULT_MODEL = "deepseek-v4.1-flash"
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
-#   auto   file writes/edits are auto-approved; bash still asks.
+#   auto   every tool auto-approved, bash included.
 #   edits  like auto, but bash is disabled entirely (editing-only session).
 #   plan   read-only: no tool may change anything; the model plans instead.
 #   zim    full auto — every tool runs without asking, and the system prompt is
@@ -35,8 +35,10 @@ DEFAULT_MODEL = "deepseek-v4.1-flash"
 #          model's tool list, and refused if called anyway
 #   loud   the "armed" state: shown in red in the header and the mode list
 #
-# Only the file-write tools need permission at all (see tools.needs_permission),
-# so `auto` is what decides whether bash asks.
+# As shipped, every mode lists each permission-needing tool (bash, write_file,
+# edit_file — see tools.GATED_TOOLS) in either `auto` or `deny`, so the
+# permission gate never actually fires. A mode that omits a tool from both sets
+# would leave it gated: previewed, then answered y/n/a.
 MODES: dict[str, dict] = {
     "auto": {
         "label": "AUTO",
@@ -145,7 +147,15 @@ class Config:
     model: str = DEFAULT_MODEL
     workdir: Path = field(default_factory=Path.cwd)
     unsafe: bool = False
-    scope_path: Path | None = None
+    # Target scope. `allow_path` is the operator's declared, authorised targets
+    # and its PRESENCE arms the session (tools run unattended); `deny_path` is
+    # the never-touch list. See zimzilla/scope.py.
+    allow_path: Path | None = None
+    deny_path: Path | None = None
+    #: A leftover scope.yaml, detected but deliberately NOT read — the old file
+    #: was an allow-list that also blocked, so reading it as a deny-list would
+    #: block the very hosts it declared. Kept only so the UI can say so.
+    legacy_scope_path: Path | None = None
     max_tokens: int = 8192
     temperature: float = 0.0
     max_iterations: int = 40

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL
+from .scope import find_legacy_scope
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,7 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", "-m", default=None, help=f"model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--workdir", "-C", default=None, help="working directory (default: cwd)")
-    parser.add_argument("--scope", default=None, help="path to a scope.yaml (enables the scope guard)")
+    parser.add_argument("--allow", default=None,
+                        help="path to allow.yaml — declared targets; its presence runs tools unattended")
+    parser.add_argument("--deny", default=None,
+                        help="path to out-of-scope.yaml — hosts that are never touched")
+    parser.add_argument("--scope", default=None,
+                        help="DEPRECATED — replaced by --allow / --deny; ignored with a warning")
     parser.add_argument("--unsafe", action="store_true",
                         help="disable the filesystem sandbox (paths may escape the workdir)")
     parser.add_argument("--theme", default=None, choices=["green", "amber", "cyan"],
@@ -48,20 +54,31 @@ def main(argv: list[str] | None = None) -> int:
 
     workdir = Path(args.workdir).expanduser() if args.workdir else Path.cwd()
 
-    scope_path = None
+    # Target scope: two files with one job each. allow.yaml arms the session
+    # (its presence means the operator has declared their targets, so tools run
+    # unattended); out-of-scope.yaml is the never-touch list. Each is looked for
+    # in the working directory first, then in ~/.zimzilla.
+    def _find(explicit: str | None, names: tuple[str, ...]) -> Path | None:
+        if explicit:
+            return Path(explicit).expanduser()
+        for base in (workdir, Path.home() / ".zimzilla"):
+            for name in names:
+                candidate = Path(base) / name
+                if candidate.exists():
+                    return candidate
+        return None
+
+    allow_path = _find(args.allow, ("allow.yaml", "allow.yml"))
+    deny_path = _find(args.deny, ("out-of-scope.yaml", "out-of-scope.yml"))
+
+    # A leftover scope.yaml is never read: the old file was an allow-list that
+    # also blocked, so reinterpreting it as a deny-list would block the very
+    # hosts the operator had declared. Report it instead of acting on it.
+    legacy_scope = None
     if args.scope:
-        scope_path = Path(args.scope).expanduser()
+        legacy_scope = Path(args.scope).expanduser()
     else:
-        # Auto-discover ./scope.yaml or ./scope.yml in the working directory.
-        for candidate in ("scope.yaml", "scope.yml"):
-            p = Path(workdir) / candidate
-            if p.exists():
-                scope_path = p
-                break
-        if scope_path is None:
-            home_scope = Path.home() / ".zimzilla" / "scope.yaml"
-            if home_scope.exists():
-                scope_path = home_scope
+        legacy_scope = find_legacy_scope(workdir, Path.home())
 
     # Zim mode follows the operator's AGENTS.md. Default location: the working
     # directory, then its parent, then ~.
@@ -83,7 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg = Config.from_env(
         model=args.model,
         workdir=workdir,
-        scope_path=scope_path,
+        allow_path=allow_path,
+        deny_path=deny_path,
+        legacy_scope_path=legacy_scope,
         unsafe=args.unsafe or None,
         theme=args.theme,
         max_tokens=args.max_tokens,
@@ -92,6 +111,22 @@ def main(argv: list[str] | None = None) -> int:
         rain=True if args.rain else None,
         boot_rain=False if args.no_rain else None,
     )
+
+    # The split is not silent. A stale scope.yaml would otherwise leave the
+    # operator believing the guard is armed when nothing is loaded at all —
+    # and the old file's meaning cannot be carried over, because an allow-list
+    # read as a deny-list would block exactly the hosts that were declared.
+    if legacy_scope is not None and legacy_scope.exists():
+        print(
+            f"zimzilla: {legacy_scope} is no longer read — the scope guard was "
+            "split into two files:\n"
+            "  allow.yaml          declared targets; its presence runs tools "
+            "unattended\n"
+            "  out-of-scope.yaml   hosts that are never touched\n"
+            "  Nothing is armed or blocked right now. Rename the file to one of "
+            "those to re-enable it.",
+            file=sys.stderr,
+        )
 
     if not cfg.workdir.exists():
         print(f"zimzilla: working directory does not exist: {cfg.workdir}", file=sys.stderr)

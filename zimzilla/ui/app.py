@@ -223,10 +223,28 @@ class ZimZillaApp(App):
             ("MODEL", cfg.model, True),
             ("CWD", str(cfg.workdir), True),
         ]
-        if self.agent.scope.loaded:
-            checks.append(("SCOPE", self.agent.scope.describe(), not self.agent.scope.empty))
+        scope = self.agent.scope
+        if scope.armed:
+            checks.append((
+                "ALLOW.YAML",
+                f"{scope.allow.describe()} — session ARMED, tools run unattended",
+                True,
+            ))
         else:
-            checks.append(("SCOPE", "not loaded — guard off", True))
+            checks.append(("ALLOW.YAML", "not loaded — session not armed", True))
+        if scope.deny_path is not None:
+            checks.append(("OUT-OF-SCOPE", f"{scope.deny.describe()} — blocked", True))
+        else:
+            checks.append(("OUT-OF-SCOPE", "not loaded — nothing blocked", True))
+        # A stale scope.yaml is the one genuinely alarming state: the operator
+        # may believe a guard is armed when nothing at all is loaded.
+        if cfg.legacy_scope_path is not None:
+            checks.append((
+                "SCOPE.YAML",
+                f"{cfg.legacy_scope_path} ignored — split into allow.yaml / "
+                "out-of-scope.yaml; nothing is armed",
+                False,
+            ))
         checks.append(("SANDBOX", "DISABLED (--unsafe)" if cfg.unsafe else "enabled", not cfg.unsafe))
         checks.append((
             "TOOLS",
@@ -246,10 +264,20 @@ class ZimZillaApp(App):
         bar.model = self.cfg.model
         bar.render_bar()
         self.query_one(HeaderBar).set_scope(
-            self.agent.scope.describe(),
-            (not self.agent.scope.empty) if self.agent.scope.loaded else True,
+            self.agent.scope.badge(),
+            self.agent.scope.armed,
         )
         self._splash()
+        # The split is a deliberate weakening on upgrade, so it is said out
+        # loud in the transcript too — not just the boot checks, which scroll
+        # away the moment the first prompt is typed.
+        if self.cfg.legacy_scope_path is not None:
+            self._sys_line(
+                f"{self.cfg.legacy_scope_path} is ignored — the scope guard was "
+                "split into allow.yaml (declared targets, arms the session) and "
+                "out-of-scope.yaml (never touch). Nothing is armed or blocked.",
+                warn=True,
+            )
         inp = self.query_one("#input", Input)
         # Replay anything the user typed while the boot animation was running.
         text = "".join(typed or [])
@@ -619,7 +647,7 @@ class ZimZillaApp(App):
             ("/clear", "wipe the transcript and conversation history"),
             ("/model [name]", "show or switch the model"),
             ("/cost", "session token and cost breakdown"),
-            ("/scope", "show scope guard status and entries"),
+            ("/scope", "show allow.yaml / out-of-scope.yaml status"),
             ("/rain", "toggle the matrix-rain background"),
             ("/theme green|amber|cyan", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
@@ -774,24 +802,54 @@ class ZimZillaApp(App):
         s = self.agent.scope
         t = Text()
         t.append("  SCOPE GUARD\n\n", style=f"bold {p.accent}")
-        t.append(f"  {'file':<14}", style=p.dim)
-        t.append(f"{s.path if s.path else '(none)'}\n", style=p.primary)
-        t.append(f"  {'status':<14}", style=p.dim)
-        if not s.loaded:
-            t.append("inactive — no scope file\n", style=p.amber)
-        elif s.empty:
-            t.append("EMPTY — all network targets blocked\n", style=f"bold {p.red}")
+
+        if self.cfg.legacy_scope_path is not None:
+            t.append("  ⚠ ", style=f"bold {p.amber}")
+            t.append(f"{self.cfg.legacy_scope_path} is ignored\n", style=p.amber)
+            t.append(
+                "    the guard was split into allow.yaml / out-of-scope.yaml\n\n",
+                style=p.dim,
+            )
+
+        def listing(title: str, path, hosts) -> None:
+            t.append(f"  {title}\n", style=f"bold {p.accent}")
+            t.append(f"    {'file':<10}", style=p.dim)
+            t.append(f"{path if path else '(not found)'}\n", style=p.primary)
+            if path is None:
+                return
+            for label, values in (
+                ("domains", sorted(hosts.domains)),
+                ("ips", sorted(hosts.ips)),
+                ("cidrs", sorted(str(c) for c in hosts.cidrs)),
+            ):
+                if values:
+                    t.append(f"    {label:<10}", style=p.dim)
+                    t.append(", ".join(values) + "\n", style=p.primary)
+            if hosts.empty:
+                t.append(f"    {'entries':<10}", style=p.dim)
+                t.append("(none)\n", style=p.amber)
+            t.append("\n")
+
+        t.append(f"  {'status':<12}", style=p.dim)
+        if s.armed:
+            t.append("ARMED", style=f"bold white on {p.red}")
+            t.append(" — tools run unattended\n\n", style=p.primary)
         else:
-            t.append("enforcing\n", style=f"bold {p.accent}")
-        if s.domains:
-            t.append(f"  {'domains':<14}", style=p.dim)
-            t.append(", ".join(sorted(s.domains)) + "\n", style=p.primary)
-        if s.ips:
-            t.append(f"  {'ips':<14}", style=p.dim)
-            t.append(", ".join(sorted(s.ips)) + "\n", style=p.primary)
-        if s.cidrs:
-            t.append(f"  {'cidrs':<14}", style=p.dim)
-            t.append(", ".join(str(c) for c in s.cidrs) + "\n", style=p.primary)
+            t.append("not armed", style=p.amber)
+            t.append(" — normal mode gating applies\n\n", style=p.dim)
+
+        listing("ALLOW  (declared targets — a declaration, not a fence)",
+                s.allow_path, s.allow)
+        listing("DENY   (never touched — enforced, beats allow)",
+                s.deny_path, s.deny)
+
+        t.append(
+            "  Allow-list hosts are not restricted to: anything not in\n"
+            "  out-of-scope.yaml is reachable. The deny-list is a static text\n"
+            "  scan of the command, so obfuscated or runtime-built targets\n"
+            "  (python3 -c, $(), encoded hosts) are not detected.\n",
+            style=p.dim,
+        )
         self.query_one(ChatPane).write_block(t)
 
     def _set_rain(self, active: bool) -> None:

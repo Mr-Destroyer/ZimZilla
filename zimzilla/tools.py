@@ -36,8 +36,7 @@ TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Run a shell command in the working directory. Returns combined "
             "stdout/stderr and the exit code. Use for builds, tests and git. "
-            "Commands touching out-of-scope hosts are blocked when a scope "
-            "file is loaded."
+            "Commands touching a host listed in out-of-scope.yaml are blocked."
         ),
         "input_schema": {
             "type": "object",
@@ -159,8 +158,8 @@ TOOL_SCHEMAS: list[dict] = [
         "name": "web_fetch",
         "description": (
             "Fetch a URL and return its readable text. Use it to read a page "
-            "found with search_web, or any documentation URL. Out-of-scope "
-            "hosts are blocked when a scope file is loaded."
+            "found with search_web, or any documentation URL. Hosts listed in "
+            "out-of-scope.yaml are blocked."
         ),
         "input_schema": {
             "type": "object",
@@ -584,16 +583,9 @@ def _tool_web_search(args: dict, cfg) -> ToolResult:
         return ToolResult("max_results must be an integer", is_error=True)
     max_results = max(1, min(max_results, 20))
 
-    # An empty scope file authorises nothing, including egress to the engine.
-    scope = _scope_of(cfg)
-    if scope is not None and scope.empty:
-        return ToolResult(
-            "BLOCKED by scope guard — the scope file is empty, so no network "
-            "egress is authorised.",
-            is_error=True,
-            meta={"blocked": True},
-        )
-
+    # No scope check here: a search query names no host, and the scope guard
+    # only ever blocks named hosts. The engine itself is the operator's own
+    # choice of endpoint, not a target.
     try:
         results = _web_search(query, max_results=max_results)
     except WebError as e:
@@ -627,17 +619,11 @@ def _tool_web_fetch(args: dict, cfg) -> ToolResult:
         return ToolResult("max_chars must be an integer", is_error=True)
     max_chars = max(200, min(max_chars, cfg.max_output_chars))
 
-    # Fetching a URL is reaching a host, so it answers to the scope guard.
+    # Fetching a URL is reaching a host, so it answers to the deny-list. The
+    # allow-list is a declaration and never blocks, so it is not consulted.
     scope = _scope_of(cfg)
     if scope is not None:
         host = _host_of(url)
-        if scope.empty:
-            return ToolResult(
-                "BLOCKED by scope guard — the scope file is empty, so no host "
-                "is authorised.",
-                is_error=True,
-                meta={"blocked": True},
-            )
         allowed, reason = scope.allows(host)
         if not allowed:
             return ToolResult(

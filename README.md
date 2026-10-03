@@ -2,7 +2,7 @@
 
 An autonomous coding agent in the terminal — a green-on-black hacker TUI that
 streams model output token by token, runs sandboxed tools behind a permission
-gate, and enforces an optional network scope file for bug-bounty work.
+gate, and enforces an optional target scope for bug-bounty work.
 
 > **Identity.** ZimZilla is created by **ZIM (Mr-Destroyer)** and answers as
 > ZimZilla — not as "Claude" or any underlying vendor model. The model string
@@ -48,7 +48,8 @@ Then, from any directory:
 zimzilla                        # starts the proxy if it is down, then launches
 zimzilla -C ~/some/project      # run against another directory
 zimzilla --mode zim             # full auto, follows AGENTS.md
-zimzilla --scope scope.yaml     # enable the network scope guard
+zimzilla --allow allow.yaml     # declare your targets (arms the session)
+zimzilla --deny out-of-scope.yaml  # hosts that are never touched
 zimzilla --unsafe               # disable the filesystem jail (careful)
 ```
 
@@ -95,7 +96,8 @@ setup.sh                      Logfare credential + proxy start + route check
 run.sh                        run from the checkout without installing
 requirements.txt
 pyproject.toml
-scope.yaml.example            template scope file
+allow.yaml.example            template: declared targets (arms the session)
+out-of-scope.yaml.example     template: hosts that are never touched
 
 zimzilla/                     the Python package (the agent + TUI)
   agent.py                    the tool-use loop and mode doctrine
@@ -121,7 +123,7 @@ zimzilla/
   agent.py                    streaming loop, retry/backoff, accounting
   tools.py                    the seven tools + schemas + previews
   sandbox.py                  path jail
-  scope.py                    network scope guard
+  scope.py                    target scope: allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   ui/
     app.py                    main Textual app + slash commands
@@ -257,34 +259,64 @@ the jail. `--unsafe` disables the jail.
 before returning it (or reading its contents).
 
 `bash` runs with the working directory as its `cwd`, but a shell can by nature
-reach absolute paths; that is why **bash is always gated** — you see and approve
-every command. File *reads/writes* remain jailed regardless.
+reach absolute paths. The filesystem jail cannot bound it, so it is bounded
+instead by the mode and the scope guard: `edits` and `plan` withhold `bash`
+entirely, and every shipped mode either auto-approves it or denies it — see
+[Scope](#scope-bug-bounty). File *reads/writes* remain jailed regardless.
 
-### Scope guard (bug bounty)
+### Scope (bug bounty)
 
-Drop a `scope.yaml` in the working directory (or pass `--scope`). Any bash
-command that appears to reach a host outside the allow-list is **hard-blocked
-before it runs**:
+Two files, one job each. Both are found automatically in the working directory
+(or `~/.zimzilla`), or pointed at with `--allow` / `--deny`.
 
-```
-⛔ BLOCKED — SCOPE GUARD — HARD BLOCK
-   evil-corp.com — host not in scope
-```
+**`allow.yaml` — your declared targets.** Its presence **arms the session**:
+gated tools run with no confirmation, exactly as in `/mode danger`. It is a
+*declaration, not a fence* — it does not restrict you to those hosts, and it
+blocks nothing. Listing your targets is how the harness knows the engagement is
+authorised and stops asking.
 
 ```yaml
-domains:            # a domain also authorises its subdomains
+domain:            # a domain also covers its subdomains
   - example.com
-ips:
+ip:
   - 203.0.113.10
-cidrs:
+cidr:
   - 198.51.100.0/24
 ```
 
-Rules:
+**`out-of-scope.yaml` — never touch.** This one is *enforced*. A bash command
+that appears to reach one of these hosts is **hard-blocked before it runs**, and
+`web_fetch` to one is refused:
 
-- **No scope file** → guard off (ordinary coding session).
-- **Empty scope file** → *nothing* is authorised; all network targets blocked.
-- **Populated** → only listed hosts are reachable.
+```
+⛔ BLOCKED — SCOPE GUARD — HARD BLOCK
+   out-of-scope.example.com — denied — listed domain
+```
+
+```yaml
+domain:
+  - out-of-scope.example.com
+```
+
+Deny beats allow: a host in both files is blocked. Loading only
+`out-of-scope.yaml` does **not** arm anything — it only subtracts.
+
+#### What this is and is not
+
+Stated plainly, because the difference matters:
+
+- The allow-list is an **arming mechanism, not a safety control**. With it
+  loaded, the only thing standing between the agent and an arbitrary host is
+  `out-of-scope.yaml`. (In `danger` and `zim` modes that was already true —
+  they auto-approve everything — so this does not weaken the shipped posture,
+  but it should not be mistaken for a boundary either.)
+- The deny-list is a **static text scan of the command line, not a sandbox**.
+  It does not follow redirects, resolve DNS, or understand indirection.
+  A target built at runtime (`python3 -c`, `$(…)`, backticks, base64) or
+  reached through an unlisted redirect is **not detected**. It catches the
+  obvious mistake; it does not stop a determined command.
+
+#### Detection
 
 The detector recognises URLs, `host:port`, IPs, CIDRs and bare hostnames, and
 understands tool prefixes (`sudo nmap …`, `FOO=bar curl …`). To avoid punishing
@@ -292,14 +324,21 @@ normal work, a bare dotted token is only treated as a host when the command runs
 a known network tool or the TLD is unambiguously a domain — so `cat report.json`
 is never mistaken for a target. `localhost` is always allowed (the proxy).
 
-Hardening notes:
-
 - A trailing-dot FQDN (`evil.com.`) is recognised as the same host as
   `evil.com`, so it cannot slip past the guard.
 - A network command containing **runtime command substitution** (`$(…)` or
   backticks) builds a target the token scan cannot see; such a command is
   blocked as unresolvable rather than allowed. Literal targets are still
   checked normally.
+
+#### Upgrading from `scope.yaml`
+
+`scope.yaml` is **no longer read**. It was one file doing three jobs at once
+(allow-list, block-list, on/off switch), and its meaning cannot be carried over
+safely: the old file was an allow-list that also blocked, so reading it as a
+deny-list would block exactly the hosts it declared. A stale `scope.yaml` is
+reported loudly — at startup and in the boot checks — and then ignored. Rename
+it to `allow.yaml` or `out-of-scope.yaml` to re-enable it.
 
 ---
 
@@ -312,7 +351,7 @@ Hardening notes:
 | `/clear` | wipe transcript and history |
 | `/model [name]` | show or switch the model |
 | `/cost` | session token + cost breakdown |
-| `/scope` | scope guard status and entries |
+| `/scope` | allow.yaml / out-of-scope.yaml status and entries |
 | `/rain` | toggle matrix rain |
 | `/theme green\|amber\|cyan` | switch palette |
 | `/save [name]` | write session to `~/.zimzilla/sessions/` |
@@ -343,7 +382,8 @@ as an estimate.
 ```
 --model, -m NAME     model to use
 --workdir, -C DIR    working directory
---scope PATH         scope.yaml
+--allow PATH         allow.yaml — declared targets; its presence arms the session
+--deny PATH          out-of-scope.yaml — hosts that are never touched
 --unsafe             disable the filesystem jail
 --theme {green,amber,cyan}
 --rain               start with rain on in the shell (off by default)

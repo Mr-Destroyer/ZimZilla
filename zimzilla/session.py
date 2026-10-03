@@ -36,7 +36,9 @@ def save(cfg, agent, name: str | None = None) -> Path:
         "base_url": cfg.base_url,
         "workdir": str(cfg.workdir),
         "unsafe": cfg.unsafe,
-        "scope_path": str(cfg.scope_path) if cfg.scope_path else None,
+        "allow_path": str(cfg.allow_path) if cfg.allow_path else None,
+        "deny_path": str(cfg.deny_path) if cfg.deny_path else None,
+        "scope_armed": agent.scope.armed,
         "scope_loaded": agent.scope.loaded,
         "tokens": {
             "input": agent.session_input_tokens,
