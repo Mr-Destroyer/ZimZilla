@@ -1,279 +1,193 @@
-# ZIMZILLA
+<div align="center">
 
-An autonomous coding agent in the terminal — a green-on-black hacker TUI that
-streams model output token by token, runs sandboxed tools behind a permission
-gate, and enforces an optional target scope for bug-bounty work.
+<img src="docs/hero.svg" alt="ZIMZILLA" width="820">
 
-> **Identity.** ZimZilla is created by **ZIM (Mr-Destroyer)** and answers as
-> ZimZilla — not as "Claude" or any underlying vendor model. The model string
-> is the engine; the harness is the product.
+**An autonomous coding agent that lives in your terminal.**
 
-It speaks the **Anthropic Messages API** (`/v1/messages`) directly, so it points
-at whatever `ANTHROPIC_BASE_URL` you give it. On this box that is the local
-LiteLLM → Logfare proxy on `:4001`, default model **`deepseek-v4.1-flash`**.
+It reads your repo, runs commands, writes files, chases down bugs and
+keeps going until the job is done — while you watch it work.
 
-```
-zimzilla  ──▶  Anthropic Messages API  ──▶  local LiteLLM :4001  ──▶  Logfare
-```
+<sub>by **Mr-Destroyer / ZIM**</sub>
+
+![python](https://img.shields.io/badge/python-3.11%2B-00ff41?style=flat-square&labelColor=040704)
+![platform](https://img.shields.io/badge/platform-linux-00ff41?style=flat-square&labelColor=040704)
+![interface](https://img.shields.io/badge/interface-terminal-00ff41?style=flat-square&labelColor=040704)
+![status](https://img.shields.io/badge/status-active-00ff41?style=flat-square&labelColor=040704)
+
+</div>
+
+<img src="docs/terminal.svg" alt="a ZIMZILLA session" width="900">
+
+---
+
+## See it
+
+<div align="center">
+
+### Cold start
+
+<img src="docs/screenshots/01-boot.png" alt="ZIMZILLA boot screen — ASCII banner, system check, shell ready" width="880">
+
+*Banner reveal, a live system check, then the shell takes over.*
+
+### The shell
+
+<img src="docs/screenshots/02-shell.png" alt="the ZIMZILLA shell — header badges, transcript, activity pane, status bar" width="880">
+
+*A transcript that streams, a header that tells you where you are,
+a status bar that tells you what it cost.*
+
+<table>
+<tr>
+<td width="50%">
+
+<img src="docs/screenshots/03-models.png" alt="switching models at runtime">
+
+**Swap engines mid-session.**<br>
+<sub>Prices in, prices out. No restart, no lost context.</sub>
+
+</td>
+<td width="50%">
+
+<img src="docs/screenshots/04-modes.png" alt="the mode list">
+
+**Change how much rope it gets.**<br>
+<sub>From read-only spectator to full send.</sub>
+
+</td>
+</tr>
+</table>
+
+</div>
+
+---
+
+## What it does
+
+ZIMZILLA is a coding agent you drive from a terminal. You describe what you
+want; it works out the steps, does them, and shows you everything it did.
+
+- **Talks, then acts.** Ask a question and it answers. Ask for a change and it
+  makes the change — reading files, running commands, editing code.
+- **Sees your project.** Point it at any directory and it works there: it can
+  read, search, and reason across the whole tree.
+- **Runs real commands.** A full shell, wired straight into the loop, with
+  output captured and shown inline.
+- **Edits like a human.** Changes arrive as diffs you can read before they land.
+- **Shows its work.** Every command, every file touched, every result — visible
+  in the transcript as it happens, not buried in a log.
+- **Keeps score.** Live token counts and a running cost estimate, per turn and
+  per session.
+- **Answers to a dial.** A mode switch decides whether it merely investigates,
+  edits freely, or runs everything unattended.
+- **Stays in bounds.** An optional scope file declares what it may touch, and a
+  second declares what it must never go near.
+- **Remembers the session.** Save it, load it, compact it when the context
+  gets heavy.
+- **Looks the part.** A green-on-black terminal, animated from boot to prompt.
 
 ---
 
 ## Install
 
-Two commands, then it works from anywhere:
-
 ```bash
 git clone <this-repo> ~/zimzilla && cd ~/zimzilla
-./install.sh        # venv, dependencies, the LiteLLM proxy, a `zimzilla` command on PATH
-./setup.sh          # start the proxy + verify the route
+./install.sh        # venv, dependencies, a `zimzilla` command on PATH
+./setup.sh          # verify the route end-to-end
 ```
-
-The Logfare key ships in the repo at `packaging/logfare/source`, so a fresh
-clone needs no prompting. `install.sh` copies it to
-`~/.zimzilla/logfare/source` with mode 600; `setup.sh` starts the proxy and
-proves the route with a live request.
-
-> ⚠️ **This repo contains a live credential.** It is a shared key for a private
-> team — a deliberate trade of zero setup friction for the key being in the
-> tree. Keep the repo private, and rotate the key at
-> <https://logfare.ai> if it is ever published.
-
-To use a different key, edit `packaging/logfare/source` or run `./setup.sh` and
-paste one when prompted. An existing `~/.zimzilla/logfare/source` is never
-overwritten, so a per-machine key survives re-installs.
 
 Then, from any directory:
 
 ```bash
-zimzilla                        # starts the proxy if it is down, then launches
-zimzilla -C ~/some/project      # run against another directory
-zimzilla --mode zim             # full auto, follows AGENTS.md
-zimzilla --allow allow.yaml     # declare your targets (arms the session)
+zimzilla                           # launch
+zimzilla -C ~/some/project         # run against another directory
+zimzilla --mode zim                # full auto, follows AGENTS.md
+zimzilla --allow allow.yaml        # declare your targets
 zimzilla --deny out-of-scope.yaml  # hosts that are never touched
-zimzilla --unsafe               # disable the filesystem jail (careful)
 ```
 
-### What goes where
-
-| Path | Contents |
-|---|---|
-| `packaging/logfare/source` | the shipped credential profile (committed) |
-| `~/.zimzilla/logfare/source` | the active profile (mode 600, never overwritten) |
-| `~/.zimzilla/logfare/litellm-config.yaml` | proxy config — every Logfare model |
-| `~/.zimzilla/logfare/start-litellm.sh` | proxy manager (`start`/`stop`/`status`/`logs`) |
-| `~/.local/bin/zimzilla` | launcher shim pointing at the checkout |
-
-Manage the proxy directly with
-`~/.zimzilla/logfare/start-litellm.sh {status|stop|restart|logs}`.
-
-### Pointing at something else
-
-The harness speaks the Anthropic Messages API, so it is not tied to Logfare.
-Set `ANTHROPIC_BASE_URL` (and `ANTHROPIC_API_KEY`) and skip the proxy entirely
-with `ZIMZILLA_NO_PROXY=1`. Any endpoint offering `/v1/messages` works.
-
-### Troubleshooting the install
-
-- **`zimzilla: command not found`** — `~/.local/bin` is not on your PATH.
-  `install.sh` adds it to `~/.bashrc`/`~/.zshrc` if it can; otherwise add
-  `export PATH="$HOME/.local/bin:$PATH"` yourself and open a new shell.
-- **`profile not found … Refusing to run`** — deliberate. Without the profile
-  the harness would silently use whatever `ANTHROPIC_*` your shell already
-  exports, which is how you end up talking to the wrong provider. Run
-  `./setup.sh`, or set `ZIMZILLA_NO_PROXY=1` to use a direct endpoint.
-- **A proxy is already running on :4001** — reused, not fought over. `setup.sh`
-  and the launcher both detect a healthy port and leave it alone.
-- **`litellm not found`** — `./install.sh` installs it into the harness venv;
-  re-run it once you have network access.
+Prefer not to install? `./run.sh` starts it straight from the checkout.
 
 ---
 
-## Layout
+## Usage
 
 ```
-install.sh                    venv + deps + proxy + PATH command
-setup.sh                      Logfare credential + proxy start + route check
-run.sh                        run from the checkout without installing
-requirements.txt
-pyproject.toml
-allow.yaml.example            template: declared targets (arms the session)
-out-of-scope.yaml.example     template: hosts that are never touched
-
-zimzilla/                     the Python package (the agent + TUI)
-  agent.py                    the tool-use loop and mode doctrine
-  config.py                   modes, defaults, environment plumbing
-  tools.py                    bash / file / search tools
-  ui/
-    app.py                    the Textual app
-    boot.py                   boot screen (banner + system check + credits)
-    banner.py                 the ZIMZILLA ASCII font
-    widgets.py                header, chat pane, status bar
-
-packaging/
-  zimzilla                    the launcher, as installed
-  logfare/
-    litellm-config.yaml       proxy config — every Logfare model
-    start-litellm.sh          proxy manager (start/stop/status/logs)
-    source.example            credential profile template
-
-zimzilla/
-  __main__.py                 CLI entrypoint (argparse)
-  config.py                   config, model registry, pricing
-  theme.py                     green / amber / cyan palettes
-  agent.py                    streaming loop, retry/backoff, accounting
-  tools.py                    the seven tools + schemas + previews
-  sandbox.py                  path jail
-  scope.py                    target scope: allow.yaml / out-of-scope.yaml
-  session.py                  save / load / list
-  ui/
-    app.py                    main Textual app + slash commands
-    boot.py                   boot screen (banner reveal + system check)
-    banner.py                 5x6 block font
-    complete.py               slash-command + @file completion popup
-    rain.py                   matrix rain (canvas model + rain-aware log)
-    renderers.py              tool panels, diffs, syntax theme
-    widgets.py                header, chat, activity, status bar
-
-tests/
-  test_phase4.py              identity, modes, zim/AGENTS.md, popup, @mentions
+--model, -m NAME     model to use
+--workdir, -C DIR    working directory
+--mode NAME          auto | edits | plan | zim | danger   (default: auto)
+--allow PATH         declared targets — arms the session
+--deny PATH          hosts that are never touched
+--agents PATH        the doctrine file `zim` mode follows
+--theme {green,amber,cyan}
+--rain               start with matrix rain on
+--no-rain            no rain anywhere
+--max-tokens N       max output tokens per reply
+--max-iterations N   ceiling on autonomous steps (default 40)
+--unsafe             disable the filesystem jail
+--list-models
+--version
 ```
-
----
-
-## The agent loop
-
-1. Your message is appended to the history and sent with the tool schemas.
-2. The response **streams** — text renders token by token with a blinking block
-   cursor and a rotating hacker verb (`decrypting`, `probing`, `enumerating`…).
-3. Any `tool_use` blocks are executed (through the permission gate), their
-   `tool_result`s appended, and the model is called again.
-4. The loop repeats until the model stops requesting tools, or `--max-iterations`
-   (default 40) is hit.
-
-Transient failures (`429`, `5xx`, connection errors, timeouts) are retried up to
-5 times with exponential backoff and jitter. The full message history is kept;
-multiple tool calls per turn are supported.
-
-Tokens and estimated cost are tracked **per turn and per session**, shown live in
-the status bar and in full via `/cost`.
-
----
-
-## Tools
-
-| Tool | Gated? | Notes |
-|---|---|---|
-| `bash` | **yes**¹ | Timeout + output truncation. Scope-checked. |
-| `read_file` | no | Optional line range. |
-| `write_file` | **yes**¹ | Diff preview shown at the gate. |
-| `edit_file` | **yes**¹ | Exact string replace; must be unique unless `replace_all`. |
-| `glob` | no | Pattern search. Jailed (see below). |
-| `grep` | no | Regex content search. Jailed (see below). |
-| `list_dir` | no | Directory listing. |
-
-¹ Gating is per mode: `auto`, `zim` and `danger` auto-approve all three; `edits`
-drops bash entirely; `plan` drops all three. See **Modes**.
-
-### Permission gate
-
-Reads are auto-approved. In a mode that does not auto-approve a tool, `bash`,
-`write_file` and `edit_file` raise a bordered modal showing the exact **command**
-or a coloured **diff**:
-
-```
-[y] execute    [n] deny    [a] always this session
-```
-
-`a` auto-approves that tool for the rest of the session. With the default `auto`
-mode (and `zim`/`danger`) nothing reaches this modal — every tool runs straight
-away.
 
 ---
 
 ## Modes
 
-The current mode decides which tools exist at all and which run without asking.
-Switch at runtime with `/mode <name>` or at launch with `--mode <name>`; the
-active mode is shown as a badge in the header.
+The mode decides how much the agent is allowed to do on its own. Switch at
+runtime with `/mode <name>`; the active mode is always visible in the header.
 
-| Mode | Tools | Behaviour |
+| Mode | Behaviour |
+|---|---|
+| `auto` *(default)* | **Full auto** — file writes and shell commands, no confirmation. |
+| `edits` | File work is free; the shell is removed entirely. |
+| `plan` | Read-only. Investigate, propose, change nothing. |
+| `zim` | **Full auto**, governed by your `AGENTS.md`. |
+| `danger` | **Full auto**, operator-directed — no questions asked. |
+
+`zim` and `danger` are the **armed** modes: everything runs unattended, and the
+header turns red to say so. A tool that a mode disallows does not merely get
+discouraged — it stops existing for that session, so `plan` cannot write a file
+even if you ask it to.
+
+### zim mode and `AGENTS.md`
+
+`zim` mode hands the wheel to a doctrine file of your choosing. Write the rules
+you want followed; that file becomes the agent's whole operating manual. Found
+automatically at `<workdir>/AGENTS.md`, or point at it with `--agents PATH`.
+
+---
+
+## Tools
+
+| Tool | Asks first? | What it's for |
 |---|---|---|
-| `auto` *(default)* | all | **Full auto** — file writes *and* bash run with no confirmation. |
-| `edits` | all but `bash` | File work is free; the shell is removed entirely. |
-| `plan` | read-only | No writes, no shell — investigate and produce a plan. |
-| `zim` | all | **Full auto**, and the system prompt is replaced by `AGENTS.md`. |
-| `danger` | all | **Full auto**, operator-directed: obeys without questioning. |
+| `bash` | in some modes | Run a shell command. |
+| `read_file` | no | Read a file, whole or by line range. |
+| `write_file` | in some modes | Create or replace a file. |
+| `edit_file` | in some modes | Surgical string replacement in a file. |
+| `glob` | no | Find files by pattern. |
+| `grep` | no | Search file contents by regex. |
+| `list_dir` | no | List a directory. |
+| `search_web` | no | Search the web. |
+| `web_fetch` | no | Pull down a URL. |
 
-`zim` and `danger` are the *armed* modes — both run every tool unattended, and
-both show in red in the header. They differ only in what governs the model:
-`zim` hands control to `AGENTS.md`, while `danger` keeps the harness's own
-prompt plus a doctrine that the operator's instructions are carried out
-directly, without second-guessing or asking for confirmation.
-
-A denied tool is not merely discouraged: it is withheld from the model's tool
-list, and if the model calls it anyway the call returns a `mode_denied` result
-rather than executing. So `plan` cannot write even if asked, and `edits` cannot
-shell out.
-
-### zim mode and `@AGENTS.md`
-
-`zim` mode follows the operator's **AGENTS.md** to the letter, with every tool
-running unattended. The file's contents *replace* the default system prompt, so
-the harness becomes whatever doctrine that file declares.
-
-The path is auto-discovered in this order — `<workdir>/AGENTS.md`,
-`<workdir>/../AGENTS.md`, then `~/AGENTS.md` — or set explicitly with
-`--agents PATH`. If no file is found, zim mode falls back to the standard prompt
-and says so.
+When a mode makes a tool ask first, you get a modal showing the exact command
+or a colour diff of the change, and three keys:
 
 ```
-/mode zim        # header arms in red:  ◆ ZIM
-/zim              full auto · follows AGENTS.md
+[y] run it     [n] no     [a] always, this session
 ```
 
 ---
 
-## Prompt affordances
+## Scope
 
-**Slash-command popup.** Type `/` and the command menu opens immediately, before
-you finish typing; keep typing to filter. `/mode ` and `/theme ` open their own
-argument list.
-
-**File mentions.** Type `@` and a picker rooted at the working directory opens;
-keep typing to filter by path. Accepting `@alpha.py` attaches that file's
-contents to the message the model receives (directories attach a listing), so a
-mention is immediately actionable rather than just a pointer.
-
-**Keys in the popup:** `↑`/`↓` select · `Tab` accept · `Esc` close. The popup
-never takes focus, so typing continues normally.
-
-### Sandbox
-
-Every file tool resolves paths through a jail rooted at the working directory.
-Escapes are refused — including `..` traversal and **symlinks pointing outside**
-the jail. `--unsafe` disables the jail.
-
-`glob` and `grep` take a pattern as well as a path, and `Path.glob` will follow
-`..` and symlinks on its own. Both tools therefore reject patterns containing
-`..` or an absolute/`~` prefix, and re-validate **every** match against the jail
-before returning it (or reading its contents).
-
-`bash` runs with the working directory as its `cwd`, but a shell can by nature
-reach absolute paths. The filesystem jail cannot bound it, so it is bounded
-instead by the mode and the scope guard: `edits` and `plan` withhold `bash`
-entirely, and every shipped mode either auto-approves it or denies it — see
-[Scope](#scope-bug-bounty). File *reads/writes* remain jailed regardless.
-
-### Scope (bug bounty)
-
-Two files, one job each. Both are found automatically in the working directory
-(or `~/.zimzilla`), or pointed at with `--allow` / `--deny`.
+Two files, one job each. Both are picked up automatically from the working
+directory, or pointed at with `--allow` / `--deny`.
 
 **`allow.yaml` — your declared targets.** Its presence **arms the session**:
-gated tools run with no confirmation, exactly as in `/mode danger`. It is a
-*declaration, not a fence* — it does not restrict you to those hosts, and it
-blocks nothing. Listing your targets is how the harness knows the engagement is
-authorised and stops asking.
+gated tools stop asking. It is a declaration of what you are authorised to
+work on, not a fence around you — it restricts nothing and blocks nothing.
 
 ```yaml
 domain:            # a domain also covers its subdomains
@@ -284,9 +198,9 @@ cidr:
   - 198.51.100.0/24
 ```
 
-**`out-of-scope.yaml` — never touch.** This one is *enforced*. A bash command
-that appears to reach one of these hosts is **hard-blocked before it runs**, and
-`web_fetch` to one is refused:
+**`out-of-scope.yaml` — never touch.** This one is enforced. A command that
+reaches for one of these hosts is stopped before it runs, and fetching one is
+refused outright.
 
 ```
 ⛔ BLOCKED — SCOPE GUARD — HARD BLOCK
@@ -298,47 +212,29 @@ domain:
   - out-of-scope.example.com
 ```
 
-Deny beats allow: a host in both files is blocked. Loading only
-`out-of-scope.yaml` does **not** arm anything — it only subtracts.
+Deny always beats allow. Loading only `out-of-scope.yaml` arms nothing — it
+only subtracts.
 
-#### What this is and is not
+### What this is and is not
 
-Stated plainly, because the difference matters:
+Worth being straight about, because the difference matters:
 
 - The allow-list is an **arming mechanism, not a safety control**. With it
-  loaded, the only thing standing between the agent and an arbitrary host is
-  `out-of-scope.yaml`. (In `danger` and `zim` modes that was already true —
-  they auto-approve everything — so this does not weaken the shipped posture,
-  but it should not be mistaken for a boundary either.)
-- The deny-list is a **static text scan of the command line, not a sandbox**.
-  It does not follow redirects, resolve DNS, or understand indirection.
-  A target built at runtime (`python3 -c`, `$(…)`, backticks, base64) or
-  reached through an unlisted redirect is **not detected**. It catches the
+  loaded, the only thing between the agent and an arbitrary host is
+  `out-of-scope.yaml`.
+- The deny-list is a **check on what it's about to do, not a sandbox**. It
+  reads the command as written. A target assembled at runtime, or reached
+  through an unlisted redirect, is not something it can see. It catches the
   obvious mistake; it does not stop a determined command.
 
-#### Detection
+Use it as a seatbelt, not as a cage.
 
-The detector recognises URLs, `host:port`, IPs, CIDRs and bare hostnames, and
-understands tool prefixes (`sudo nmap …`, `FOO=bar curl …`). To avoid punishing
-normal work, a bare dotted token is only treated as a host when the command runs
-a known network tool or the TLD is unambiguously a domain — so `cat report.json`
-is never mistaken for a target. `localhost` is always allowed (the proxy).
+### Upgrading from `scope.yaml`
 
-- A trailing-dot FQDN (`evil.com.`) is recognised as the same host as
-  `evil.com`, so it cannot slip past the guard.
-- A network command containing **runtime command substitution** (`$(…)` or
-  backticks) builds a target the token scan cannot see; such a command is
-  blocked as unresolvable rather than allowed. Literal targets are still
-  checked normally.
-
-#### Upgrading from `scope.yaml`
-
-`scope.yaml` is **no longer read**. It was one file doing three jobs at once
-(allow-list, block-list, on/off switch), and its meaning cannot be carried over
-safely: the old file was an allow-list that also blocked, so reading it as a
-deny-list would block exactly the hosts it declared. A stale `scope.yaml` is
-reported loudly — at startup and in the boot checks — and then ignored. Rename
-it to `allow.yaml` or `out-of-scope.yaml` to re-enable it.
+`scope.yaml` is no longer read. It was one file doing three jobs at once, and
+its meaning cannot be carried across safely — reading it as a deny-list would
+block exactly the hosts it declared. A stale `scope.yaml` is reported loudly at
+startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 
 ---
 
@@ -347,107 +243,79 @@ it to `allow.yaml` or `out-of-scope.yaml` to re-enable it.
 | Command | Effect |
 |---|---|
 | `/help` | command reference |
-| `/mode [name]` | show or switch mode: `auto` \| `edits` \| `plan` \| `zim` \| `danger` |
-| `/clear` | wipe transcript and history |
+| `/mode [name]` | show or switch mode |
 | `/model [name]` | show or switch the model |
 | `/cost` | session token + cost breakdown |
-| `/scope` | allow.yaml / out-of-scope.yaml status and entries |
-| `/rain` | toggle matrix rain |
+| `/scope` | scope status and entries |
 | `/theme green\|amber\|cyan` | switch palette |
-| `/save [name]` | write session to `~/.zimzilla/sessions/` |
-| `/load [name]` | restore a session (bare `/load` lists them) |
+| `/rain` | toggle the matrix rain |
+| `/save [name]` | write the session to disk |
+| `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |
-| `/exit` | leave (or `Ctrl+D`) |
+| `/clear` | wipe transcript and history |
+| `/exit` | leave |
 
-**Keys:** `Ctrl+C` interrupts the current turn · `Ctrl+D` exits · `Ctrl+L` clears.
+**Prompt affordances.** Type `/` and the command menu opens as you type; type
+`@` and a file picker opens, rooted at your working directory. Accepting a file
+mention attaches its contents to your message, so the agent can act on it
+immediately. `↑`/`↓` to move, `Tab` to accept, `Esc` to dismiss.
 
----
-
-## Model switching
-
-```
-/model                             # list names + prices
-/model claude-sonnet-5-5           # switch at runtime
-ANTHROPIC_MODEL=gpt-6-sol ./run.sh
-```
-
-The list of known names lives in `zimzilla/config.py`. Any model the proxy
-offers works even if unlisted; cost falls back to a default rate and is labelled
-as an estimate.
+**Keys.** `Ctrl+C` interrupts the current turn · `Ctrl+D` exits · `Ctrl+L` clears.
 
 ---
 
-## CLI flags
+## Layout
 
 ```
---model, -m NAME     model to use
---workdir, -C DIR    working directory
---allow PATH         allow.yaml — declared targets; its presence arms the session
---deny PATH          out-of-scope.yaml — hosts that are never touched
---unsafe             disable the filesystem jail
---theme {green,amber,cyan}
---rain               start with rain on in the shell (off by default)
---no-rain            disable rain entirely, including the boot screen
---mode {auto,edits,plan,zim,danger}
-                     agent mode (default: auto)
---agents PATH        AGENTS.md followed by zim mode
---max-tokens N       max output tokens per reply
---list-models
---version
+install.sh                    venv + deps + PATH command
+setup.sh                      route check
+run.sh                        run from the checkout without installing
+
+zimzilla/                     the package
+  agent.py                    the tool-use loop and mode doctrine
+  config.py                   modes, defaults, model registry, pricing
+  tools.py                    the nine tools
+  sandbox.py                  the filesystem jail
+  scope.py                    allow.yaml / out-of-scope.yaml
+  session.py                  save / load / list
+  theme.py                    green / amber / cyan palettes
+  ui/                         the terminal interface
+
+allow.yaml.example            declared targets
+out-of-scope.yaml.example     hosts that are never touched
+
+docs/                         README graphics + screenshots
+tests/                        the test suite
 ```
-
----
-
-## Design notes
-
-- **Boot screen.** Typewriter/glitch reveal of the ASCII banner, a system-check
-  readout (API key, endpoint, model, cwd, scope, sandbox, tools), then fade in.
-  Keystrokes typed during boot are buffered and replayed into the prompt —
-  press `Enter` to submit them immediately, or just wait for auto-continue.
-- **Matrix rain.** The boot screen always shows the full-canvas animation. In
-  the shell it is **off by default** — it competes with the transcript — and is
-  turned on with `/rain` or `--rain`. When on, a per-column drop model
-  (`RainCanvas`) is painted *into* the transcript and activity panes by
-  `RainRichLog`, which overlays dim glyphs only on blank cells, at low density,
-  so text is never obscured. (Textual's compositor paints front-to-back and
-  gives each cell to the frontmost widget without alpha blending, so a widget on
-  a lower layer would simply be hidden behind the panes.) Also paused while a
-  turn is running.
-- **Colour discipline.** Only the palette's black, green, dim green, cyan-green,
-  red and amber are used anywhere in the UI — no stray colours.
-- **Retry visibility.** Backoff events are shown inline rather than hidden, so
-  a slow proxy is visible rather than looking like a hang.
 
 ---
 
 ## Tests
 
 ```bash
-cd ~/zimzilla
 .venv/bin/python tests/test_phase4.py
 ```
 
-The suite stubs the model and drives the app with Textual's pilot, so it needs
-no network and no API key. It covers the identity prompt, per-mode tool
-exposure and gating (including that `zim` runs bash ungated while `plan` and
-`edits` cannot), `AGENTS.md` loading, the slash/`@` popup, and `@`-mention
-expansion.
-
-A live smoke test of the real endpoint is `python -m zimzilla` in a pty; the
-harness itself is exercised end-to-end by typing `/mode`, `/help` and a prompt.
+Stubs the model and drives the interface directly, so it needs no network and
+no credentials.
 
 ---
 
 ## Troubleshooting
 
-**`no credentials found`.** Run `./setup.sh`. It writes
-`~/.zimzilla/logfare/source`; set `ANTHROPIC_AUTH_TOKEN` (preferred) or
-`ANTHROPIC_API_KEY` yourself if you would rather not use the proxy.
+**`zimzilla: command not found`** — `~/.local/bin` is not on your PATH. Add
+`export PATH="$HOME/.local/bin:$PATH"` and open a new shell.
 
-**`cannot reach the API endpoint`.** The LiteLLM proxy is down:
-`~/logfare/start-litellm.sh status` (or `start`).
+**`no credentials found`** — run `./setup.sh`.
 
-**`the endpoint rejected the model name`.** Run `/model` for valid names.
+**`the endpoint rejected the model name`** — run `/model` for valid names.
 
-**Commands look slow.** Logfare's upstream is sometimes "temporarily
-unavailable"; the harness retries with backoff and reports each attempt.
+**It says the endpoint is up but stalled** — something between you and the
+model went quiet. It will time out rather than hang; check the endpoint is
+actually serving.
+
+---
+
+<div align="center">
+<sub>Built by <b>Mr-Destroyer / ZIM</b> · yt <b>@Study_Hard69</b> · ig <b>zimthegoat</b></sub>
+</div>
