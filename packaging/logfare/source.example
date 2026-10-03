@@ -1,0 +1,34 @@
+# ZimZilla — Logfare profile
+#
+# This file is the credential profile for the local LiteLLM proxy. setup.sh
+# writes the real one next to this example as `source`, with mode 600, and
+# never commits it.
+#
+# Get a key from https://logfare.ai (API keys start with `lfu_`).
+
+export ANTHROPIC_BASE_URL="http://localhost:4001"
+export ANTHROPIC_AUTH_TOKEN="lfu_REPLACE_ME"
+export ANTHROPIC_MODEL="deepseek-v4.1-flash"
+
+# Load-bearing: ZimZilla (like Claude Code) prefers ANTHROPIC_AUTH_TOKEN
+# (Bearer) and only falls back to ANTHROPIC_API_KEY (x-api-key) if the token is
+# falsy. An empty string keeps the token authoritative and clears any real API
+# key inherited from the shell.
+export ANTHROPIC_API_KEY=""
+
+# Model aliases — switch per-invocation, e.g.:
+#   ANTHROPIC_MODEL=$MODEL_KIMI zimzilla
+# Full list lives in litellm-config.yaml next to this file.
+export MODEL_DEFAULT="deepseek-v4.1-flash"
+export MODEL_OPUS="claude-opus-5"
+export MODEL_FABLE="claude-fable-5-1"
+export MODEL_ASTRA="gpt-6-astra"
+export MODEL_SOL="gpt-6-sol"
+export MODEL_DEEPSEEK="deepseek-v3.2"
+export MODEL_KIMI="kimi-k2.7-code"
+export MODEL_GLM="glm-5.3"
+export MODEL_GROK="grok-4.6"
+export MODEL_GEMINI="gemini-3.8-flash"
+export MODEL_QWEN="qwen-3.8-27b"
+export MODEL_MIMO="mimo-v2.6-pro"
+export MODEL_AUTO="logfare/auto"

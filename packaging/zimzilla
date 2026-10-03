@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# zimzilla — launcher.
+#
+# Starts the LiteLLM -> Logfare proxy if it is not already up, then execs the
+# harness. Every argument is forwarded verbatim to `python -m zimzilla`, so
+# `zimzilla --help`, `zimzilla -C ~/proj` etc. all work unchanged.
+#
+# Configure through environment variables only:
+#
+#   ZIMZILLA_HOME              harness dotdir            (default ~/.zimzilla)
+#   LITELLM_ENV_FILE      profile to source         (default $ZIMZILLA_HOME/logfare/source)
+#   LITELLM_PORT          proxy port                (default 4001)
+#   LITELLM_SERVICE       proxy manager             (default $ZIMZILLA_HOME/logfare/start-litellm.sh)
+#   ZIMZILLA_NO_PROXY=1        never touch the proxy
+#   ZIMZILLA_REQUIRE_PROXY=1   hard-fail if the proxy is not healthy
+#
+# No key is ever printed or logged.
+
+set -euo pipefail
+
+# Find the checkout. When this script is run in place, that is its own
+# directory; when install.sh has put a launcher on PATH, that launcher exports
+# ZIMZILLA_ROOT first, because readlink here would resolve to ~/.local/bin and the
+# venv would appear to be missing.
+_self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+ZIMZILLA_ROOT="${ZIMZILLA_ROOT:-$_self_dir}"
+VENV_PY="$ZIMZILLA_ROOT/.venv/bin/python"
+
+ZIMZILLA_HOME="${ZIMZILLA_HOME:-$HOME/.zimzilla}"
+LITELLM_ENV_FILE="${LITELLM_ENV_FILE:-$ZIMZILLA_HOME/logfare/source}"
+LITELLM_PORT="${LITELLM_PORT:-4001}"
+LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"
+LITELLM_SERVICE="${LITELLM_SERVICE:-$ZIMZILLA_HOME/logfare/start-litellm.sh}"
+
+ZIMZILLA_NO_PROXY="${ZIMZILLA_NO_PROXY:-0}"
+ZIMZILLA_REQUIRE_PROXY="${ZIMZILLA_REQUIRE_PROXY:-0}"
+
+# Diagnostics go to stderr so piped/redirected runs stay parseable.
+die()  { printf '\033[31m[zimzilla]\033[0m %s\n' "$*" >&2; exit 2; }
+warn() { printf '\033[33m[zimzilla]\033[0m %s\n' "$*" >&2; }
+info() { printf '\033[36m[zimzilla]\033[0m %s\n' "$*" >&2; }
+
+# --- preconditions -----------------------------------------------------------
+
+[[ -x "$VENV_PY" ]] || die "venv missing at $ZIMZILLA_ROOT/.venv
+       Run ./install.sh in $ZIMZILLA_ROOT first."
+
+# Fail CLOSED. Without the profile, the harness would silently use whatever
+# ANTHROPIC_* the shell already exports — a session against the wrong provider
+# with no indication anything was off.
+if [[ "$ZIMZILLA_NO_PROXY" != "1" && ! -r "$LITELLM_ENV_FILE" ]]; then
+  die "profile not found: $LITELLM_ENV_FILE
+       Refusing to run: without it the harness would use whatever ANTHROPIC_*
+       variables your shell already exports.
+       Fix:  run ./setup.sh, or ZIMZILLA_NO_PROXY=1 zimzilla ... for a direct endpoint."
+fi
+
+# --- load the profile --------------------------------------------------------
+
+_prev_base_url="${ANTHROPIC_BASE_URL:-}"
+if [[ -r "$LITELLM_ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$LITELLM_ENV_FILE"
+  set +a
+  if [[ -n "$_prev_base_url" && "$_prev_base_url" != "${ANTHROPIC_BASE_URL:-}" ]]; then
+    warn "overriding inherited ANTHROPIC_BASE_URL=$_prev_base_url -> ${ANTHROPIC_BASE_URL:-}"
+  fi
+fi
+
+# --- only manage a proxy when the profile points at the local one ------------
+
+case "${ANTHROPIC_BASE_URL:-}" in
+  *"localhost:${LITELLM_PORT}"*|*"127.0.0.1:${LITELLM_PORT}"*) ;;
+  *)
+    warn "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-<unset>} is not the local proxy"
+    warn "on :${LITELLM_PORT}; skipping the proxy start-up check."
+    ZIMZILLA_NO_PROXY=1
+    ;;
+esac
+
+port_answers() {
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:${LITELLM_PORT}/health/liveliness" --max-time 2 || true)"
+  [[ "$code" == "200" ]]
+}
+
+ensure_proxy() {
+  [[ "$ZIMZILLA_NO_PROXY" == "1" ]] && return 0
+  port_answers && return 0
+
+  if [[ ! -x "$LITELLM_SERVICE" ]]; then
+    warn "proxy not answering on :${LITELLM_PORT}, and no service manager at"
+    warn "$LITELLM_SERVICE. Run ./setup.sh, or set ZIMZILLA_NO_PROXY=1."
+    return 1
+  fi
+
+  info "LiteLLM proxy not answering on :${LITELLM_PORT} — starting it..."
+  # Invoke as a SUBPROCESS, never `source`: start-litellm.sh's trailing `case`
+  # runs on load, and its functions call `exit`.
+  if "$LITELLM_SERVICE" start; then
+    info "proxy is up."
+    return 0
+  fi
+  warn "could not start the proxy — see $LITELLM_LOG"
+  return 1
+}
+
+# Serialize cold starts: do_start() has a check-then-act window, so two racing
+# invocations would both spawn litellm and leave an orphan on the port.
+if command -v flock >/dev/null 2>&1 && [[ "$ZIMZILLA_NO_PROXY" != "1" ]]; then
+  exec 9>"${TMPDIR:-/tmp}/zimzilla-proxy.lock"
+  flock 9
+  ensure_proxy || true
+  flock -u 9
+  exec 9>&-
+else
+  ensure_proxy || true
+fi
+
+if [[ "$ZIMZILLA_REQUIRE_PROXY" == "1" ]] && ! port_answers; then
+  die "proxy is not healthy on :${LITELLM_PORT} and ZIMZILLA_REQUIRE_PROXY=1."
+fi
+
+# --- hand off ----------------------------------------------------------------
+
+# Make the package importable regardless of the caller's cwd.
+export PYTHONPATH="$ZIMZILLA_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# exec: no extra bash layer, so exit status, signal delivery and TTY ownership
+# all belong to the harness. NOTE: exec discards EXIT traps.
+exec "$VENV_PY" -m zimzilla "$@"
