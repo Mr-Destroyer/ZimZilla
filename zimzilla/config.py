@@ -158,6 +158,12 @@ class Config:
     legacy_scope_path: Path | None = None
     max_tokens: int = 8192
     temperature: float = 0.0
+    # Max seconds to wait on the API between reads. Without this the SDK default
+    # is 600s, so a proxy that accepts the connection and then goes quiet hangs
+    # the turn — with no output and no error — for ten minutes. Applied as the
+    # per-read timeout, so it bounds the gap between streamed chunks, not the
+    # length of a healthy reply.
+    request_timeout: float = 120.0
     max_iterations: int = 40
     bash_timeout: int = 120
     max_output_chars: int = 20_000

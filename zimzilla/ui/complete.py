@@ -12,6 +12,7 @@ Up/Down move the selection, Tab/Enter accept, Esc dismisses.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from rich.text import Text
@@ -47,26 +48,43 @@ MAX_FILES = 200
 
 
 def _iter_files(root: Path, limit: int = MAX_FILES) -> list[str]:
-    """Relative paths under *root*, skipping heavy directories."""
+    """Up to *limit* relative paths under *root*, skipping heavy directories.
+
+    Walks with ``os.walk`` rather than ``sorted(root.rglob("*"))``: sorting a
+    generator materialises the WHOLE tree first, so the ``limit`` check could
+    only ever run after every path had been visited — on a large repo that is a
+    visible stall the first time the popup opens. os.walk prunes as it goes, so
+    the work is genuinely bounded by *limit*.
+
+    The result is still sorted for a stable display order, which sorts only the
+    (at most *limit*) entries actually collected.
+    """
     skip = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
             ".pytest_cache", ".ruff_cache", "dist", "build", ".tox", ".idea"}
     out: list[str] = []
     root = root.resolve()
     try:
-        for p in sorted(root.rglob("*")):
-            if len(out) >= limit:
-                break
-            if any(part in skip for part in p.parts):
-                continue
-            try:
-                rel = p.relative_to(root)
-            except ValueError:
-                continue
-            s = str(rel)
-            out.append(s + "/" if p.is_dir() else s)
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Prune in place so os.walk never descends into heavy directories.
+            dirnames[:] = sorted(d for d in dirnames if d not in skip)
+            here = Path(dirpath)
+            for name in dirnames:
+                if len(out) >= limit:
+                    return sorted(out)
+                try:
+                    out.append(str((here / name).relative_to(root)) + "/")
+                except ValueError:
+                    continue
+            for name in sorted(filenames):
+                if len(out) >= limit:
+                    return sorted(out)
+                try:
+                    out.append(str((here / name).relative_to(root)))
+                except ValueError:
+                    continue
     except Exception:
         pass
-    return out
+    return sorted(out)
 
 
 class CompletionPopup(VerticalScroll):

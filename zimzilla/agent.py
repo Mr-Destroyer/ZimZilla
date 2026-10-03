@@ -131,7 +131,16 @@ class Agent:
         if self._client is None:
             import anthropic
 
-            kwargs = {"base_url": self.cfg.base_url}
+            kwargs = {
+                "base_url": self.cfg.base_url,
+                # Bound the wait on a silent proxy. The SDK default is 600s;
+                # a stalled stream would otherwise leave the UI "working" with
+                # nothing arriving and no error for ten minutes.
+                "timeout": self.cfg.request_timeout,
+                # Streaming responses get a longer ceiling than a plain call,
+                # but still finite.
+                "max_retries": 0,  # retries are handled by _stream_once
+            }
             if self.cfg.auth_token:
                 kwargs["auth_token"] = self.cfg.auth_token
                 kwargs["api_key"] = self.cfg.api_key or "placeholder"
@@ -390,7 +399,17 @@ class Agent:
                         }
 
                     if result is None:
-                        result = tools_mod.execute(call.name, args, self.cfg)
+                        # Tool execution is BLOCKING: bash waits on
+                        # subprocess.run (up to cfg.bash_timeout, default 120s)
+                        # and the web tools wait on a urllib socket (15s). Run
+                        # it on a worker thread — awaiting it here keeps the
+                        # event loop free, so the TUI keeps painting, the
+                        # spinner keeps turning and Ctrl-C still lands while a
+                        # slow command runs. Called directly it would freeze the
+                        # whole interface for the duration.
+                        result = await asyncio.to_thread(
+                            tools_mod.execute, call.name, args, self.cfg
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # noqa: BLE001
