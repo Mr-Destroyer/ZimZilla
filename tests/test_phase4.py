@@ -13,8 +13,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from zimzilla import tools, websearch  # noqa: E402
 from zimzilla.agent import Agent  # noqa: E402
 from zimzilla.config import Config, MODES  # noqa: E402
+from zimzilla.scope import Scope  # noqa: E402
 from zimzilla.ui.app import ZimZillaApp  # noqa: E402
 from zimzilla.ui.complete import CompletionPopup  # noqa: E402
 
@@ -101,6 +103,87 @@ def test_mode_tools(wd: Path) -> None:
           {m for m, s in MODES.items() if s.get("loud")} == {"zim", "danger"})
     check("auto/danger are full-auto", all(
         {"bash", "write_file", "edit_file"} <= MODES[m]["auto"] for m in ("auto", "danger")))
+    check("web tools are available in every mode",
+          all({"search_web", "web_fetch"} <= names(m) for m in MODES))
+    check("web tools are ungated (scope governs them, not the prompt)",
+          not tools.needs_permission("search_web")
+          and not tools.needs_permission("web_fetch"))
+    # LiteLLM rewrites a tool literally named "web_search" into OpenAI's built-in
+    # web_search_preview, which the upstream adapter rejects with a 400. Any
+    # other name passes through as a normal function tool. Verified against the
+    # live proxy; this assertion exists so the name is never changed back.
+    check("no tool uses a name the proxy reserves",
+          "web_search" not in set(tools.TOOL_NAMES), str(tools.TOOL_NAMES))
+
+
+def test_web_tools(wd: Path) -> None:
+    # ---- parsing, offline -------------------------------------------------
+    page = (
+        "<table>"
+        "<tr><td><a rel=\"nofollow\" href=\"https://docs.python.org/3/library/asyncio.html\""
+        " class='result-link'>asyncio &mdash; Asynchronous I/O</a></td></tr>"
+        "<tr><td class='result-snippet'>asyncio is a library to write "
+        "<b>concurrent</b> code.</td></tr>"
+        "<tr><td><a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Frealpython.com%2F\""
+        " class='result-link'>Async IO in Python</a></td></tr>"
+        "</table>"
+    )
+    parsed = websearch.parse_results(page)
+    check("search_web parses titles and urls",
+          [r.url for r in parsed] == ["https://docs.python.org/3/library/asyncio.html",
+                                      "https://realpython.com/"],
+          str([r.url for r in parsed]))
+    check("search_web unwraps the ddg redirect",
+          parsed[1].url == "https://realpython.com/", parsed[1].url)
+    check("search_web pairs snippets to results",
+          parsed[0].snippet.startswith("asyncio is a library"), parsed[0].snippet)
+
+    check("search_web ignores a page with no results",
+          websearch.parse_results("<html><body>nothing here</body></html>") == [])
+
+    # ---- html_to_text -----------------------------------------------------
+    doc = (
+        "<html><body><nav><a href='/'>Home</a></nav>"
+        "<main><h1>Real Title</h1><p>" + ("Body prose. " * 30) + "</p></main>"
+        "<footer>Copyright 2026</footer></body></html>"
+    )
+    text = websearch.html_to_text(doc)
+    check("html_to_text keeps the article", "Real Title" in text and "Body prose" in text)
+    check("html_to_text drops nav and footer",
+          "Copyright" not in text and "Home" not in text)
+    check("html_to_text drops script and style",
+          "color:red" not in websearch.html_to_text(
+              "<style>p{color:red}</style><p>kept</p>") )
+
+    # ---- scope guard ------------------------------------------------------
+    def scoped(path: Path):
+        cfg = _cfg(wd)
+        cfg._scope = Scope.load(path)
+        return cfg
+
+    scoped_file = wd / "scope.yaml"
+    scoped_file.write_text("domains:\n  - example.com\n")
+    blocked = tools.execute("web_fetch", {"url": "https://docs.python.org/"}, scoped(scoped_file))
+    check("web_fetch blocks an out-of-scope host",
+          blocked.is_error and blocked.meta.get("blocked") is True, blocked.output[:60])
+
+    empty_file = wd / "empty.yaml"
+    empty_file.write_text("domains: []\n")
+    ef = tools.execute("web_fetch", {"url": "https://example.com/"}, scoped(empty_file))
+    es = tools.execute("search_web", {"query": "anything"}, scoped(empty_file))
+    check("empty scope blocks web_fetch", ef.is_error and ef.meta.get("blocked") is True)
+    check("empty scope blocks search_web", es.is_error and es.meta.get("blocked") is True)
+
+    # ---- argument validation (never raises) -------------------------------
+    check("search_web rejects an empty query",
+          tools.execute("search_web", {"query": "  "}, _cfg(wd)).is_error)
+    check("web_fetch rejects an empty url",
+          tools.execute("web_fetch", {"url": ""}, _cfg(wd)).is_error)
+
+    # ---- transcript labels ------------------------------------------------
+    check("search_web summarises to the query",
+          tools.summarise_call("search_web", {"query": "asyncio gather"}, None)
+          == "asyncio gather")
 
 
 def test_zim_agents(wd: Path) -> None:
@@ -190,6 +273,7 @@ async def main() -> int:
         (wd / "beta.md").write_text("# beta\n")
         await test_identity(wd)
         test_mode_tools(wd)
+        test_web_tools(wd)
         test_zim_agents(wd)
         await test_mode_gating(wd)
         await test_ui(wd)

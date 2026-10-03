@@ -1,8 +1,10 @@
 """The tool layer: JSON schemas, permission previews and execution.
 
-Seven tools are exposed to the model: bash, read_file, write_file, edit_file,
-glob, grep and list_dir. Reads are auto-approved; writes and bash go through
-the permission gate in the UI.
+Nine tools are exposed to the model: bash, read_file, write_file, edit_file,
+glob, grep, list_dir, search_web and web_fetch. Reads are auto-approved; writes
+and bash go through the permission gate in the UI. The network tools are not
+gated — they are bounded by the scope guard instead, so an out-of-scope host is
+refused no matter which mode is armed.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from .sandbox import (
     resolve_in_jail,
     safe_glob_pattern,
 )
+from .websearch import WebError, fetch as _web_fetch, search as _web_search
 
 # ---------------------------------------------------------------------------
 # JSON schemas advertised to the model
@@ -125,6 +128,50 @@ TOOL_SCHEMAS: list[dict] = [
                 "path": {"type": "string", "description": "Directory (default '.')."},
             },
             "required": [],
+        },
+    },
+    {
+        # Named search_web, NOT web_search: LiteLLM special-cases the literal
+        # name "web_search" and rewrites it into OpenAI's built-in
+        # web_search_preview tool, which the upstream adapter then rejects with
+        # a 400 ("Unsupported Responses tools type"). Any other name is passed
+        # through as an ordinary function tool. Do not rename this back.
+        "name": "search_web",
+        "description": (
+            "Search the web and return titles, URLs and snippets. Use it to "
+            "look up anything not in this repository — library APIs, error "
+            "messages, current versions, unfamiliar terms. Follow up with "
+            "web_fetch on a result to read the page in full."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "How many results to return (default 5).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": (
+            "Fetch a URL and return its readable text. Use it to read a page "
+            "found with search_web, or any documentation URL. Out-of-scope "
+            "hosts are blocked when a scope file is loaded."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The http(s) URL to read."},
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Truncate the text at this many characters.",
+                },
+            },
+            "required": ["url"],
         },
     },
 ]
@@ -505,6 +552,112 @@ def _human(n: int) -> str:
     return f"{n}T"
 
 
+# ---- web ------------------------------------------------------------------
+
+def _scope_of(cfg):
+    """The session scope guard, or None when there is nothing to enforce."""
+    from .scope import Scope
+
+    scope = getattr(cfg, "_scope", None)
+    if isinstance(scope, Scope) and scope.loaded:
+        return scope
+    return None
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    try:
+        return urlsplit(url if "//" in url else "https://" + url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _tool_web_search(args: dict, cfg) -> ToolResult:
+    query = _text(args.get("query", "")).strip()
+    if not query:
+        return ToolResult("empty query", is_error=True)
+
+    try:
+        max_results = int(args.get("max_results") or 5)
+    except (TypeError, ValueError):
+        return ToolResult("max_results must be an integer", is_error=True)
+    max_results = max(1, min(max_results, 20))
+
+    # An empty scope file authorises nothing, including egress to the engine.
+    scope = _scope_of(cfg)
+    if scope is not None and scope.empty:
+        return ToolResult(
+            "BLOCKED by scope guard — the scope file is empty, so no network "
+            "egress is authorised.",
+            is_error=True,
+            meta={"blocked": True},
+        )
+
+    try:
+        results = _web_search(query, max_results=max_results)
+    except WebError as e:
+        return ToolResult(f"web search failed: {e}", is_error=True)
+
+    if not results:
+        return ToolResult(f"no results for {query!r}")
+
+    lines = [f"{len(results)} result(s) for {query!r}:", ""]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.title}")
+        lines.append(f"   {r.url}")
+        if r.snippet:
+            lines.append(f"   {r.snippet}")
+        lines.append("")
+    lines.append("Use web_fetch on a URL above to read the page in full.")
+    return ToolResult(
+        _truncate("\n".join(lines), cfg.max_output_chars),
+        meta={"results": len(results)},
+    )
+
+
+def _tool_web_fetch(args: dict, cfg) -> ToolResult:
+    url = _text(args.get("url", "")).strip()
+    if not url:
+        return ToolResult("empty url", is_error=True)
+
+    try:
+        max_chars = int(args.get("max_chars") or min(cfg.max_output_chars, 20_000))
+    except (TypeError, ValueError):
+        return ToolResult("max_chars must be an integer", is_error=True)
+    max_chars = max(200, min(max_chars, cfg.max_output_chars))
+
+    # Fetching a URL is reaching a host, so it answers to the scope guard.
+    scope = _scope_of(cfg)
+    if scope is not None:
+        host = _host_of(url)
+        if scope.empty:
+            return ToolResult(
+                "BLOCKED by scope guard — the scope file is empty, so no host "
+                "is authorised.",
+                is_error=True,
+                meta={"blocked": True},
+            )
+        allowed, reason = scope.allows(host)
+        if not allowed:
+            return ToolResult(
+                f"BLOCKED by scope guard — {host}: {reason}",
+                is_error=True,
+                meta={"blocked": True},
+            )
+
+    try:
+        final_url, text = _web_fetch(url, max_chars=max_chars)
+    except WebError as e:
+        return ToolResult(f"web fetch failed: {e}", is_error=True)
+
+    header = f"# {final_url}\n\n" if final_url != url else ""
+    return ToolResult(
+        _truncate(header + text, cfg.max_output_chars),
+        meta={"url": final_url},
+    )
+
+
 _DISPATCH = {
     "bash": _tool_bash,
     "read_file": _tool_read_file,
@@ -513,6 +666,8 @@ _DISPATCH = {
     "glob": _tool_glob,
     "grep": _tool_grep,
     "list_dir": _tool_list_dir,
+    "search_web": _tool_web_search,
+    "web_fetch": _tool_web_fetch,
 }
 
 
@@ -527,4 +682,10 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
         return f"{args.get('pattern','')}  in {args.get('path','.')}"
     if name == "grep":
         return f"/{args.get('pattern','')}/  in {args.get('path','.')}"
+    if name == "search_web":
+        q = str(args.get("query", ""))
+        return q if len(q) <= max_len else q[: max_len - 1] + "…"
+    if name == "web_fetch":
+        u = str(args.get("url", ""))
+        return u if len(u) <= max_len else u[: max_len - 1] + "…"
     return shlex.quote(str(args))[:max_len]

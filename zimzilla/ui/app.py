@@ -16,6 +16,7 @@ from textual.widgets import Input, Static
 
 from .. import session as session_mod
 from .. import sources as sources_mod
+from .. import tools as tools_mod
 from ..agent import Agent
 from ..config import KNOWN_MODELS, MODES, Config, price_for
 from ..theme import THINKING_VERBS, get_palette
@@ -227,7 +228,12 @@ class ZimZillaApp(App):
         else:
             checks.append(("SCOPE", "not loaded — guard off", True))
         checks.append(("SANDBOX", "DISABLED (--unsafe)" if cfg.unsafe else "enabled", not cfg.unsafe))
-        checks.append(("TOOLS", "7 registered (bash, io, search)", True))
+        checks.append((
+            "TOOLS",
+            f"{len(tools_mod.TOOL_SCHEMAS)} registered "
+            "(bash, io, search, web)",
+            True,
+        ))
         return checks
 
     def _boot_done(self, typed: list[str] | None = None, submit: bool = False) -> None:
