@@ -1,0 +1,20 @@
+# ZimZilla — Token Juice profile
+#
+# This file is the credential profile for the Token Juice route. install.sh
+# copies the real one next to this example as `source`, with mode 600, and
+# never commits it. This example exists so the format is visible without
+# exposing a key.
+#
+# Token Juice keys start with `tj_`. The same key is the bearer token ZimZilla
+# sends and the upstream OpenAI key LiteLLM forwards.
+
+export ANTHROPIC_BASE_URL="http://localhost:4000"
+export ANTHROPIC_AUTH_TOKEN="tj_REPLACE_ME"
+export ANTHROPIC_MODEL="deepseek-v4.1-flash"
+
+# Load-bearing: an empty string keeps ANTHROPIC_AUTH_TOKEN authoritative and
+# clears any real API key inherited from the shell.
+export ANTHROPIC_API_KEY=""
+
+# Token Juice serves exactly one chat model, so there is nothing to alias.
+export MODEL_DEFAULT="deepseek-v4.1-flash"

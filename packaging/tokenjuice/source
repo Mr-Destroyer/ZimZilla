@@ -1,0 +1,15 @@
+# ZimZilla — Token Juice profile.
+#
+# NOTE: like the Logfare profile next to it, this file is committed to the repo
+# on purpose so a fresh clone can switch upstream with no prompting. It holds a
+# live Token Juice key. If this repo is ever made public, rotate it.
+#
+# Token Juice keys start with `tj_`. The same key is used as both the bearer
+# token and (via litellm) the upstream OpenAI key.
+#
+# Rotate by editing this file, then re-running ./install.sh (or ./setup.sh).
+
+export ANTHROPIC_BASE_URL="http://localhost:4000"
+export ANTHROPIC_AUTH_TOKEN="tj_QKaFlDpyNV5VeSsuwpGeaNvM58POZ1lOe7ZBHjZpW5k"
+export ANTHROPIC_MODEL="deepseek-v4.1-flash"
+export ANTHROPIC_API_KEY=""

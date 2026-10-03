@@ -41,11 +41,22 @@ if [[ -r "$ZIMZILLA_HOME/current-source" ]]; then
 fi
 
 if [[ "$_current_source" == "tokenjuice" ]]; then
-  _tj_profile="$HOME/claude-source/deepseek-claude"
-  _tj_service="$HOME/start-litellm.sh"
+  # Prefer the installed route, which install.sh populates; fall back to the
+  # standalone deepseek-claude layout for a machine that had one before
+  # ZimZilla was installed. Checking the installed copy first is what makes
+  # this work on a fresh machine — the old hardcoded $HOME paths only exist on
+  # the box where deepseek-claude happened to be installed.
+  _tj_profile=""; _tj_service=""
+  for _cand in "$ZIMZILLA_HOME/tokenjuice/source:$ZIMZILLA_HOME/tokenjuice/start-litellm.sh" \
+               "$HOME/claude-source/deepseek-claude:$HOME/start-litellm.sh"; do
+    _p="${_cand%%:*}"; _s="${_cand##*:}"
+    if [[ -r "$_p" && -x "$_s" ]]; then
+      _tj_profile="$_p"; _tj_service="$_s"; break
+    fi
+  done
   # Only switch if the Token Juice side is actually installed; otherwise fall
   # through to Logfare rather than dying on a missing profile.
-  if [[ -r "$_tj_profile" && -x "$_tj_service" ]]; then
+  if [[ -n "$_tj_profile" ]]; then
     LITELLM_ENV_FILE="${_env_override:-$_tj_profile}"
     LITELLM_PORT="${_port_override:-4000}"
     LITELLM_SERVICE="${_svc_override:-$_tj_service}"

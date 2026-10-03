@@ -1,0 +1,9 @@
+model_list:
+  # Token Juice's whole catalog is one chat model, exposed upstream as
+  # `deepseek-ai/DeepSeek-V4.1-Flash`. The alias below is what ZimZilla (and
+  # anything else speaking Anthropic's protocol) asks for.
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4.1-Flash
+      api_base: https://api.tokenjuice.ai/v1
+      api_key: os.environ/ANTHROPIC_AUTH_TOKEN

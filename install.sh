@@ -183,26 +183,44 @@ fi
 
 # --- 7. proxy files ----------------------------------------------------------
 
-step "Installing logfare proxy files"
-mkdir -p "$ZIMZILLA_HOME/logfare"
-cp -f "$SELF/packaging/logfare/litellm-config.yaml" "$ZIMZILLA_HOME/logfare/litellm-config.yaml"
-cp -f "$SELF/packaging/logfare/start-litellm.sh"     "$ZIMZILLA_HOME/logfare/start-litellm.sh"
-cp -f "$SELF/packaging/logfare/source.example"       "$ZIMZILLA_HOME/logfare/source.example"
-chmod +x "$ZIMZILLA_HOME/logfare/start-litellm.sh"
-ok "$ZIMZILLA_HOME/logfare/{litellm-config.yaml,start-litellm.sh}"
+# Both routes are installed, not just the default. They are independent — each
+# has its own port, profile and manager — and /zim-logfare / /zim-tokenjuice
+# switch between them at runtime. Installing only Logfare would leave
+# /zim-tokenjuice reporting the source unavailable on a fresh machine, which is
+# exactly what it did before this step copied both.
+install_route() {
+  local key="$1" src="$SELF/packaging/$1" dest="$ZIMZILLA_HOME/$1"
+  [[ -d "$src" ]] || { warn "no packaging for '$key' — skipping"; return 0; }
 
-# The profile ships with the repo so a clone works immediately. Never clobber
-# one that already exists — a user may have swapped in their own key.
-if [[ -f "$ZIMZILLA_HOME/logfare/source" ]]; then
-  ok "existing credential profile left untouched"
-elif [[ -f "$SELF/packaging/logfare/source" ]]; then
-  umask 077
-  cp -f "$SELF/packaging/logfare/source" "$ZIMZILLA_HOME/logfare/source"
-  chmod 600 "$ZIMZILLA_HOME/logfare/source"
-  ok "credential profile installed from the repo (mode 600)"
-else
-  warn "no credential profile yet — setup.sh writes it"
-fi
+  step "Installing $key proxy files"
+  mkdir -p "$dest"
+  cp -f "$src/litellm-config.yaml" "$dest/litellm-config.yaml"
+  cp -f "$src/start-litellm.sh"    "$dest/start-litellm.sh"
+  cp -f "$src/source.example"      "$dest/source.example"
+  chmod +x "$dest/start-litellm.sh"
+  ok "$dest/{litellm-config.yaml,start-litellm.sh}"
+
+  # The profile ships with the repo so a clone works immediately. Never clobber
+  # one that already exists — a user may have swapped in their own key.
+  if [[ -f "$dest/source" ]]; then
+    ok "existing credential profile left untouched"
+  elif [[ -f "$src/source" ]]; then
+    # umask is process-global, so it must not leak out of this function: a
+    # second install_route call would otherwise create its config and manager
+    # 0600/0700 instead of 0644/0755. Run the copy in a subshell.
+    (
+      umask 077
+      cp -f "$src/source" "$dest/source"
+    )
+    chmod 600 "$dest/source"
+    ok "credential profile installed from the repo (mode 600)"
+  else
+    warn "no credential profile yet — setup.sh writes it"
+  fi
+}
+
+install_route logfare
+install_route tokenjuice
 
 # --- done --------------------------------------------------------------------
 

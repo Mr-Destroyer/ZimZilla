@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # start-litellm.sh — run the LiteLLM translation proxy for ZimZilla.
 #
-#   ZimZilla (Anthropic /v1/messages) --▶ LiteLLM :4001 --▶ Logfare (OpenAI)
+#   ZimZilla (Anthropic /v1/messages) --▶ LiteLLM :4000 --▶ Token Juice (OpenAI)
 #
 # Usage:  ./start-litellm.sh [start|stop|restart|status|logs|help]
 #
 # No secrets live here. The upstream key is read from whatever environment
 # variable the config references (api_key: os.environ/<VAR>); that variable must
 # be exported by the profile sourced below.
+#
+# This is the Token Juice route — the fallback for when Logfare is down. The
+# two proxies are independent and can run at the same time on their own ports
+# (:4001 Logfare, :4000 Token Juice); /zim-logfare and /zim-tokenjuice in the
+# harness switch between them.
 
 set -euo pipefail
 
@@ -18,22 +23,22 @@ _self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pw
 # --------------------------- configurable ---------------------------
 ENV_FILE="${LITELLM_ENV_FILE:-$_self_dir/source}"
 CONFIG="${LITELLM_CONFIG:-$_self_dir/litellm-config.yaml}"
-PORT="${LITELLM_PORT:-4001}"
-PID_FILE="${LITELLM_PID_FILE:-/tmp/litellm-zim.pid}"
+PORT="${LITELLM_PORT:-4000}"
+PID_FILE="${LITELLM_PID_FILE:-/tmp/litellm-tj.pid}"
 
 # NOTE: litellm reads the env var LITELLM_LOG as its *log level* ("INFO",
 # "DEBUG"), so it must never carry a file path — doing so crashes it at import
 # with "module 'logging' has no attribute '/tmp/...'". The log-file path lives
 # in LITELLM_LOGFILE. A path-valued LITELLM_LOG is still accepted for
 # backwards compatibility, but is stripped before litellm is launched.
-LOG="${LITELLM_LOGFILE:-/tmp/litellm-zim.log}"
+LOG="${LITELLM_LOGFILE:-/tmp/litellm-tj.log}"
 if [[ "${LITELLM_LOG:-}" == */* ]]; then
   LOG="$LITELLM_LOG"
   unset LITELLM_LOG
 fi
 
 # litellm may live in a venv rather than on PATH; try PATH first, then the usual
-# install spots, then the profile's own venv, then give up loudly below.
+# install spots, then give up loudly below.
 if [[ -z "${LITELLM_BIN:-}" ]]; then
   LITELLM_BIN="$(command -v litellm 2>/dev/null || true)"
 fi
