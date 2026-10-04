@@ -144,8 +144,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     from .ui.app import ZimZillaApp
+    from .termbg import detect_background
 
-    app = ZimZillaApp(cfg)
+    # Ask the terminal for its own background and paint the whole interface in
+    # it. A terminal draws its padding — the gutter around the text grid — in
+    # that colour, and a TUI cannot paint outside the grid, so a hardcoded
+    # background leaves a frame of the wrong colour around everything. This is
+    # best-effort: a terminal that does not answer costs one short timeout and
+    # the palette keeps its own black.
+    app = ZimZillaApp(cfg, term_bg=detect_background())
     app.run()
     return 0
 

@@ -1,11 +1,20 @@
 """Hacker themes for the TUI.
 
-Three variants, all black-background. Each defines a tight palette so the
-whole UI reads as one neon system — no stray colors anywhere.
+Three variants, each a tight palette so the whole UI reads as one neon system —
+no stray colors anywhere.
+
+The background is the terminal's own rather than a hardcoded black. A terminal
+paints its padding in its own background colour, and a TUI can only paint inside
+the text grid, so a hardcoded black leaves a frame of the terminal's colour
+around the whole interface — clearest at the corners, where the terminal's own
+rounding curves it. `__main__` asks the terminal what colour that is (OSC 11)
+and hands it to `get_palette`; the black below is the fallback for terminals
+that do not answer.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 
@@ -76,8 +85,15 @@ PALETTES: dict[str, Palette] = {
 DEFAULT_THEME = "green"
 
 
-def get_palette(name: str) -> Palette:
-    return PALETTES.get(name, PALETTES[DEFAULT_THEME])
+def get_palette(name: str, bg: str | None = None) -> Palette:
+    """The palette for ``name``, on ``bg`` if given.
+
+    ``bg`` comes from the terminal itself (see the module docstring). Omitting it
+    — or passing None — keeps the palette's own black, which is what happens on
+    a terminal that does not answer OSC 11.
+    """
+    palette = PALETTES.get(name, PALETTES[DEFAULT_THEME])
+    return dataclasses.replace(palette, bg=bg) if bg else palette
 
 
 # Hacker verbs cycled by the "thinking" spinner.

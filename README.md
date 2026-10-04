@@ -287,6 +287,7 @@ zimzilla/                     the package
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   theme.py                    green / amber / cyan palettes
+  termbg.py                   asks the terminal for its own background
   ui/                         the terminal interface
 
 allow.yaml.example            declared targets

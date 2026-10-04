@@ -105,7 +105,9 @@ class CommandPalette(ModalScreen[PaletteEntry]):
     DEFAULT_CSS = """
     CommandPalette {
         align: center top;
-        background: rgba(0,0,0,0.75);
+        /* Dim toward the palette background, not black — see the note on
+           PermissionModal in app.py. */
+        background: $background 75%;
     }
     #pal-box {
         width: 76%;

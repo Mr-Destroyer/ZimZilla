@@ -589,6 +589,86 @@ async def test_ui_rails(wd: Path) -> None:
               f"{Text(htxt).cell_len} > {header.size.width}")
 
 
+async def test_termbg(wd: Path) -> None:
+    """The terminal's own background, adopted so the padding matches.
+
+    A terminal paints its padding in its own background colour and a TUI cannot
+    paint outside the text grid, so a hardcoded background leaves a frame of the
+    wrong colour around the whole interface. The app asks over OSC 11 instead.
+    """
+    from zimzilla.termbg import detect_background, is_dark, parse_background
+    from zimzilla.theme import PALETTES, get_palette
+    from zimzilla.ui.app import ZimZillaApp
+
+    # ---- parsing: the terminal's reply, in every form they send it ---------
+    check("termbg: kitty's 16-bit reply parses",
+          parse_background(b"\x1b]11;rgb:1010/1313/1515\x1b\\") == "#101315",
+          repr(parse_background(b"\x1b]11;rgb:1010/1313/1515\x1b\\")))
+    check("termbg: the BEL terminator works too",
+          parse_background(b"\x1b]11;rgb:0000/0000/0000\x07") == "#000000")
+    check("termbg: an 8-bit reply parses",
+          parse_background(b"\x1b]11;rgb:ff/00/00\x1b\\") == "#ff0000")
+    check("termbg: the #rrggbb form parses",
+          parse_background(b"\x1b]11;#1e1e2e\x1b\\") == "#1e1e2e")
+    check("termbg: a reply with no colour is refused",
+          parse_background(b"garbage") is None and parse_background(b"") is None)
+
+    # A light terminal must not be adopted: these palettes are neon-on-black,
+    # and bright green on white is unreadable.
+    check("termbg: dark is accepted, light is refused",
+          is_dark("#101315") and is_dark("#000000") and not is_dark("#ffffff"),
+          f"#101315={is_dark('#101315')} #ffffff={is_dark('#ffffff')}")
+    check("termbg: mid-grey decides the right way at the boundary",
+          is_dark("#7f7f7f") and not is_dark("#808080"))
+
+    # No tty here (the suite runs piped), so detection must decline cleanly
+    # rather than raise — that is the fallback path every non-answering
+    # terminal takes.
+    check("termbg: detection declines without a tty",
+          detect_background() is None, repr(detect_background()))
+
+    # ---- the palette carries it through ------------------------------------
+    check("theme: get_palette adopts the terminal background",
+          get_palette("green", "#101315").bg == "#101315")
+    check("theme: get_palette keeps black with no detection",
+          get_palette("green").bg == "#000000"
+          and get_palette("green", None).bg == "#000000")
+    check("theme: the named palettes are untouched",
+          PALETTES["green"].bg == "#000000" and PALETTES["amber"].bg == "#000000")
+
+    # ---- and it reaches the compositor, corners included -------------------
+    app = ZimZillaApp(_cfg(wd, boot_rain=False), term_bg="#101315")
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        check("termbg: the app adopts it", app.palette.bg == "#101315")
+
+        def row_bgs(strip):
+            out = []
+            for seg in strip._segments:
+                bg = seg.style.bgcolor if seg.style else None
+                out.extend([bg.triplet if bg is not None else None] * len(seg.text))
+            return out
+
+        strips = app.screen._compositor.render_strips()
+        painted = {c for s in strips for c in row_bgs(s)}
+        want = (16, 19, 21)  # #101315
+        check("termbg: every cell is painted in it, edge to edge",
+              painted == {want}, f"{sorted(painted, key=str)}")
+        # The corners are the whole point: that is where the terminal's own
+        # rounding curves the padding into view.
+        check("termbg: the outer corners are painted too",
+              row_bgs(strips[0])[0] == want and row_bgs(strips[-1])[-1] == want,
+              f"TL={row_bgs(strips[0])[0]} BR={row_bgs(strips[-1])[-1]}")
+
+        # Switching palette must not drop back to black.
+        for name in ("amber", "cyan", "green"):
+            app._cmd_theme([name])
+            await pilot.pause()
+            check(f"termbg: /theme {name} keeps the terminal background",
+                  app.palette.bg == "#101315", app.palette.bg)
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
@@ -602,6 +682,7 @@ async def main() -> int:
         await test_mode_gating(wd)
         await test_ui(wd)
         await test_ui_rails(wd)
+        await test_termbg(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

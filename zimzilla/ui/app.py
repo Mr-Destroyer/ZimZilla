@@ -151,8 +151,9 @@ class ZimZillaApp(App):
     }
     Input:focus {
         border: round $accent;
-        /* Textual tints the focused input with $foreground 5%, which renders
-           as a shade outside the palette. Keep it pure black. */
+        /* Textual tints the focused input with $foreground 5%, which renders as
+           a shade outside the palette. Turn the tint off so the field keeps the
+           palette background exactly. */
         background-tint: transparent;
     }
     Input > .input--placeholder, Input > .input--suggestion {
@@ -170,7 +171,10 @@ class ZimZillaApp(App):
     }
     PermissionModal {
         align: center middle;
-        background: rgba(0,0,0,0.75);
+        /* Dim toward the palette background, not toward black: on a terminal
+           whose background is not black, rgba(0,0,0,…) would tint the scrim a
+           different colour from the rest of the interface. */
+        background: $background 75%;
     }
     #perm-box {
         width: 84%;
@@ -217,10 +221,14 @@ class ZimZillaApp(App):
         Binding("ctrl+k", "palette", "commands", priority=True),
     ]
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, term_bg: str | None = None) -> None:
         super().__init__()
         self.cfg = cfg
-        self.palette = get_palette(cfg.theme)
+        #: The terminal's own background, detected over OSC 11 by __main__. None
+        #: on a terminal that does not answer, in which case the palette keeps
+        #: its own black. Stored so /theme can re-skin onto the same colour.
+        self.term_bg = term_bg
+        self.palette = get_palette(cfg.theme, term_bg)
         self.theme_name = cfg.theme
         self.rain_on = cfg.rain
         self.agent = Agent(cfg, permission_handler=self.request_permission)
@@ -1111,7 +1119,7 @@ class ZimZillaApp(App):
             self._sys_line(f"unknown theme: {name}", warn=True)
             return
         self.theme_name = name
-        self.palette = get_palette(name)
+        self.palette = get_palette(name, self.term_bg)
         self._apply_palette()
         self._sys_line(f"theme switched to {name}", ok=True)
 
