@@ -22,8 +22,20 @@ from ..config import KNOWN_MODELS, MODES, Config, price_for
 from ..theme import THINKING_VERBS, get_palette
 from . import renderers as R
 from .boot import BootScreen
-from .complete import CompletionPopup
-from .widgets import ActivityPane, ChatPane, HeaderBar, StatusBar
+from .complete import CompletionPopup, _iter_files
+from .palette_cmd import CommandPalette, PaletteEntry
+from .rails import LoopRail, TelemetryRail
+from .widgets import ChatPane, HeaderBar, StatusBar
+
+
+def _dedupe(items) -> list[str]:
+    """Order-preserving de-dupe.
+
+    ``Scope.extract_targets`` can return the same host twice — its URL pass and
+    its bare-token pass both match — and the operator should read the target
+    once, not twice.
+    """
+    return list(dict.fromkeys(items))
 
 
 class PermissionModal(ModalScreen[str]):
@@ -37,16 +49,19 @@ class PermissionModal(ModalScreen[str]):
         Binding("enter", "choose('yes')", "yes"),
     ]
 
-    def __init__(self, name: str, preview, palette, remaining: int = 0) -> None:
+    def __init__(self, name: str, preview, palette, remaining: int = 0,
+                 radius: str = "") -> None:
         super().__init__()
         self.tool_name = name
         self.preview = preview
         self.palette = palette
         self.remaining = remaining
+        self.radius = radius
 
     def compose(self) -> ComposeResult:
         with Vertical(id="perm-box"):
             yield Static(id="perm-title")
+            yield Static(id="perm-radius")
             with VerticalScroll(id="perm-body"):
                 yield Static(id="perm-content")
             yield Static(id="perm-keys")
@@ -71,6 +86,13 @@ class PermissionModal(ModalScreen[str]):
         else:
             content = R.render_output_text(self.preview.body, p)
         self.query_one("#perm-content", Static).update(content)
+
+        # Blast radius: what this call would actually touch, before you answer.
+        if self.radius:
+            rad = Text()
+            rad.append("⌖ ", style=p.dim)
+            rad.append(self.radius, style=p.amber)
+            self.query_one("#perm-radius", Static).update(rad)
 
         keys = Text()
         keys.append("[y]", style=f"bold {p.accent}")
@@ -108,6 +130,9 @@ class ZimZillaApp(App):
         width: 100%;
         height: 1fr;
     }
+    /* Below ~100 cols the rails are hidden by on_resize and the layout is
+       today's two-pane shell. The transcript is never the thing that shrinks. */
+    Screen.narrow LoopRail, Screen.narrow TelemetryRail { display: none; }
     #bottom-dock {
         dock: bottom;
         height: auto;
@@ -160,7 +185,26 @@ class ZimZillaApp(App):
         height: auto;
         max-height: 24;
     }
+    /* The palette's query field lives in the app CSS, not the screen's
+       DEFAULT_CSS: the global `Input:focus` rule below would otherwise give it
+       a border, and a 1-row field with a border has no content area at all. */
+    #pal-query, #pal-query:focus {
+        height: 1;
+        border: none;
+        background: $background;
+        color: $primary;
+        padding: 0;
+        background-tint: transparent;
+    }
+    #pal-query > .input--placeholder { color: $secondary; background: $background; }
+    #pal-query > .input--cursor { color: $background; background: $accent; }
+
+    /* NOTE: no `Input:focus` rule here. The global rule above matches the
+       palette's query field too and, at height 1, leaves no content area — so
+       the typed query would be invisible. #pal-query resets it explicitly. */
+
     #perm-title { height: 1; }
+    #perm-radius { height: auto; color: $warning; }
     #perm-content { height: auto; }
     #perm-keys { height: 1; margin-top: 1; }
     #perm-progress { height: 1; color: #0b6e2a; }
@@ -170,6 +214,7 @@ class ZimZillaApp(App):
         Binding("ctrl+c", "interrupt", "interrupt", priority=True),
         Binding("ctrl+d", "quit", "quit", priority=True),
         Binding("ctrl+l", "clear", "clear", priority=True),
+        Binding("ctrl+k", "palette", "commands", priority=True),
     ]
 
     def __init__(self, cfg: Config) -> None:
@@ -185,21 +230,31 @@ class ZimZillaApp(App):
         self.busy = False
         self._cancelled = False
         self._stream_buf = ""
+        # Tokens-per-second is derived from the delta in session output tokens
+        # across successive 1s ticks — no separate timer, and no rate to report
+        # while nothing is streaming.
+        self._last_output_tokens = 0
+        # The prompt size of the most recent API call. That — not the session
+        # cumulative input total — is how full the context window actually is:
+        # the cumulative figure counts every turn's prompt and grows forever.
+        self._last_call_input = 0
 
     # ---- compose ----------------------------------------------------------
     def compose(self) -> ComposeResult:
-        # The matrix rain is painted *inside* the transcript and activity panes
-        # (see RainRichLog) — Textual's compositor does not blend widgets across
+        # The matrix rain is painted *inside* the transcript pane (see
+        # RainRichLog) — Textual's compositor does not blend widgets across
         # layers, so a widget on a lower layer would be hidden by the panes.
+        # The rails are deliberately crisp: no rain, so the numbers stay legible.
         yield HeaderBar(self.palette, self.cfg.model, str(self.cfg.workdir),
                         self.cfg.unsafe, self.theme_name, mode=self.cfg.mode)
         with Horizontal(id="main"):
+            yield LoopRail(self.palette)
             yield ChatPane(self.palette, rain=self.rain_on)
-            yield ActivityPane(self.palette, self.cfg.model, rain=self.rain_on)
+            yield TelemetryRail(self.palette, total_context=self.cfg.context_window)
         with Vertical(id="bottom-dock"):
             yield CompletionPopup(self.palette, id="complete")
             yield StatusBar(self.palette)
-            yield Input(placeholder="❯ message ZimZilla…   ( / for commands, @ for files )",
+            yield Input(placeholder="❯ message ZimZilla…   ( / commands · @ files · ^K palette )",
                         id="input")
 
     def on_mount(self) -> None:
@@ -284,6 +339,8 @@ class ZimZillaApp(App):
         inp.focus()
         self.set_interval(1.0, self._tick_status)
         self.set_interval(0.55, self._flash_cursor)
+        self.set_interval(0.25, self._tick_rails)
+        self._sync_rails()
         if text and submit:
             # Enter arrived during boot: deliver the whole buffered line now.
             self.call_after_refresh(self._submit_text, text)
@@ -376,6 +433,62 @@ class ZimZillaApp(App):
         bar = self._status_bar()
         if bar is not None:
             bar.render_bar()
+        self._sample_throughput()
+
+    def _sample_throughput(self) -> None:
+        """Feed the waveform a tokens-per-second sample from the token delta.
+
+        Sampled on the existing 1s status tick rather than a timer of its own:
+        the delta over one second *is* the rate, so a second timer would only
+        measure the same thing more often.
+        """
+        now = self.agent.session_output_tokens
+        delta = max(0, now - self._last_output_tokens)
+        self._last_output_tokens = now
+        if not self.busy:
+            return
+        try:
+            self.query_one(TelemetryRail).push_wave(float(delta))
+        except Exception:
+            pass
+
+    # ---- rails ------------------------------------------------------------
+    def _tick_rails(self) -> None:
+        """0.25s heartbeat: the loop node breathes, the live card's clock runs."""
+        try:
+            self.query_one(LoopRail).tick_pulse()
+        except Exception:
+            return
+        try:
+            self.query_one(ChatPane).card_tick()
+        except Exception:
+            pass
+
+    def _sync_rails(self) -> None:
+        """Push the agent's session totals into the rails.
+
+        Called at boot and after every turn — anywhere the numbers change
+        without an event to carry them.
+        """
+        try:
+            rail = self.query_one(TelemetryRail)
+            loop = self.query_one(LoopRail)
+        except Exception:
+            return
+        a = self.agent
+        rail.set_cost(a.session_cost, a.session_input_tokens, a.session_output_tokens)
+        rail.set_context(self._last_call_input)
+        loop.set_counters(a.turn_count, self.query_one(StatusBar).iterations)
+
+    def on_resize(self, event) -> None:
+        """Drop the rails on a narrow terminal rather than squeezing the chat."""
+        screen = self.screen
+        if screen is None:
+            return
+        if event.size.width < 100:
+            screen.add_class("narrow")
+        else:
+            screen.remove_class("narrow")
 
     def _flash_cursor(self) -> None:
         if not self.busy:
@@ -468,6 +581,13 @@ class ZimZillaApp(App):
         self._stream_buf = ""
         self._set_rain(False)  # keep the transcript readable during a turn
 
+        loop = self._loop_rail()
+        if loop is not None:
+            loop.set_stage("thinking")
+            loop.set_counters(self.agent.turn_count + 1, 0)
+
+        # The spine joint that opens the turn, then the prompt it belongs to.
+        chat.write_block(R.turn_marker(self.agent.turn_count + 1, p))
         chat.write_block(R.user_prompt_block(text, p))
         bar.set_activity("thinking", busy=True)
         spinner = asyncio.create_task(self._verb_spinner())
@@ -485,6 +605,7 @@ class ZimZillaApp(App):
             self.busy = False
             spinner.cancel()
             chat.clear_stream()
+            chat.card_finish()
             self._stream_buf = ""
             bar.set_activity("idle", busy=False)
             bar.input_tokens = self.agent.session_input_tokens
@@ -493,6 +614,11 @@ class ZimZillaApp(App):
             bar.turns = self.agent.turn_count
             bar.model = self.cfg.model
             bar.render_bar()
+            loop = self._loop_rail()
+            if loop is not None:
+                loop.set_stage("idle")
+                loop.set_counters(self.agent.turn_count, bar.iterations)
+            self._sync_rails()
             self._set_rain(self.rain_on)
             if self._cancelled:
                 self.agent.cancel_turn()
@@ -502,14 +628,18 @@ class ZimZillaApp(App):
     async def _handle_event(self, ev: dict) -> None:
         p = self.palette
         chat = self.query_one(ChatPane)
-        act = self.query_one(ActivityPane)
         bar = self.query_one(StatusBar)
+        loop = self._loop_rail()
+        tele = self._telemetry_rail()
         etype = ev["type"]
 
         if etype == "thinking":
             bar.iterations = ev["iteration"] + 1
             bar.turns = self.agent.turn_count
             bar.set_activity("thinking", busy=True)
+            if loop is not None:
+                loop.set_stage("thinking")
+                loop.set_counters(self.agent.turn_count, bar.iterations)
 
         elif etype == "text_delta":
             self._stream_buf += ev["text"]
@@ -531,16 +661,32 @@ class ZimZillaApp(App):
             bar.output_tokens = self.agent.session_output_tokens + ev["output"]
             bar.cost = self.agent.session_cost + ev["cost"]
             bar.render_bar()
+            # ev["input"] is this one call's prompt size — the closest thing to
+            # a live context reading available.
+            self._last_call_input = ev["input"]
+            if tele is not None:
+                tele.set_context(self._last_call_input)
 
         elif etype == "tool_call":
             self._flush_stream(chat, p)
-            act.log_call(ev["name"], ev["args"])
+            args = ev["args"] or {}
+            # The live card: one slot, transitioning requested → running. It is
+            # only *visible* for a slow tool — an instant read finishes before
+            # the next paint, which is the correct behaviour, not a bug.
+            chat.card_finish()
+            chat.card_begin(ev["name"], args, self._targets_for(ev["name"], args))
+            if tele is not None:
+                tele.touch_file(self._file_for(ev["name"], args))
+                tele.note_call(ev["name"])
+            if loop is not None:
+                loop.set_stage("calling")
             if ev.get("gated"):
                 bar.set_activity(f"awaiting permission: {ev['name']}", busy=True)
 
         elif etype == "tool_result":
             args = ev.get("args") or {}
             diff = ev.get("diff")
+            chat.card_finish()
             if diff and not ev["is_error"] and diff.strip() != "(no textual change)":
                 verb = "WRITE" if ev["name"] == "write_file" else "EDIT"
                 chat.write_block(R.diff_panel(args.get("path", "?"), diff, p, verb))
@@ -549,19 +695,70 @@ class ZimZillaApp(App):
                     R.tool_result_panel(ev["name"], args, ev["output"], p,
                                         ev["is_error"], ev.get("meta"))
                 )
-            act.log_result(ev["name"], ev["output"], ev["is_error"], ev.get("meta") or {})
+            if tele is not None:
+                tele.note_result(ev["name"], not ev["is_error"])
+            if loop is not None:
+                loop.set_stage("observing")
 
         elif etype == "blocked":
+            chat.card_finish()
             chat.write_block(R.blocked_block(ev["targets"], p))
-            act.log_blocked(ev["targets"])
+            if tele is not None:
+                tele.note_result(ev.get("name", "bash"), False)
+            if loop is not None:
+                loop.set_stage("observing")
 
         elif etype == "error":
             self._flush_stream(chat, p)
+            chat.card_finish()
             chat.write_block(R.error_block(ev["message"], p))
 
         elif etype == "turn_end":
             self._flush_stream(chat, p)
+            chat.card_finish()
             self._cost_line(ev)
+            if tele is not None:
+                tele.set_cost(ev["cost"] + self.agent.session_cost, bar.input_tokens,
+                              bar.output_tokens)
+            if loop is not None:
+                loop.set_stage("idle")
+
+    # ---- rails helpers ----------------------------------------------------
+    def _loop_rail(self) -> LoopRail | None:
+        try:
+            return self.query_one(LoopRail)
+        except Exception:
+            return None
+
+    def _telemetry_rail(self) -> TelemetryRail | None:
+        try:
+            return self.query_one(TelemetryRail)
+        except Exception:
+            return None
+
+    def _file_for(self, name: str, args: dict) -> str:
+        """The path a tool acts on, for the file river. Empty when there is none."""
+        if name in {"read_file", "write_file", "edit_file", "list_dir"}:
+            return str(args.get("path", "") or "")
+        if name in {"glob", "grep"}:
+            return str(args.get("path", "") or "")
+        return ""
+
+    def _targets_for(self, name: str, args: dict) -> list[str]:
+        """Hosts a bash command names — shown on the card, never enforced here.
+
+        Reuses the scope guard's extractor, so the card shows exactly what the
+        deny-list would have looked at.
+        """
+        if name != "bash":
+            return []
+        command = args.get("command", "")
+        if not command:
+            return []
+        try:
+            return _dedupe(self.agent.scope.extract_targets(command))[:4]
+        except Exception:
+            return []
 
     def _flush_stream(self, chat: ChatPane, palette) -> None:
         if self._stream_buf.strip():
@@ -592,8 +789,42 @@ class ZimZillaApp(App):
             if not fut.done():
                 fut.set_result(decision or "no")
 
-        self.push_screen(PermissionModal(name, preview, self.palette), _done)
+        self.push_screen(
+            PermissionModal(name, preview, self.palette,
+                            radius=self._blast_radius(name, args)),
+            _done,
+        )
         return await fut
+
+    def _blast_radius(self, name: str, args: dict) -> str:
+        """One line naming what a gated call would touch.
+
+        Latent by design: every shipped mode lists its gated tools in `auto` or
+        `deny`, so this modal never fires today. It is correct if a mode is ever
+        added that leaves a tool gated — and the same target scan is shown on
+        the live tool card, which *is* reachable.
+        """
+        from ..sandbox import SandboxError, resolve_in_jail
+
+        args = args or {}
+        if name == "bash":
+            command = args.get("command", "")
+            try:
+                targets = self.agent.scope.extract_targets(command)
+            except Exception:
+                targets = []
+            if targets:
+                return "targets: " + ", ".join(_dedupe(targets))
+            return "no network targets named"
+        path = str(args.get("path", "") or "")
+        if not path:
+            return ""
+        try:
+            resolved = resolve_in_jail(self.cfg.workdir, path, self.cfg.unsafe)
+        except SandboxError as e:
+            return f"REFUSED — {e}"
+        exists = "exists" if resolved.exists() else "new file"
+        return f"{resolved}  ({exists})"
 
     # ---- system lines -----------------------------------------------------
     def _sys_line(self, message: str, warn: bool = False, ok: bool = False) -> None:
@@ -728,8 +959,18 @@ class ZimZillaApp(App):
 
     def _cmd_clear(self, args=None) -> None:
         self.query_one(ChatPane).clear()
-        self.query_one(ActivityPane).clear()
         self.agent.clear()
+        tele = self._telemetry_rail()
+        if tele is not None:
+            tele.clear_files()
+        loop = self._loop_rail()
+        if loop is not None:
+            loop.trail.clear()
+            loop.set_stage("idle")
+            loop.set_counters(0, 0)
+        self._last_output_tokens = 0
+        self._last_call_input = 0
+        self._sync_rails()
         self._splash()
         self._sys_line("transcript and history cleared", ok=True)
 
@@ -855,7 +1096,6 @@ class ZimZillaApp(App):
     def _set_rain(self, active: bool) -> None:
         """Turn the rain animation on/off (paused during active turns)."""
         self.query_one(ChatPane).set_rain(active)
-        self.query_one(ActivityPane).set_rain(active)
 
     def _cmd_rain(self, args=None) -> None:
         self.rain_on = not self.rain_on
@@ -984,9 +1224,11 @@ class ZimZillaApp(App):
             pass
 
         self.query_one(ChatPane).apply_palette(p)
-        act = self.query_one(ActivityPane)
-        act.apply_palette(p)
-        act.styles.border_left = ("heavy", p.dim)
+        try:
+            self.query_one(LoopRail).apply_palette(p)
+            self.query_one(TelemetryRail).apply_palette(p)
+        except Exception:
+            pass
 
         h = self.query_one(HeaderBar)
         h.palette = p
@@ -1053,6 +1295,99 @@ class ZimZillaApp(App):
             self.query_one(ChatPane).write_block(t)
         else:
             self._sys_line(f"compact failed: {result}", warn=True)
+
+    # ---- command palette --------------------------------------------------
+    def action_palette(self) -> None:
+        """Ctrl+K: every action, fuzzy-searchable."""
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+        self.push_screen(CommandPalette(self._palette_entries(), self.palette),
+                         self._palette_done)
+
+    def _palette_entries(self) -> list[PaletteEntry]:
+        """Build the action list. Each entry closes over what it needs."""
+        entries: list[PaletteEntry] = []
+
+        # Commands — derived from the same table _handle_command dispatches on,
+        # so the palette cannot drift out of sync with the slash commands.
+        commands = [
+            ("/help", "command reference", "help"),
+            ("/mode", "switch mode", "mode"),
+            ("/model", "show or switch the model", "model"),
+            ("/cost", "session token and cost breakdown", "cost"),
+            ("/scope", "scope guard status", "scope"),
+            ("/rain", "toggle the matrix rain", "rain"),
+            ("/theme", "switch palette", "theme"),
+            ("/zim-source", "upstream sources and status", "zim-source"),
+            ("/save", "write the session to disk", "save"),
+            ("/load", "restore a saved session", "load"),
+            ("/compact", "summarise history to free context", "compact"),
+            ("/clear", "wipe transcript and history", "clear"),
+            ("/exit", "leave the harness", "exit"),
+        ]
+        for title, hint, key in commands:
+            entries.append(PaletteEntry(
+                key=f"cmd:{key}", title=title, hint=hint, group="command",
+                run=(lambda k=key: self._handle_command("/" + k)),
+            ))
+
+        # Modes.
+        for name, spec in MODES.items():
+            entries.append(PaletteEntry(
+                key=f"mode:{name}", title=f"mode {name}",
+                hint=spec["blurb"], group="mode",
+                run=(lambda n=name: self._set_mode(n)),
+            ))
+
+        # Themes.
+        for name in ("green", "amber", "cyan"):
+            entries.append(PaletteEntry(
+                key=f"theme:{name}", title=f"theme {name}", group="theme",
+                run=(lambda n=name: self._cmd_theme([n])),
+            ))
+
+        # Models, capped: the catalog can be long and the palette is a shortcut,
+        # not a replacement for /model.
+        try:
+            models = sources_mod.models_for(self.cfg.base_url) or tuple(KNOWN_MODELS)
+        except Exception:
+            models = tuple(KNOWN_MODELS)
+        for name in models[:24]:
+            pin, pout = price_for(name)
+            entries.append(PaletteEntry(
+                key=f"model:{name}", title=name,
+                hint=f"${pin:.2f}/${pout:.2f} per Mtok", group="model",
+                run=(lambda n=name: self._cmd_model([n])),
+            ))
+
+        # Files, so the palette can also be a "jump to" — the action inserts the
+        # @mention into the prompt rather than submitting it.
+        try:
+            for path in _iter_files(self.cfg.workdir, limit=120)[:120]:
+                entries.append(PaletteEntry(
+                    key=f"file:{path}", title=path, group="file",
+                    run=(lambda pth=path: self._mention_file(pth)),
+                ))
+        except Exception:
+            pass
+
+        return entries
+
+    def _mention_file(self, path: str) -> None:
+        """Drop an @mention into the prompt, cursor at the end."""
+        inp = self.query_one("#input", Input)
+        inp.value = f"@{path} "
+        inp.cursor_position = len(inp.value)
+        inp.focus()
+
+    def _palette_done(self, entry: PaletteEntry | None) -> None:
+        if entry is None or entry.run is None:
+            self.query_one("#input", Input).focus()
+            return
+        # The screen is gone by the time this runs; run the action directly.
+        entry.run()
+        self.query_one("#input", Input).focus()
 
     # ---- key actions ------------------------------------------------------
     def action_interrupt(self) -> None:

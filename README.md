@@ -32,10 +32,12 @@ keeps going until the job is done — while you watch it work.
 
 ### The shell
 
-<img src="docs/screenshots/02-shell.png" alt="the ZIMZILLA shell — header badges, transcript, activity pane, status bar" width="880">
+<img src="docs/screenshots/02-shell.png" alt="the ZIMZILLA shell — loop rail, transcript with a live tool card, telemetry rail, status bar" width="880">
 
-*A transcript that streams, a header that tells you where you are,
-a status bar that tells you what it cost.*
+*A transcript that streams, a tool card that shows the call while it runs,
+and two rails that keep the loop and the cost in view. The left rail is the
+agent's state — think, call, observe, idle. The right rail is the bill:
+throughput, how full the context is, what it has cost, which files it touched.*
 
 <table>
 <tr>
@@ -260,7 +262,13 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 mention attaches its contents to your message, so the agent can act on it
 immediately. `↑`/`↓` to move, `Tab` to accept, `Esc` to dismiss.
 
-**Keys.** `Ctrl+C` interrupts the current turn · `Ctrl+D` exits · `Ctrl+L` clears.
+**Keys.** `Ctrl+K` command palette · `Ctrl+C` interrupts the current turn ·
+`Ctrl+D` exits · `Ctrl+L` clears.
+
+The palette is the fastest way to reach anything: hit `Ctrl+K` and type a few
+letters. It searches every slash command, every mode, every model on your
+upstream, and every file in the working directory — so `/mode zim` is `mkz`,
+and a file you half-remember is three characters away.
 
 ---
 
@@ -285,6 +293,8 @@ allow.yaml.example            declared targets
 out-of-scope.yaml.example     hosts that are never touched
 
 docs/                         README graphics + screenshots
+  gen_graphics.py             regenerate the animated header/hero SVGs
+  gen_screenshots.py          re-shoot the screenshots from a live app
 tests/                        the test suite
 ```
 

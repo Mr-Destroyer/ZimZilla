@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from rich.text import Text  # noqa: E402
+
 from zimzilla import tools, websearch  # noqa: E402
 from zimzilla.agent import Agent  # noqa: E402
 from zimzilla.config import Config, MODES  # noqa: E402
@@ -39,9 +41,9 @@ class _Blk:
 
 
 class _Msg:
-    def __init__(self, content):
+    def __init__(self, content, usage=None):
         self.content = content
-        self.usage = None
+        self.usage = usage
 
 
 def _stub_agent(mode: str, workdir: Path):
@@ -397,6 +399,196 @@ async def test_ui(wd: Path) -> None:
         check("/help documents modes and mentions", "MODES" in shot and "MENTIONS" in shot)
 
 
+class _Usage:
+    """A usage block, as the SDK's message objects carry one."""
+
+    def __init__(self, i, o):
+        self.input_tokens, self.output_tokens = i, o
+
+
+def _stub_agent_usage(workdir: Path):
+    """An agent that makes one bash call and one read, reporting usage.
+
+    The mode-gating stub above yields no `usage` block, so the telemetry gauge
+    and waveform would have nothing to move on. This one reports real token
+    counts, so the rails can be driven end to end.
+    """
+    agent = Agent(_cfg(workdir), permission_handler=lambda *a: asyncio.sleep(0, result="yes"))
+    state = {"n": 0}
+
+    async def fake_stream():
+        state["n"] += 1
+        if state["n"] == 1:
+            yield ({"type": "text_delta", "text": "working"}, None)
+            yield (None, _Msg([
+                _Blk(type="text", text="working"),
+                _Blk(type="tool_use", id="t1", name="bash",
+                     input={"command": "echo RAIL_OK"}),
+                _Blk(type="tool_use", id="t2", name="read_file",
+                     input={"path": "alpha.py"}),
+            ], _Usage(51_200, 120)))
+            return
+        yield (None, _Msg([_Blk(type="text", text="done")], _Usage(52_500, 40)))
+
+    agent._stream_once = fake_stream
+    return agent
+
+
+async def test_ui_rails(wd: Path) -> None:
+    """The Mission Control rails: mount, cycle, gauge, card, palette."""
+    from zimzilla.ui.palette_cmd import CommandPalette, PaletteEntry, fuzzy, rank
+    from zimzilla.ui.rails import (CallStrip, ContextGauge, FileRiver, LoopRail,
+                                   TelemetryRail, Waveform)
+    from zimzilla.ui.widgets import ChatPane, HeaderBar
+
+    # ---- fuzzy matching (pure, no app needed) -----------------------------
+    check("fuzzy: subsequence matches", fuzzy("md", "/model") is not None)
+    check("fuzzy: non-subsequence rejected", fuzzy("zz", "/model") is None)
+    check("fuzzy: empty query matches everything", fuzzy("", "/model") == (0, []))
+    ents = [
+        PaletteEntry("a", "/model", "switch model", "command"),
+        PaletteEntry("b", "/mode", "switch mode", "command"),
+        PaletteEntry("c", "/zim-logfare", "upstream", "command"),
+    ]
+    check("fuzzy: prefix ranks above scattered",
+          [e.title for e, _ in rank(ents, "md")][0] == "/model")
+    check("fuzzy: filters non-matches out", len(rank(ents, "mode")) <= len(ents))
+    check("fuzzy: hint is searched too",
+          any(e.title == "/model" for e, _ in rank(ents, "switch")))
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app.agent = _stub_agent_usage(wd)
+    async with app.run_test(size=(118, 34)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        app.query_one("#input").focus()
+        await pilot.pause()
+
+        # ---- the three rails are mounted and visible ----------------------
+        loop = app.query_one(LoopRail)
+        tele = app.query_one(TelemetryRail)
+        check("rails: loop rail mounted", loop.display and loop.region.width > 0)
+        check("rails: telemetry rail mounted", tele.display and tele.region.width > 0)
+        check("rails: loop starts idle", loop.stage == "idle")
+
+        # ---- a turn drives the whole loop --------------------------------
+        app._run_turn("go")
+        for _ in range(50):
+            await pilot.pause()
+        await asyncio.sleep(0.25)
+        await pilot.pause()
+
+        check("rails: loop returned to idle", loop.stage == "idle")
+        check("rails: loop trail records the cycle",
+              {"thinking", "calling", "observing"} <= set(loop.trail), str(list(loop.trail)))
+        check("rails: turn counter advanced", loop.turn == 1)
+
+        gauge = tele.query_one(ContextGauge)
+        check("rails: gauge tracks the last call's prompt size", gauge.used == 52_500,
+              f"{gauge.used}")
+        check("rails: gauge ratio is the prompt share of the window",
+              abs(gauge.ratio - 52_500 / 128_000) < 1e-6, f"{gauge.ratio:.3f}")
+
+        calls = tele.query_one(CallStrip)
+        check("rails: every tool call is logged", len(calls.calls) == 2, str(list(calls.calls)))
+        check("rails: calls are marked done, not still running",
+              all(o != "run" for _, o in calls.calls), str(list(calls.calls)))
+        check("rails: bash and read are both recorded",
+              {n for n, _ in calls.calls} == {"bash", "read_file"})
+
+        river = tele.query_one(FileRiver)
+        check("rails: file river tracks the touched file", "alpha.py" in river.touched,
+              str(dict(river.touched)))
+        check("rails: bash does not appear in the file river",
+              not any("bash" in k for k in river.touched))
+
+        chat = app.query_one(ChatPane)
+        check("rails: the live card is flushed after the turn", not chat.card_active)
+
+        # ---- the gauge escalates at its thresholds -----------------------
+        gauge.set(128_000)
+        check("rails: gauge saturates at 100%", gauge.ratio == 1.0)
+        gauge.set(200_000)
+        check("rails: gauge never exceeds 100%", gauge.ratio == 1.0)
+        gauge.set(0)
+
+        # ---- the live card lifecycle -------------------------------------
+        chat.card_begin("bash", {"command": "sleep 1"})
+        check("rails: card_begin opens the slot", chat.card_active)
+        check("rails: card is visible while running",
+              not app.query_one("#card").has_class("hidden"))
+        chat.card_finish()
+        check("rails: card_finish closes the slot", not chat.card_active)
+        check("rails: card is hidden when closed",
+              app.query_one("#card").has_class("hidden"))
+
+        # ---- Ctrl+K opens the palette ------------------------------------
+        await pilot.press("ctrl+k")
+        await pilot.pause()
+        check("palette: Ctrl+K opens it", isinstance(app.screen, CommandPalette))
+        pal = app.screen
+        check("palette: lists commands and modes", len(pal.results) > 5,
+              f"{len(pal.results)} entries")
+        await pilot.press("m", "o", "d")
+        await pilot.pause()
+        check("palette: typing narrows the list",
+              len(pal.results) < len(pal.entries), f"{len(pal.results)} of {len(pal.entries)}")
+        check("palette: the query reached the field",
+              pal.query_one("#pal-query").value == "mod")
+        await pilot.press("escape")
+        await pilot.pause()
+        check("palette: escape dismisses it", not isinstance(app.screen, CommandPalette))
+
+        # ---- the waveform names its own signal ----------------------------
+        wave = tele.query_one(Waveform)
+        wave.push(180.0)
+        check("rails: the waveform keeps the newest sample", wave.latest == 180.0)
+        check("rails: the waveform caption carries the rate",
+              "tok/s" in str(wave.render()) and "180.0" in str(wave.render()),
+              str(wave.render()).replace("\n", " | "))
+
+        # ---- narrow terminals drop the rails ------------------------------
+        await pilot.resize_terminal(92, 34)
+        await pilot.pause()
+        check("narrow: the screen carries the narrow class",
+              app.screen.has_class("narrow"))
+        check("narrow: the loop rail is hidden", not loop.display)
+        check("narrow: the telemetry rail is hidden", not tele.display)
+        check("narrow: the transcript is still visible",
+              app.query_one(ChatPane).display)
+
+        # The header sheds cosmetics before facts: the scope status and the
+        # sandbox indicator must survive a narrow bar even though the cwd and
+        # theme do not. It is measured against the row width, not a fixed
+        # threshold, so a long cwd sheds itself rather than silently eating
+        # the scope status.
+        header = app.query_one(HeaderBar)
+        htxt = str(header.render())
+        check("narrow: the scope status survives", "scope" in htxt, htxt)
+        check("narrow: the sandbox indicator survives", "sandbox" in htxt, htxt)
+        check("narrow: the theme is shed", "theme:" not in htxt, htxt)
+        check("narrow: the header still fits its row",
+              Text(htxt).cell_len <= header.size.width,
+              f"{Text(htxt).cell_len} > {header.size.width}")
+
+        await pilot.resize_terminal(140, 34)
+        await pilot.pause()
+        check("wide: the rails come back", loop.display and tele.display)
+        check("wide: the theme returns", "theme:" in str(header.render()),
+              str(header.render()))
+        check("wide: the cwd returns too", str(wd) in str(header.render()))
+
+        # A cwd long enough to overflow must shed *itself*, never the scope.
+        header.cwd = "~/" + "very-long-project-name/" * 4
+        header.refresh_content()
+        await pilot.pause()
+        htxt = str(header.render())
+        check("wide: an over-long cwd does not push the scope off",
+              "scope" in htxt and "sandbox" in htxt
+              and Text(htxt).cell_len <= header.size.width,
+              f"{Text(htxt).cell_len} > {header.size.width}")
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
@@ -409,6 +601,7 @@ async def main() -> int:
         test_scope_semantics(wd)
         await test_mode_gating(wd)
         await test_ui(wd)
+        await test_ui_rails(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

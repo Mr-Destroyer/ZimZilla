@@ -164,6 +164,11 @@ class Config:
     # per-read timeout, so it bounds the gap between streamed chunks, not the
     # length of a healthy reply.
     request_timeout: float = 120.0
+    # Context window of the active model, in tokens. Used only to draw the
+    # telemetry gauge — it is never sent to the endpoint and never enforced:
+    # the harness does not truncate history on its own (that is /compact's
+    # job). A wrong value therefore costs nothing but a misleading gauge.
+    context_window: int = 128_000
     max_iterations: int = 40
     bash_timeout: int = 120
     max_output_chars: int = 20_000

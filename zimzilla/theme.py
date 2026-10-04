@@ -109,4 +109,6 @@ TOOL_ICONS = {
     "glob": "✳",
     "grep": "⌕",
     "list_dir": "▤",
+    "search_web": "⌕",
+    "web_fetch": "⇣",
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from rich.console import Group, RenderableType
 from rich.panel import Panel
@@ -193,6 +194,55 @@ def tool_result_panel(
         border_style=border,
         padding=(0, 1),
     )
+
+
+# Braille spinner, advanced one frame per rail tick (~0.25s).
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def tool_running_panel(
+    name: str,
+    args: dict,
+    palette: Palette,
+    elapsed: float = 0.0,
+    frame: int = 0,
+    targets: list[str] | None = None,
+) -> Panel:
+    """The *live* card for a tool that is still running.
+
+    Same shape as :func:`tool_call_panel`, but the border is lit and the title
+    carries a spinner and a running clock, so a slow command is visibly in
+    flight rather than indistinguishable from a hung one.
+    """
+    body = Text()
+    body.append(_detail(name, args), style=palette.primary if name == "bash" else palette.accent)
+    if targets:
+        # The hosts the command names, read straight off the command text. This
+        # is the same best-effort scan the scope guard uses — shown, not
+        # enforced, because the gate is unreachable in the shipped modes.
+        body.append("\n")
+        body.append("⌖ ", style=palette.dim)
+        body.append(", ".join(targets), style=palette.amber)
+
+    spin = _SPINNER[frame % len(_SPINNER)]
+    status = f"{spin} {elapsed:.1f}s"
+    return Panel(
+        body,
+        title=_header(name, args, palette, status=status),
+        title_align="left",
+        border_style=palette.accent,
+        padding=(0, 1),
+    )
+
+
+def turn_marker(turn: int, palette: Palette, width: int = 58) -> Text:
+    """The spine joint that opens a turn in the transcript."""
+    stamp = datetime.now().strftime("%H:%M")
+    head = f"├─ turn {turn} ─ {stamp} "
+    t = Text()
+    t.append(head, style=f"bold {palette.accent}")
+    t.append("─" * max(0, width - len(head)), style=palette.dim)
+    return t
 
 
 def render_output_text(output: str, palette: Palette) -> Text:
