@@ -140,23 +140,23 @@ mkdir -p "$LOG_DIR"
     printf '# Treat this file as a credential. Never commit it.\n\n'
     printf 'export ANTHROPIC_BASE_URL="http://localhost:%s"\n' "$PORT"
     printf 'export ANTHROPIC_AUTH_TOKEN="%s"\n' "$KEY"
-    printf 'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n\n'
+    printf 'export ANTHROPIC_MODEL="claude-opus-4.6"\n\n'
     printf '# Load-bearing: an empty string keeps ANTHROPIC_AUTH_TOKEN authoritative\n'
     printf '# and clears any real API key inherited from the shell.\n'
     printf 'export ANTHROPIC_API_KEY=""\n\n'
     printf '# Model aliases — see litellm-config.yaml for the full list.\n'
-    printf 'export MODEL_DEFAULT="deepseek-v4.1-flash"\n'
-    printf 'export MODEL_OPUS="claude-opus-5"\n'
-    printf 'export MODEL_FABLE="claude-fable-5-1"\n'
-    printf 'export MODEL_ASTRA="gpt-6-astra"\n'
-    printf 'export MODEL_SOL="gpt-6-sol"\n'
+    printf 'export MODEL_DEFAULT="claude-opus-4.6"\n'
+    printf 'export MODEL_OPUS="claude-opus-4.6"\n'
+    printf 'export MODEL_SONNET="claude-sonnet-4.6"\n'
     printf 'export MODEL_DEEPSEEK="deepseek-v3.2"\n'
-    printf 'export MODEL_KIMI="kimi-k2.7-code"\n'
-    printf 'export MODEL_GLM="glm-5.3"\n'
+    printf 'export MODEL_KIMI="kimi-k2.5"\n'
+    printf 'export MODEL_KIMI_THINKING="kimi-k2-thinking"\n'
+    printf 'export MODEL_GLM="glm-5"\n'
     printf 'export MODEL_GROK="grok-4.6"\n'
-    printf 'export MODEL_GEMINI="gemini-3.8-flash"\n'
     printf 'export MODEL_QWEN="qwen-3.8-27b"\n'
-    printf 'export MODEL_MIMO="mimo-v2.6-pro"\n'
+    printf 'export MODEL_GEMMA="gemma-4-26b"\n'
+    printf 'export MODEL_GEMMA_31B="gemma-4-31b"\n'
+    printf 'export MODEL_GPT_OSS="gpt-oss-120b"\n'
     printf 'export MODEL_AUTO="logfare/auto"\n'
   } > "$PROFILE"
 )
@@ -239,7 +239,7 @@ fi
 # A live round-trip through the proxy proves the key actually works. The
 # upstream reports "temporarily unavailable" under load, so give it one retry
 # before calling the key bad.
-BODY='{"model":"deepseek-v4.1-flash","max_tokens":8,"messages":[{"role":"user","content":"say ok"}]}'
+BODY='{"model":"claude-opus-4.6","max_tokens":8,"messages":[{"role":"user","content":"say ok"}]}'
 probe() {
   curl -s -o /tmp/zim-setup-probe.json -w '%{http_code}' \
     -X POST "http://127.0.0.1:$PORT/v1/messages" \

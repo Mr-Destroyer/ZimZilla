@@ -1,103 +1,32 @@
+# The Logfare catalog, refreshed against upstream's /v1/models and verified
+# model-by-model with a chat/completions probe. Only models that answer 200 are
+# registered here; the image/TTS/STT models the catalog also lists
+# (flux-*, sdxl-lightning, whisper-large-v3-turbo, aura-2-en, nova-3,
+# phoenix-1.0, lucid-origin) do not support chat and are deliberately omitted.
+#
+# Every entry below is a `model_name` the proxy will accept. The upstream name
+# is the same string, prefixed with `openai/` for LiteLLM's OpenAI-compatible
+# route. Add a model here *and* to zimzilla/config.py + zimzilla/sources.py to
+# make it selectable from /model.
 model_list:
-  # --- tested working -------------------------------------------------------
-  - model_name: gpt-6-astra
-    litellm_params:
-      model: openai/gpt-6-astra
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: deepseek-v3.2
-    litellm_params:
-      model: openai/deepseek-v3.2
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: step-3.7-flash
-    litellm_params:
-      model: openai/step-3.7-flash
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: deepseek-v4.1-flash
-    litellm_params:
-      model: openai/deepseek-v4.1-flash
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
   # --- Claude ----------------------------------------------------------------
-  - model_name: claude-opus-5
-    litellm_params:
-      model: openai/claude-opus-5
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: claude-fable-5-1
-    litellm_params:
-      model: openai/claude-fable-5-1
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
+  # claude-opus-4.6 is the shipped default (DEFAULT_MODEL / MODEL_DEFAULT).
   - model_name: claude-opus-4.6
     litellm_params:
       model: openai/claude-opus-4.6
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
-  # --- GPT -------------------------------------------------------------------
-  - model_name: gpt-6-sol
+  - model_name: claude-sonnet-4.6
     litellm_params:
-      model: openai/gpt-6-sol
+      model: openai/claude-sonnet-4.6
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
-  - model_name: gpt-5.6-sol
+  # --- DeepSeek / GLM / Grok -------------------------------------------------
+  - model_name: deepseek-v3.2
     litellm_params:
-      model: openai/gpt-5.6-sol
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  # --- Gemini ----------------------------------------------------------------
-  - model_name: gemini-3.8-flash
-    litellm_params:
-      model: openai/gemini-3.8-flash
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  # --- Kimi ------------------------------------------------------------------
-  - model_name: kimi-k3
-    litellm_params:
-      model: openai/kimi-k3
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: kimi-k2.7-code
-    litellm_params:
-      model: openai/kimi-k2.7-code
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: kimi-k2.6
-    litellm_params:
-      model: openai/kimi-k2.6
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: kimi-k2.5
-    litellm_params:
-      model: openai/kimi-k2.5
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  # --- GLM -------------------------------------------------------------------
-  - model_name: glm-5.3
-    litellm_params:
-      model: openai/glm-5.3
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
-  - model_name: glm-5.3-flash
-    litellm_params:
-      model: openai/glm-5.3-flash
+      model: openai/deepseek-v3.2
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
@@ -107,13 +36,26 @@ model_list:
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
-  # --- Grok / Qwen / Gemma / Mimo / Step -------------------------------------
   - model_name: grok-4.6
     litellm_params:
       model: openai/grok-4.6
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
+  # --- Kimi ------------------------------------------------------------------
+  - model_name: kimi-k2.5
+    litellm_params:
+      model: openai/kimi-k2.5
+      api_base: https://logfare.ai/v1
+      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
+
+  - model_name: kimi-k2-thinking
+    litellm_params:
+      model: openai/kimi-k2-thinking
+      api_base: https://logfare.ai/v1
+      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
+
+  # --- Qwen / Gemma / GPT-OSS ------------------------------------------------
   - model_name: qwen-3.8-27b
     litellm_params:
       model: openai/qwen-3.8-27b
@@ -126,13 +68,19 @@ model_list:
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
-  - model_name: mimo-v2.6-pro
+  - model_name: gemma-4-31b
     litellm_params:
-      model: openai/mimo-v2.6-pro
+      model: openai/gemma-4-31b
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
-  # --- Misc ------------------------------------------------------------------
+  - model_name: gpt-oss-120b
+    litellm_params:
+      model: openai/gpt-oss-120b
+      api_base: https://logfare.ai/v1
+      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
+
+  # --- Router / preview ------------------------------------------------------
   - model_name: logfare/auto
     litellm_params:
       model: openai/logfare/auto
@@ -145,14 +93,8 @@ model_list:
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
-  - model_name: moondream3.1
-    litellm_params:
-      model: openai/moondream3.1
-      api_base: https://logfare.ai/v1
-      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
-
   # Claude Code probes/streams with a "small fast" model too; map the usual
-  # haiku names onto the default so background requests don't 404.
+  # haiku names onto a real upstream model so background requests don't 404.
   - model_name: claude-3-5-haiku-latest
     litellm_params:
       model: openai/deepseek-v3.2

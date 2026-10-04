@@ -11,13 +11,13 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # The harness talks the Anthropic Messages protocol to whatever endpoint
 # ANTHROPIC_BASE_URL points at. By default that is the local LiteLLM proxy
-# (:4001) fronting Logfare, whose default model is deepseek-v4.1-flash.
+# (:4001) fronting Logfare, whose default model is claude-opus-4.6.
 #
 # Prices are USD per million tokens and are *estimates* for CLI accounting —
 # they are not billing-accurate. Unknown models fall back to DEFAULT_PRICE.
 
 DEFAULT_BASE_URL = "http://localhost:4001"
-DEFAULT_MODEL = "deepseek-v4.1-flash"
+DEFAULT_MODEL = "claude-opus-4.6"
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -77,33 +77,23 @@ MODES: dict[str, dict] = {
 DEFAULT_MODE = "auto"
 
 # model_name -> (input $/Mtok, output $/Mtok)
+# Kept in step with the models Logfare actually serves (sources.LOGFARE_MODELS)
+# plus Token Juice's single entry.
 PRICING: dict[str, tuple[float, float]] = {
     "deepseek-v4.1-flash": (0.28, 0.42),
     "deepseek-v3.2": (0.28, 0.42),
-    "step-3.7-flash": (0.25, 1.00),
-    "claude-opus-5": (15.00, 75.00),
-    "claude-fable-5-1": (15.00, 75.00),
     "claude-opus-4.6": (15.00, 75.00),
-    "claude-sonnet-5-5": (3.00, 15.00),
-    "gpt-6-astra": (5.00, 20.00),
-    "gpt-6-sol": (5.00, 20.00),
-    "gpt-5.6-sol": (3.00, 12.00),
-    "gemini-3.8-flash": (0.30, 1.20),
-    "kimi-k3": (1.00, 3.00),
-    "kimi-k2.7-code": (1.00, 3.00),
-    "kimi-k2.6": (0.60, 2.50),
+    "claude-sonnet-4.6": (3.00, 15.00),
     "kimi-k2.5": (0.60, 2.50),
-    "glm-5.3": (0.60, 2.20),
-    "glm-5.3-flash": (0.20, 0.80),
+    "kimi-k2-thinking": (0.60, 2.50),
     "glm-5": (0.60, 2.20),
     "grok-4.6": (3.00, 15.00),
     "qwen-3.8-27b": (0.20, 0.60),
     "gemma-4-26b": (0.10, 0.30),
-    "ling-3.0-flash-vl": (0.10, 0.30),
-    "mimo-v2.6-pro": (0.40, 1.60),
+    "gemma-4-31b": (0.15, 0.45),
+    "gpt-oss-120b": (0.15, 0.60),
     "logfare/auto": (0.50, 1.50),
     "space-bunny-alpha": (0.50, 1.50),
-    "moondream3.1": (0.20, 0.60),
 }
 
 DEFAULT_PRICE = (1.00, 3.00)
@@ -116,9 +106,16 @@ DEFAULT_PRICE = (1.00, 3.00)
 # sources.py — this is the default (Logfare) set, used when the endpoint is not
 # one of the known proxies.
 KNOWN_MODELS: list[str] = [
-    "deepseek-v4.1-flash",
+    "claude-opus-4.6",
+    "claude-sonnet-4.6",
+    "deepseek-v3.2",
     "gemma-4-26b",
-    "ling-3.0-flash-vl",
+    "gemma-4-31b",
+    "glm-5",
+    "gpt-oss-120b",
+    "grok-4.6",
+    "kimi-k2-thinking",
+    "kimi-k2.5",
     "logfare/auto",
     "qwen-3.8-27b",
     "space-bunny-alpha",

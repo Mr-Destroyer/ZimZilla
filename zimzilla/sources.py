@@ -51,15 +51,27 @@ class Source:
 
 # What each upstream's catalog really advertises as chat-capable. Anything not
 # listed here returns "Model not found" (404) at request time, so /model offers
-# exactly these — no more. Verified against each upstream's /v1/models.
+# exactly these — no more. Verified against each upstream's /v1/models and a
+# per-model chat/completions probe.
+#
+# Logfare's catalog also lists image/TTS/STT models (flux-*, sdxl-lightning,
+# whisper-large-v3-turbo, aura-2-en, nova-3, phoenix-1.0, lucid-origin); they
+# reject chat completions, so they are omitted here.
 #
 # Token Juice is deliberately a single entry: its whole catalog is one model,
 # exposed upstream as `deepseek-ai/DeepSeek-V4.1-Flash` and aliased to
 # `deepseek-v4.1-flash` by its litellm config.
 LOGFARE_MODELS: tuple[str, ...] = (
-    "deepseek-v4.1-flash",
+    "claude-opus-4.6",
+    "claude-sonnet-4.6",
+    "deepseek-v3.2",
     "gemma-4-26b",
-    "ling-3.0-flash-vl",
+    "gemma-4-31b",
+    "glm-5",
+    "gpt-oss-120b",
+    "grok-4.6",
+    "kimi-k2-thinking",
+    "kimi-k2.5",
     "logfare/auto",
     "qwen-3.8-27b",
     "space-bunny-alpha",
@@ -146,7 +158,7 @@ def _build(key: str, label: str, port: int, model: str) -> Source | None:
 def discover() -> dict[str, Source]:
     """Every source whose profile, service and config are actually present."""
     found: dict[str, Source] = {}
-    logfare = _build("logfare", "Logfare", 4001, "deepseek-v4.1-flash")
+    logfare = _build("logfare", "Logfare", 4001, "claude-opus-4.6")
     if logfare:
         found["logfare"] = logfare
     tokenjuice = _build("tokenjuice", "Token Juice", 4000, "deepseek-v4.1-flash")
