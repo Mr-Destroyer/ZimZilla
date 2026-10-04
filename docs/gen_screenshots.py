@@ -15,6 +15,7 @@ tool card is the thing worth photographing.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import subprocess
 import sys
@@ -114,29 +115,71 @@ def _slow_execute(real, delay: float = 1.1):
     return wrapper
 
 
-def _rasterise(svg: Path, png: Path, size: tuple[int, int]) -> None:
-    """SVG -> PNG via headless chromium. Text is what we care about."""
+# Rich's ``export_svg`` frames the terminal in a fake OS window: a #292929
+# rounded rect, a centred title, and three macOS traffic-light dots. None of it
+# is the app — the compositor fills every cell with the palette background, so
+# the terminal is uniformly black. In a README the frame reads as a grey band
+# around the whole interface, and the rect's rounded corners show through
+# behind the corner glyphs of every bordered box. Strip the chrome, and slide
+# the terminal group up to the origin so the SVG *is* the terminal.
+_CHROME = re.compile(
+    r'<rect fill="#292929".*?rx="8"/>'
+    r'(?:<text class="[^"]*-title".*?</text>)?'
+    r'\s*<g transform="translate\(26,22\)">.*?</g>',
+    re.S,
+)
+_TERM_GROUP = re.compile(r'<g transform="translate\([\d.]+, [\d.]+\)"')
+
+
+def _strip_export_chrome(svg: str) -> str:
+    stripped, n = _CHROME.subn("", svg)
+    if n != 1:
+        raise SystemExit(f"expected one export chrome block, found {n}")
+    return _TERM_GROUP.sub('<g transform="translate(0, 0)"', stripped, count=1)
+
+
+#: Textual exports one SVG user-unit per terminal cell, and the SVG's viewBox is
+#: sized in those units — so the window has to match that shape or chromium
+#: letterboxes it. With the window chrome stripped a letterbox is black on
+#: black, which silently pads every shot with a dead margin.
+_VIEWBOX = re.compile(r'viewBox="0 0 ([\d.]+) ([\d.]+)"')
+
+#: The README shows these at 880px, so render ~2x that and let the SVG scale the
+#: rest of the way. A fixed target width keeps every shot the same size on the
+#: page and the PNGs small; the SVG scales to whatever window it is given, so
+#: only the *ratio* has to come from the viewBox.
+_TARGET_PX = 1800
+_SCALE = 2
+
+
+def _rasterise(svg_text: str, png: Path) -> None:
+    """SVG -> PNG via headless chromium, at the SVG's own aspect ratio."""
     chrome = (shutil.which("chromium") or shutil.which("chromium-browser")
               or shutil.which("google-chrome"))
     if chrome is None:
         raise SystemExit("chromium not found — cannot rasterise the SVGs")
-    w, h = size
-    subprocess.run(
-        [chrome, "--headless", "--no-sandbox", "--disable-gpu",
-         "--hide-scrollbars", "--force-device-scale-factor=2",
-         f"--screenshot={png}", f"--window-size={w},{h}",
-         "--default-background-color=00000000", f"file://{svg}"],
-        check=True, capture_output=True,
-    )
+    m = _VIEWBOX.search(svg_text)
+    if m is None:
+        raise SystemExit("no viewBox in the exported SVG")
+    vw, vh = float(m.group(1)), float(m.group(2))
+    w = _TARGET_PX // _SCALE
+    h = round(w * vh / vw)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "shot.svg"
+        tmp.write_text(svg_text)
+        subprocess.run(
+            [chrome, "--headless", "--no-sandbox", "--disable-gpu",
+             "--hide-scrollbars", f"--force-device-scale-factor={_SCALE}",
+             f"--screenshot={png}", f"--window-size={w},{h}",
+             # Opaque black rather than transparent: the terminal is black, so
+             # any rounding sliver blends in instead of showing the page behind.
+             "--default-background-color=FF000000", f"file://{tmp}"],
+            check=True, capture_output=True,
+        )
 
 
-def _write_shot(app, name: str, size: tuple[int, int]) -> None:
-    svg = OUT / f"{name}.svg"
-    svg.write_text(app.export_screenshot())
-    # Textual exports one SVG user-unit per terminal cell; scale so a cell is
-    # roughly a real character box, then let the device scale factor double it.
-    _rasterise(svg, OUT / f"{name}.png", (size[0] * 10, size[1] * 22))
-    svg.unlink(missing_ok=True)
+def _write_shot(app, name: str) -> None:
+    _rasterise(_strip_export_chrome(app.export_screenshot()), OUT / f"{name}.png")
     print(f"  wrote {name}.png")
 
 
@@ -154,7 +197,7 @@ async def _shot_boot(wd: Path) -> None:
         await pilot.pause()
         await asyncio.sleep(2.9)
         await pilot.pause()
-        _write_shot(app, "01-boot", BOOT_SIZE)
+        _write_shot(app, "01-boot")
 
 
 async def _shot_shell(wd: Path) -> None:
@@ -189,7 +232,7 @@ async def _shot_shell(wd: Path) -> None:
                     break
             await asyncio.sleep(0.35)
             await pilot.pause()
-            _write_shot(app, "02-shell", SHELL_SIZE)
+            _write_shot(app, "02-shell")
 
             # Let it finish so the process exits cleanly.
             for _ in range(400):
@@ -213,7 +256,7 @@ async def _shot_list(wd: Path, name: str, command: str) -> None:
         await pilot.pause()
         await asyncio.sleep(0.2)
         await pilot.pause()
-        _write_shot(app, name, LIST_SIZE)
+        _write_shot(app, name)
 
 
 async def main() -> None:
@@ -242,4 +285,5 @@ async def main() -> None:
     print("done.")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
