@@ -17,7 +17,7 @@ from pathlib import Path
 # they are not billing-accurate. Unknown models fall back to DEFAULT_PRICE.
 
 DEFAULT_BASE_URL = "http://localhost:4001"
-DEFAULT_MODEL = "claude-opus-4.6"
+DEFAULT_MODEL = "grok-4.6"
 
 # ---------------------------------------------------------------------------
 # Modes
