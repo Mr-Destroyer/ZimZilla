@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from . import __version__
+from . import update as update_mod
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL
 from .scope import find_legacy_scope
 
@@ -38,12 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agents", default=None,
                         help="path to AGENTS.md used by zim mode (default: next to the workdir)")
     parser.add_argument("--max-tokens", type=int, default=None, help="max output tokens per reply")
+    parser.add_argument("--no-update", action="store_true",
+                        help="skip the launch-time check for new commits on the upstream")
     parser.add_argument("--list-models", action="store_true", help="list known models and exit")
     parser.add_argument("--version", action="version", version=f"zimzilla {__version__}")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Captured before parsing so the re-exec below can reproduce the original
+    # invocation exactly, whatever it was.
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -142,6 +150,28 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Launch-time self-update. This runs after the preflight checks, so a
+    # launch that cannot proceed anyway never pulls, and before the TUI takes
+    # the terminal, so the notice is plain text on a normal screen.
+    #
+    # An applied update must re-exec rather than continue: zimzilla.config,
+    # zimzilla.scope and the rest are already imported, and the fast-forward
+    # just replaced their files on disk. Running on would be a mix of old and
+    # new modules. execv replaces the process image outright, which is exactly
+    # what packaging/zimzilla already does with its own `exec "$PY" -m`.
+    #
+    # ZIMZILLA_UPDATED guards the loop: once we have re-exec'd, the next launch
+    # of main() skips the check entirely, so a flaky fetch cannot make the
+    # harness restart itself repeatedly.
+    if not os.environ.get("ZIMZILLA_UPDATED"):
+        result = update_mod.run(enabled=not args.no_update
+                                and os.environ.get("ZIMZILLA_NO_UPDATE") != "1")
+        if result.noteworthy:
+            update_mod.format_result(result)
+        if result.should_reexec:
+            os.environ["ZIMZILLA_UPDATED"] = "1"
+            os.execv(sys.executable, [sys.executable, "-m", "zimzilla", *raw_argv])
 
     from .ui.app import ZimZillaApp
     from .termbg import detect_background
