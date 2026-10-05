@@ -158,7 +158,7 @@ def _build(key: str, label: str, port: int, model: str) -> Source | None:
 def discover() -> dict[str, Source]:
     """Every source whose profile, service and config are actually present."""
     found: dict[str, Source] = {}
-    logfare = _build("logfare", "Logfare", 4001, "claude-opus-4.6")
+    logfare = _build("logfare", "Logfare", 4001, "grok-4.6")
     if logfare:
         found["logfare"] = logfare
     tokenjuice = _build("tokenjuice", "Token Juice", 4000, "deepseek-v4.1-flash")
