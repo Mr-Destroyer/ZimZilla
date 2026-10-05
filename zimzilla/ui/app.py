@@ -590,7 +590,7 @@ class ZimZillaApp(App):
 
     # ---- turn worker ------------------------------------------------------
     @work(exclusive=True)
-    async def _run_turn(self, text: str) -> None:
+    async def _run_turn(self, text: str, display: str | None = None) -> None:
         p = self.palette
         chat = self.query_one(ChatPane)
         bar = self.query_one(StatusBar)
@@ -606,8 +606,12 @@ class ZimZillaApp(App):
             loop.set_counters(self.agent.turn_count + 1, 0)
 
         # The spine joint that opens the turn, then the prompt it belongs to.
+        # `display` lets a caller show a short label for a long synthetic prompt
+        # (/osint's playbook is thousands of words) while the agent still
+        # receives the full text — the transcript shows what the operator
+        # typed, not the briefing behind it.
         chat.write_block(R.turn_marker(self.agent.turn_count + 1, p))
-        chat.write_block(R.user_prompt_block(text, p))
+        chat.write_block(R.user_prompt_block(display or text, p))
         bar.set_activity("thinking", busy=True)
         spinner = asyncio.create_task(self._verb_spinner())
 
