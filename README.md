@@ -126,6 +126,48 @@ zimzilla -m claude-opus-4.6        # this run only
 ANTHROPIC_MODEL=$MODEL_KIMI zimzilla   # via a profile alias
 ```
 
+### Updates
+
+ZimZilla updates itself on launch. Because `requirements.txt` ends in `-e .`,
+the running code *is* the git checkout — so "updating" means fast-forwarding
+that checkout, not reinstalling anything. Every launch checks the upstream
+first; if there are new commits it says so, pulls them, and restarts on the
+new code before the harness comes up.
+
+```
+  ⟩ UPDATE
+  ◈ updated by 3 commits
+    3be2d0c docs(readme): troubleshooting for the pip cache trap
+    4a58d45 docs(readme): say which model it starts on
+  · restarting on the new code…
+```
+
+**Launching ZimZilla pulls and runs code from your `origin`.** That is the
+honest description of the feature — it is safe only insofar as you trust the
+remote you cloned from, the same trust you extend by running `git pull` by
+hand. It is on by default because that is what makes it useful; turn it off
+with either:
+
+```bash
+zimzilla --no-update              # this launch only
+export ZIMZILLA_NO_UPDATE=1       # every launch in this shell
+```
+
+What it will and will not do:
+
+| | |
+|---|---|
+| **New commits, clean tree** | fast-forwards (`--ff-only`) and restarts on the new code |
+| **New commits, edited tracked files** | reports them and **does not pull** — your uncommitted work is never touched, stashed or reset |
+| **Untracked files** | ignored — a fast-forward cannot lose them, so they do not block the update |
+| **Your branch has diverged** | reports it and **does not pull** — never merges, never rebases |
+| **Offline, no remote, not a checkout** | says nothing and boots normally |
+| **`requirements.txt` changed** | updates, then tells you to re-run `./setup.sh` |
+
+If you are developing ZimZilla itself, `ZIMZILLA_NO_UPDATE=1` in your shell
+profile is the setting you want — otherwise a commit you push from elsewhere
+will restart the checkout under you on the next launch.
+
 ---
 
 ## Usage
@@ -363,6 +405,7 @@ zimzilla/                     the package
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs
+  update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan palettes
   termbg.py                   asks the terminal for its own background
   ui/                         the terminal interface
@@ -382,10 +425,14 @@ tests/                        the test suite
 
 ```bash
 python tests/test_phase4.py        # from an activated venv
+python tests/test_osint.py         # /osint — registry, validation, wiring
+python tests/test_update.py        # self-update — real git, throwaway repos
 ```
 
 Stubs the model and drives the interface directly, so it needs no network and
-no credentials.
+no credentials. `test_update.py` runs real `git` against repositories it
+builds in a temp directory — it never touches your own checkout or the
+network.
 
 ---
 
