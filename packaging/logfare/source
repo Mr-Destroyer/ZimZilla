@@ -17,7 +17,7 @@ export ANTHROPIC_API_KEY=""
 # Model aliases — switch per-invocation, e.g.:
 #   ANTHROPIC_MODEL=$MODEL_KIMI zimzilla
 # Full list lives in litellm-config.yaml next to this file.
-export MODEL_DEFAULT="claude-opus-4.6"
+export MODEL_DEFAULT="grok-4.6"
 export MODEL_OPUS="claude-opus-4.6"
 export MODEL_DEEPSEEK="deepseek-v3.2"
 export MODEL_KIMI="kimi-k2.5"
