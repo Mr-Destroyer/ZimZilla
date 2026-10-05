@@ -116,6 +116,29 @@ THINKING_VERBS = [
     "hashing",
 ]
 
+# One colour per team worker, assigned by roster position so a worker keeps the
+# same colour for its whole run. `/team` interleaves every worker into a single
+# transcript, and the colour is what tells them apart at a glance.
+#
+# These are deliberately NOT drawn from the active palette: with three workers
+# on screen the point is that they differ from each other, and a palette's own
+# primary/accent/dim are already spoken for by the surrounding chrome. Each is
+# bright enough to read on any of the palettes' backgrounds.
+AGENT_COLORS = [
+    "#00ffaa",  # aqua
+    "#ffb000",  # amber
+    "#7dfff0",  # ice
+    "#ff8fd0",  # rose
+    "#b6ff6b",  # lime
+    "#ff6b6b",  # red
+]
+
+
+def agent_color(index: int, palette: Palette | None = None) -> str:
+    """The colour for worker ``index``. Wraps, so any roster size is covered."""
+    return AGENT_COLORS[index % len(AGENT_COLORS)]
+
+
 # Icons per tool, for panel headers.
 TOOL_ICONS = {
     "bash": "▚",

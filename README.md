@@ -262,6 +262,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/save [name]` | write the session to disk |
 | `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |
+| `/team <task>` | fan the task out across parallel agents |
 | `/clear` | wipe transcript and history |
 | `/exit` | leave |
 

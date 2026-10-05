@@ -361,3 +361,52 @@ def agent_text(text: str, palette: Palette) -> Text:
         else:
             t.append(part, style=palette.primary)
     return t
+
+
+# ---- team workers ---------------------------------------------------------
+# `/team` interleaves several workers into one transcript, so every line they
+# write has to say who wrote it. The label carries the worker's own colour and
+# the body keeps the normal prose styling, so a worker's text reads exactly
+# like the main agent's — it is only the prefix that differs.
+
+def agent_label(name: str, color: str, palette: Palette, width: int = 14) -> Text:
+    """The `[name]` tag that opens every worker line."""
+    t = Text()
+    t.append(f"[{name}]", style=f"bold {color}")
+    pad = max(1, width - len(name))
+    t.append(" " * pad, style=palette.dim)
+    return t
+
+
+def agent_line(name: str, text: str, color: str, palette: Palette,
+               width: int = 14) -> Text:
+    """A labelled block of worker prose, one per flush.
+
+    Body text goes through ``agent_text`` so backticked code reads the same as
+    it does anywhere else in the transcript.
+    """
+    t = agent_label(name, color, palette, width)
+    t.append_text(agent_text(text, palette))
+    return t
+
+
+def agent_event_line(name: str, color: str, verb: str, detail: str,
+                     palette: Palette, ok: bool | None = None,
+                     width: int = 14) -> Text:
+    """A labelled one-liner for a worker's tool call or result.
+
+    ``ok`` colours the verb: None keeps it neutral (a call), True green, False
+    red. Used instead of the live tool card, which has only one slot and would
+    be overwritten several times a second by concurrent workers.
+    """
+    if ok is None:
+        vstyle = f"bold {color}"
+    elif ok:
+        vstyle = f"bold {palette.accent}"
+    else:
+        vstyle = f"bold {palette.red}"
+
+    t = agent_label(name, color, palette, width)
+    t.append(f"{verb:<9}", style=vstyle)
+    t.append(detail, style=palette.dim if ok is None else palette.primary)
+    return t

@@ -16,10 +16,11 @@ from textual.widgets import Input, Static
 
 from .. import session as session_mod
 from .. import sources as sources_mod
+from .. import team as team_mod
 from .. import tools as tools_mod
 from ..agent import Agent
 from ..config import KNOWN_MODELS, MODES, Config, price_for
-from ..theme import THINKING_VERBS, get_palette
+from ..theme import THINKING_VERBS, agent_color, get_palette
 from . import renderers as R
 from .boot import BootScreen
 from .complete import CompletionPopup, _iter_files
@@ -235,6 +236,11 @@ class ZimZillaApp(App):
         # While a modal (permission gate) is up, the prompt must be disabled so
         # approval keystrokes like "y" don't leak into it.
         self._modal_depth = 0
+        # Serialises permission modals. One modal can be up at a time, and the
+        # disable/restore bookkeeping in request_permission is not re-entrant —
+        # so with /team's parallel workers two gated calls could otherwise stack
+        # modals and leave the prompt permanently disabled.
+        self._perm_lock = asyncio.Lock()
         self.busy = False
         self._cancelled = False
         self._stream_buf = ""
@@ -246,6 +252,11 @@ class ZimZillaApp(App):
         # cumulative input total — is how full the context window actually is:
         # the cumulative figure counts every turn's prompt and grows forever.
         self._last_call_input = 0
+        # Team workers' usage, carried into the bar on top of the main agent's
+        # own totals. _handle_event computes the bar from self.agent alone, so
+        # without this the synthesis turn would overwrite the bar and drop the
+        # workers' tokens and cost — the team's spend would vanish from view.
+        self._team_tokens: tuple[int, int, float] = (0, 0, 0.0)
 
     # ---- compose ----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -664,10 +675,14 @@ class ZimZillaApp(App):
 
         elif etype == "usage":
             # The agent has not yet folded this turn's usage into its session
-            # totals, so add it here for a live running figure.
-            bar.input_tokens = self.agent.session_input_tokens + ev["input"]
-            bar.output_tokens = self.agent.session_output_tokens + ev["output"]
-            bar.cost = self.agent.session_cost + ev["cost"]
+            # totals, so add it here for a live running figure. Any team
+            # workers' usage rides on top — they spent against the same session
+            # and dropping them here would make the total jump backwards when
+            # the synthesis turn starts.
+            team_in, team_out, team_cost = self._team_tokens
+            bar.input_tokens = self.agent.session_input_tokens + team_in + ev["input"]
+            bar.output_tokens = self.agent.session_output_tokens + team_out + ev["output"]
+            bar.cost = self.agent.session_cost + team_cost + ev["cost"]
             bar.render_bar()
             # ev["input"] is this one call's prompt size — the closest thing to
             # a live context reading available.
@@ -788,21 +803,26 @@ class ZimZillaApp(App):
 
     # ---- permission gate --------------------------------------------------
     async def request_permission(self, name, args, preview):
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        inp = self.query_one("#input", Input)
-        inp.disabled = True  # keep approval keys out of the prompt
+        # One modal at a time. Without the lock, /team's parallel workers could
+        # each push a modal; the second would sit on top of the first and the
+        # `inp.disabled = False` in whichever finishes first would re-enable the
+        # prompt while a modal is still up.
+        async with self._perm_lock:
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            inp = self.query_one("#input", Input)
+            inp.disabled = True  # keep approval keys out of the prompt
 
-        def _done(decision):
-            inp.disabled = False
-            if not fut.done():
-                fut.set_result(decision or "no")
+            def _done(decision):
+                inp.disabled = False
+                if not fut.done():
+                    fut.set_result(decision or "no")
 
-        self.push_screen(
-            PermissionModal(name, preview, self.palette,
-                            radius=self._blast_radius(name, args)),
-            _done,
-        )
-        return await fut
+            self.push_screen(
+                PermissionModal(name, preview, self.palette,
+                                radius=self._blast_radius(name, args)),
+                _done,
+            )
+            return await fut
 
     def _blast_radius(self, name: str, args: dict) -> str:
         """One line naming what a gated call would touch.
@@ -866,6 +886,7 @@ class ZimZillaApp(App):
             "save": self._cmd_save,
             "load": self._cmd_load,
             "compact": lambda a: self._cmd_compact(),
+            "team": lambda a: self._cmd_team(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-source": lambda a: self._cmd_zim_source(None),
@@ -895,6 +916,7 @@ class ZimZillaApp(App):
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
+            ("/team <task>", "fan the task out across parallel agents"),
             ("/exit", "leave the harness        (Ctrl+D also works)"),
         ]
         t = Text()
@@ -1304,6 +1326,175 @@ class ZimZillaApp(App):
         else:
             self._sys_line(f"compact failed: {result}", warn=True)
 
+    # ---- /team ------------------------------------------------------------
+    def _cmd_team(self, args) -> None:
+        """/team <task> — plan, fan out, synthesise. Long-running, so it runs
+        as a worker like _cmd_compact rather than inline."""
+        task = " ".join(args).strip() if args else ""
+        if not task:
+            self._sys_line("usage: /team <task>", warn=True)
+            return
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+        self._run_team(task)
+
+    @work(exclusive=True)
+    async def _run_team(self, task: str) -> None:
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        bar = self.query_one(StatusBar)
+
+        self.busy = True
+        self._cancelled = False
+        self._set_rain(False)
+        self._team_tokens = (0, 0, 0.0)   # fresh run, fresh team totals
+
+        # name -> (index, colour). Built from the roster so a worker keeps one
+        # colour for its whole run, and every one of its lines is tagged with it.
+        colors: dict[str, str] = {}
+        counter = {"running": 0, "total": 0}
+
+        async def on_event(ev: dict) -> None:
+            if self._cancelled:
+                return
+            etype = ev.get("type")
+
+            if etype == "team_plan":
+                for i, w in enumerate(ev.get("workers") or []):
+                    colors[w["name"]] = agent_color(i, p)
+                counter["total"] = len(ev.get("workers") or [])
+                if ev.get("summary"):
+                    self._sys_line(ev["summary"])
+                if not ev.get("workers"):
+                    self._sys_line(
+                        "no team needed — running it directly" if ev.get("parsed")
+                        else "could not read a roster — running it directly",
+                        warn=True,
+                    )
+                else:
+                    names = ", ".join(w["name"] for w in ev["workers"])
+                    self._sys_line(f"launching {len(ev['workers'])} agents — {names}", ok=True)
+
+            elif etype == "team_start":
+                counter["running"] += 1
+                col = colors.get(ev["name"], p.accent)
+                brief = ev.get("brief", "")
+                if len(brief) > 96:
+                    brief = brief[:95] + "…"
+                chat.write_block(R.agent_event_line(ev["name"], col, "▸", brief, p))
+                bar.set_activity(
+                    f"team {counter['running']}/{counter['total'] or '?'}", busy=True)
+
+            elif etype == "team_text":
+                col = colors.get(ev["name"], p.accent)
+                chat.write_block(R.agent_line(ev["name"], ev["text"], col, p))
+
+            elif etype == "team_tool":
+                col = colors.get(ev["name"], p.accent)
+                chat.write_block(R.agent_event_line(
+                    ev["name"], col, ev.get("tool", "?"),
+                    tools_mod.summarise_call(ev.get("tool", ""), ev.get("args") or {}, self.cfg),
+                    p))
+
+            elif etype == "team_result":
+                col = colors.get(ev["name"], p.accent)
+                output = (ev.get("output") or "").strip().splitlines()
+                first = output[0][:96] if output else "(no output)"
+                if len(output) > 1:
+                    first += f"  … +{len(output) - 1} lines"
+                chat.write_block(R.agent_event_line(
+                    ev["name"], col, "✔" if ev.get("ok") else "✘", first, p,
+                    ok=bool(ev.get("ok"))))
+
+            elif etype == "team_done":
+                counter["running"] = max(0, counter["running"] - 1)
+                col = colors.get(ev["name"], p.accent)
+                if ev.get("ok"):
+                    detail = f"done · ${ev.get('cost', 0.0):.4f}"
+                else:
+                    detail = f"failed — {ev.get('error', 'unknown')}"
+                chat.write_block(R.agent_event_line(
+                    ev["name"], col, "■", detail, p, ok=bool(ev.get("ok"))))
+                bar.set_activity(
+                    f"team {counter['running']}/{counter['total'] or '?'}", busy=True)
+
+            elif etype == "team_end":
+                # Bank the workers' usage so the synthesis turn's `usage` events
+                # add to it rather than replacing it.
+                self._team_tokens = (
+                    ev.get("input") or 0,
+                    ev.get("output") or 0,
+                    ev.get("cost") or 0.0,
+                )
+                bar.input_tokens = self.agent.session_input_tokens + self._team_tokens[0]
+                bar.output_tokens = self.agent.session_output_tokens + self._team_tokens[1]
+                bar.cost = self.agent.session_cost + self._team_tokens[2]
+                bar.render_bar()
+
+        spinner = asyncio.create_task(self._verb_spinner())
+        chat.write_block(R.turn_marker(self.agent.turn_count + 1, p))
+        chat.write_block(R.user_prompt_block(f"⚑ team: {task}", p))
+        self._sys_line("analysing the task…")
+
+        try:
+            results = await team_mod.run_team(
+                self.cfg, task,
+                on_event=on_event,
+                agent_factory=self._team_agent_factory,
+            )
+            if self._cancelled:
+                return
+
+            if not results:
+                # No roster — do the task the ordinary way, on the main agent.
+                # The planner cost a team, not the task.
+                bar.set_activity("working", busy=True)
+                async for ev in self.agent.run_turn(task):
+                    if self._cancelled:
+                        break
+                    await self._handle_event(ev)
+                return
+
+            # ---- synthesis: the main brain folds the reports into one answer.
+            good = sum(1 for r in results if r.ok)
+            self._sys_line(f"synthesising {good}/{len(results)} results…")
+            bar.set_activity("synthesising", busy=True)
+            prompt = team_mod.synthesis_prompt(task, results)
+            async for ev in self.agent.run_turn(prompt):
+                if self._cancelled:
+                    break
+                await self._handle_event(ev)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            chat.write_block(R.error_block(f"team failed: {type(e).__name__}: {e}", p))
+        finally:
+            spinner.cancel()
+            self.busy = False
+            chat.clear_stream()
+            chat.card_finish()
+            self._stream_buf = ""
+            bar.set_activity("idle", busy=False)
+            bar.turns = self.agent.turn_count
+            bar.model = self.cfg.model
+            bar.render_bar()
+            self._sync_rails()
+            self._set_rain(self.rain_on)
+            if self._cancelled:
+                self.agent.cancel_turn()
+                self._sys_line("team interrupted", warn=True)
+            self.query_one("#input", Input).focus()
+
+    def _team_agent_factory(self, cfg: Config, **kw) -> Agent:
+        """Build a team Agent. The seam tests replace to stub the model.
+
+        Every worker gets its own Agent and its own Config copy — see
+        zimzilla/team.py for why sharing one would clobber the scope guard.
+        """
+        return Agent(cfg, permission_handler=self.request_permission, **kw)
+
     # ---- command palette --------------------------------------------------
     def action_palette(self) -> None:
         """Ctrl+K: every action, fuzzy-searchable."""
@@ -1331,6 +1522,7 @@ class ZimZillaApp(App):
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),
+            ("/team", "fan the task out across parallel agents", "team"),
             ("/clear", "wipe transcript and history", "clear"),
             ("/exit", "leave the harness", "exit"),
         ]

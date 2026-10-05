@@ -15,12 +15,15 @@ sys.path.insert(0, str(ROOT))
 
 from rich.text import Text  # noqa: E402
 
+from zimzilla import team as team_mod  # noqa: E402
 from zimzilla import tools, websearch  # noqa: E402
 from zimzilla.agent import Agent  # noqa: E402
 from zimzilla.config import Config, MODES  # noqa: E402
 from zimzilla.scope import Scope  # noqa: E402
+from zimzilla.theme import agent_color  # noqa: E402
 from zimzilla.ui.app import ZimZillaApp  # noqa: E402
 from zimzilla.ui.complete import CompletionPopup  # noqa: E402
+from zimzilla.ui.widgets import StatusBar  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -38,6 +41,17 @@ def _cfg(workdir: Path, **kw) -> Config:
 class _Blk:
     def __init__(self, **k):
         self.__dict__.update(k)
+
+    def model_dump(self, exclude_none: bool = False) -> dict:
+        """Match the real SDK block's interface.
+
+        Agent._block_to_dict prefers model_dump() and falls back to str(block),
+        so without this the stub's blocks reach the history as object reprs
+        rather than their fields — which quietly weakens any test that reads a
+        message back (e.g. the team digest).
+        """
+        return {k: v for k, v in self.__dict__.items()
+                if not (exclude_none and v is None)}
 
 
 class _Msg:
@@ -669,6 +683,458 @@ async def test_termbg(wd: Path) -> None:
                   app.palette.bg == "#101315", app.palette.bg)
 
 
+# ---- /team ----------------------------------------------------------------
+
+def test_team_roster(wd: Path) -> None:
+    """parse_roster survives everything a model actually emits."""
+    clean = ('{"summary": "two parts", "workers": ['
+             '{"name": "a", "brief": "do a", "owns": ["a.py"]},'
+             '{"name": "b", "brief": "do b", "owns": ["b.py"]}]}')
+    r = team_mod.parse_roster(clean)
+    check("team: clean JSON parses", r is not None and len(r.workers) == 2)
+    check("team: summary is kept", r.summary == "two parts")
+    check("team: owns is kept", r.workers[0].owns == ["a.py"])
+
+    fenced = "Sure!\n```json\n" + clean + "\n```\nHope that helps."
+    rf = team_mod.parse_roster(fenced)
+    check("team: fenced JSON parses", rf is not None and len(rf.workers) == 2)
+
+    prose = "Here is the roster: " + clean + " — tell me if you want changes."
+    rp = team_mod.parse_roster(prose)
+    check("team: JSON wrapped in prose parses", rp is not None and len(rp.workers) == 2)
+
+    check("team: unparseable text yields None", team_mod.parse_roster("no json here") is None)
+    check("team: empty text yields None", team_mod.parse_roster("") is None)
+    check("team: non-object JSON yields None", team_mod.parse_roster("[1, 2, 3]") is None)
+
+    empty = team_mod.parse_roster('{"summary": "too small", "workers": []}')
+    check("team: an empty roster is a valid answer",
+          empty is not None and empty.workers == [] and empty.summary == "too small")
+
+    many = ('{"summary": "x", "workers": [' +
+            ",".join('{"name": "w%d", "brief": "b%d"}' % (i, i) for i in range(12)) +
+            "]}")
+
+    rm = team_mod.parse_roster(many)
+    check("team: roster is capped at TEAM_MAX_AGENTS",
+          len(rm.workers) == team_mod.TEAM_MAX_AGENTS,
+          f"{len(rm.workers)}")
+
+    dupes = ('{"summary": "x", "workers": ['
+             '{"name": "Same Name", "brief": "a"},'
+             '{"name": "same-name", "brief": "b"}]}')
+    rd = team_mod.parse_roster(dupes)
+    names = [w.name for w in rd.workers]
+    check("team: duplicate names are de-duplicated", len(set(names)) == len(names), str(names))
+    check("team: names are slugified",
+          all(n == n.lower() and " " not in n for n in names), str(names))
+
+    noowns = team_mod.parse_roster('{"summary":"x","workers":[{"name":"a","brief":"b"}]}')
+    check("team: a missing owns defaults to empty", noowns.workers[0].owns == [])
+
+    nobrief = team_mod.parse_roster(
+        '{"summary":"x","workers":[{"name":"a"},{"name":"b","brief":"ok"}]}')
+    check("team: a worker with no brief is dropped",
+          [w.name for w in nobrief.workers] == ["b"])
+
+    # Braces inside a brief must not unbalance the object scan.
+    tricky = '{"summary":"x","workers":[{"name":"a","brief":"use {curly} braces"}]} tail'
+    rt = team_mod.parse_roster(tricky)
+    check("team: braces inside a string do not break the scan",
+          rt is not None and len(rt.workers) == 1 and "{curly}" in rt.workers[0].brief)
+
+
+def test_team_waves(wd: Path) -> None:
+    """Overlapping ownership is serialised into waves."""
+    a = team_mod.WorkerSpec("a", "do a", ["src/one.py"])
+    b = team_mod.WorkerSpec("b", "do b", ["src/two.py"])
+    c = team_mod.WorkerSpec("c", "do c", ["src/one.py"])   # collides with a
+    waves = team_mod._waves([a, b, c])
+    check("team: disjoint workers share a wave", len(waves) == 2, str([[w.name for w in wv] for wv in waves]))
+    check("team: a colliding worker is pushed to a later wave",
+          [w.name for w in waves[0]] == ["a", "b"] and [w.name for w in waves[1]] == ["c"])
+    check("team: order is preserved (a worker only moves later)",
+          [w.name for wv in waves for w in wv] == ["a", "b", "c"])
+
+    glob_collision = team_mod._waves([
+        team_mod.WorkerSpec("a", "x", ["tests/*.py"]),
+        team_mod.WorkerSpec("b", "y", ["tests/test_parser.py"]),
+    ])
+    check("team: a glob colliding with a literal splits the wave",
+          len(glob_collision) == 2)
+
+    none_declared = team_mod._waves([
+        team_mod.WorkerSpec("a", "x", []), team_mod.WorkerSpec("b", "y", []),
+    ])
+    check("team: workers declaring nothing still run together", len(none_declared) == 1)
+
+
+def test_team_isolation(wd: Path) -> None:
+    """Each worker must get its own Config and its own Scope.
+
+    Agent.__init__ does `cfg._scope = self.scope`. If workers shared one Config,
+    the last one built would own the guard for all of them — and the tools read
+    the guard off cfg._scope, so the clobber would be silent.
+    """
+    import dataclasses
+
+    main_cfg = _cfg(wd)
+    main_agent = Agent(main_cfg)
+    main_scope = main_cfg._scope
+
+    worker_cfgs = [dataclasses.replace(main_cfg) for _ in range(3)]
+    workers = [Agent(c) for c in worker_cfgs]
+
+    check("team: worker configs are distinct objects",
+          len({id(c) for c in worker_cfgs}) == 3)
+    check("team: worker configs are not the session config",
+          all(c is not main_cfg for c in worker_cfgs))
+    check("team: each worker holds its own scope object",
+          len({id(c._scope) for c in worker_cfgs}) == 3)
+    check("team: a worker's scope is not the session's",
+          all(c._scope is not main_scope for c in worker_cfgs))
+    check("team: the session config still holds the session scope",
+          main_cfg._scope is main_scope)
+    check("team: the session agent is unaffected",
+          main_agent.scope is main_scope)
+
+    # The mode travels with the copy — /team is not a mode.
+    danger_cfg = _cfg(wd, mode="danger")
+    wd_agent = Agent(dataclasses.replace(danger_cfg))
+    check("team: a worker inherits danger mode",
+          wd_agent.cfg.mode == "danger")
+    check("team: a danger worker keeps the full toolset",
+          {"bash", "write_file", "edit_file"} <= {t["name"] for t in wd_agent.tool_schemas()})
+
+    plan_agent = Agent(dataclasses.replace(_cfg(wd, mode="plan")))
+    check("team: a plan worker stays read-only",
+          not ({"bash", "write_file", "edit_file"} &
+               {t["name"] for t in plan_agent.tool_schemas()}))
+
+
+def _team_factory(script):
+    """A factory returning stubbed Agents, keyed off the Config's mode.
+
+    run_team builds every Agent through the factory, so this is the only place
+    the stub needs to be installed — a class attribute would not reach the
+    per-worker instances.
+    """
+    built = []
+
+    def factory(cfg, **kw):
+        agent = Agent(cfg, permission_handler=kw.get("permission_handler"),
+                      tool_hook=kw.get("tool_hook"))
+        state = {"n": 0}
+
+        async def fake_stream():
+            state["n"] += 1
+            if cfg.mode == "plan":
+                yield ({"type": "text_delta", "text": script["roster"]}, None)
+                yield (None, _Msg([_Blk(type="text", text=script["roster"])]))
+                return
+            # A worker: one bash call, then a closing line.
+            if state["n"] == 1:
+                name = script["names"][len(built) % len(script["names"])]
+                script.setdefault("seen", []).append(name)
+                yield ({"type": "text_delta", "text": f"{name} working"}, None)
+                yield (None, _Msg([
+                    _Blk(type="text", text=f"{name} working"),
+                    _Blk(type="tool_use", id="t1", name="bash",
+                         input={"command": "echo TEAM_OK"}),
+                ], _Usage(100, 20)))
+                return
+            yield ({"type": "text_delta", "text": "done"}, None)
+            yield (None, _Msg([_Blk(type="text", text="done")], _Usage(30, 10)))
+
+        agent._stream_once = fake_stream
+        built.append(agent)
+        return agent
+
+    factory.built = built
+    return factory
+
+
+async def test_team_run(wd: Path) -> None:
+    """A full team run: plan, fan out, collect."""
+    roster = ('{"summary": "three parts", "workers": ['
+              '{"name": "one", "brief": "do one", "owns": ["a.py"]},'
+              '{"name": "two", "brief": "do two", "owns": ["b.py"]},'
+              '{"name": "three", "brief": "do three", "owns": ["c.py"]}]}')
+    factory = _team_factory({"roster": roster, "names": ["one", "two", "three"]})
+
+    events: list[dict] = []
+
+    async def on_event(ev):
+        events.append(ev)
+
+    results = await team_mod.run_team(
+        _cfg(wd, mode="auto"), "do the thing",
+        on_event=on_event, agent_factory=factory,
+    )
+
+    kinds = [e["type"] for e in events]
+    check("team: a plan event is emitted", "team_plan" in kinds)
+    check("team: every worker reports a start", kinds.count("team_start") == 3,
+          str(kinds.count("team_start")))
+    check("team: every worker reports a done", kinds.count("team_done") == 3)
+    check("team: a run ends with team_end", kinds[-1] == "team_end", kinds[-1])
+    check("team: three results come back", len(results) == 3)
+    check("team: all three succeeded", all(r.ok for r in results))
+    check("team: each result carries its spec",
+          {r.spec.name for r in results} == {"one", "two", "three"})
+    check("team: each result carries the worker's own closing text",
+          all(r.digest == "done" for r in results), str([r.digest for r in results]))
+    check("team: usage is accumulated per worker",
+          all(r.input_tokens > 0 for r in results))
+
+    # The planner is read-only, so it cannot start doing the work itself.
+    planner_cfgs = [a.cfg for a in factory.built if a.cfg.mode == "plan"]
+    check("team: the planner runs in plan mode", len(planner_cfgs) == 1)
+    workers = [a for a in factory.built if a.cfg.mode == "auto"]
+    check("team: workers inherit the session mode", len(workers) == 3)
+    check("team: workers do NOT share a Config",
+          len({id(a.cfg) for a in workers}) == 3)
+    check("team: the session config is never handed to a worker",
+          all(a.cfg is not None for a in workers))
+
+
+async def test_team_parallel(wd: Path) -> None:
+    """Workers must actually overlap, not run one after another."""
+    import time as _time
+
+    roster = ('{"summary": "x", "workers": ['
+              '{"name": "one", "brief": "a", "owns": ["a.py"]},'
+              '{"name": "two", "brief": "b", "owns": ["b.py"]},'
+              '{"name": "three", "brief": "c", "owns": ["c.py"]}]}')
+
+    spans: dict[str, list[float]] = {}
+
+    def factory(cfg, **kw):
+        agent = Agent(cfg, tool_hook=kw.get("tool_hook"))
+
+        async def fake_stream():
+            if cfg.mode == "plan":
+                yield ({"type": "text_delta", "text": roster}, None)
+                yield (None, _Msg([_Blk(type="text", text=roster)]))
+                return
+            tag = f"w{len(spans)}"
+            spans.setdefault(tag, [0.0, 0.0])
+            spans[tag][0] = _time.monotonic()
+            # A read_file is NOT gated, so it takes no lock and does not
+            # serialise the workers against each other.
+            yield (None, _Msg([_Blk(type="tool_use", id="t", name="read_file",
+                                    input={"path": "alpha.py"})]))
+            await asyncio.sleep(0.12)
+            spans[tag][1] = _time.monotonic()
+            yield (None, _Msg([_Blk(type="text", text="done")]))
+
+        agent._stream_once = fake_stream
+        return agent
+
+    async def on_event(ev):
+        pass
+
+    await team_mod.run_team(_cfg(wd), "x", on_event=on_event, agent_factory=factory)
+
+    check("team: all three workers ran", len(spans) == 3, str(sorted(spans)))
+    first_starts = sorted(s[0] for s in spans.values())
+    last_ends = sorted(s[1] for s in spans.values())
+    # If they ran in sequence, the last start would be after the first end.
+    check("team: workers overlap in time (concurrent, not sequential)",
+          last_ends[-1] > first_starts[-1] and first_starts[-1] < min(s[1] for s in spans.values()),
+          f"starts={[f'{s:.3f}' for s in first_starts]}")
+
+
+async def test_team_failure_contained(wd: Path) -> None:
+    """One worker dying must not take the team with it."""
+    roster = ('{"summary": "x", "workers": ['
+              '{"name": "good", "brief": "a", "owns": ["a.py"]},'
+              '{"name": "bad", "brief": "b", "owns": ["b.py"]},'
+              '{"name": "also", "brief": "c", "owns": ["c.py"]}]}')
+
+    n = {"i": 0}
+
+    def factory(cfg, **kw):
+        agent = Agent(cfg, tool_hook=kw.get("tool_hook"))
+
+        async def fake_stream():
+            if cfg.mode == "plan":
+                yield ({"type": "text_delta", "text": roster}, None)
+                yield (None, _Msg([_Blk(type="text", text=roster)]))
+                return
+            n["i"] += 1
+            if n["i"] == 2:
+                raise RuntimeError("worker exploded")
+            yield (None, _Msg([_Blk(type="text", text="fine")]))
+
+        agent._stream_once = fake_stream
+        return agent
+
+    events: list[dict] = []
+
+    async def on_event(ev):
+        events.append(ev)
+
+    results = await team_mod.run_team(_cfg(wd), "x", on_event=on_event,
+                                      agent_factory=factory)
+
+    check("team: a failed worker does not abort the run", len(results) == 3)
+    check("team: the surviving workers still succeeded",
+          sum(1 for r in results if r.ok) == 2, str([r.ok for r in results]))
+    bad = [r for r in results if not r.ok]
+    check("team: the failure is recorded on the result",
+          len(bad) == 1 and "exploded" in bad[0].error, str([r.error for r in results]))
+    check("team: the failure is reported as a done event",
+          any(e["type"] == "team_done" and not e["ok"] for e in events))
+    check("team: team_end still fires", events[-1]["type"] == "team_end")
+    check("team: team_end counts the failures", events[-1]["ok"] == 2)
+
+
+async def test_team_tool_hook(wd: Path) -> None:
+    """The hook is entered around every call, but only gated calls take a lock.
+
+    The property that matters is the second one: a read must not queue behind a
+    worker that is holding the write lock, or the lock would serialise the whole
+    team instead of only its writers.
+    """
+    entered: list[str] = []
+    held: list[str] = []
+
+    lock = asyncio.Lock()
+    hook = team_mod._write_lock_hook(lock)
+
+    async def drive(name):
+        async with hook(name, {}):
+            entered.append(name)
+            if lock.locked():
+                held.append(name)
+
+    await drive("read_file")
+    check("team: an ungated call enters its guard", entered == ["read_file"])
+    check("team: an ungated call takes no lock", held == [] and not lock.locked())
+
+    # While a writer holds the lock, a reader must still get through.
+    async def writer():
+        async with hook("bash", {}):
+            await asyncio.sleep(0.15)
+
+    w = asyncio.create_task(writer())
+    await asyncio.sleep(0.02)
+    check("team: the write lock is held during a gated call", lock.locked())
+    await drive("read_file")
+    check("team: a read does not queue behind the writer", entered == ["read_file", "read_file"])
+    await w
+
+    # A second writer does queue.
+    order: list[str] = []
+
+    async def w2(tag):
+        async with hook("write_file", {}):
+            order.append(tag)
+            await asyncio.sleep(0.05)
+
+    await asyncio.gather(w2("first"), w2("second"))
+    check("team: two writers serialise rather than interleave",
+          order == ["first", "second"], str(order))
+
+    # A plain agent carries no hook at all, so nothing changes for it.
+    plain = Agent(_cfg(wd))
+    check("team: a single agent carries no tool hook", plain.tool_hook is None)
+
+    agent = Agent(_cfg(wd), tool_hook=hook)
+    state = {"n": 0}
+
+    async def fake_stream():
+        state["n"] += 1
+        if state["n"] == 1:
+            yield (None, _Msg([
+                _Blk(type="tool_use", id="t1", name="bash",
+                     input={"command": "echo HOOK_OK"}),
+            ]))
+            return
+        yield (None, _Msg([_Blk(type="text", text="done")]))
+
+    agent._stream_once = fake_stream
+    async for _ in agent.run_turn("go"):
+        pass
+    check("team: a hooked agent still runs its turn normally",
+          state["n"] == 2, str(state["n"]))
+
+
+async def test_team_ui(wd: Path) -> None:
+    """Drive /team through the app."""
+    roster = ('{"summary": "two parts", "workers": ['
+              '{"name": "one", "brief": "do one", "owns": ["a.py"]},'
+              '{"name": "two", "brief": "do two", "owns": ["b.py"]}]}')
+    factory = _team_factory({"roster": roster, "names": ["one", "two"]})
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app._team_agent_factory = factory
+    # The fallback path runs the task on the MAIN agent, so that one must be
+    # stubbed too — otherwise an unreadable roster reaches the live API.
+    app.agent = _stub_agent_usage(wd)
+
+    async with app.run_test(size=(118, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        app.query_one("#input").focus()
+        await pilot.pause()
+
+        # ---- no args: usage, and the harness stays free --------------------
+        app._handle_command("/team")
+        await pilot.pause()
+        check("team ui: no args leaves the harness idle", app.busy is False)
+
+        # ---- a real run ----------------------------------------------------
+        app._handle_command("/team do the thing")
+        for _ in range(80):
+            await pilot.pause()
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+
+        check("team ui: the harness is free again when the run ends",
+              app.busy is False)
+        check("team ui: the prompt is usable again",
+              app.query_one("#input").disabled is False)
+
+        # The transcript is a RichLog; read back its rendered text.
+        log = app.query_one("#transcript")
+        lines = [s.text for s in log.lines]
+        blob = "\n".join(lines)
+        check("team ui: the team marker reached the transcript",
+              "⚑ team: do the thing" in blob or "team: do the thing" in blob,
+              blob[-400:])
+        check("team ui: both workers are labelled in the transcript",
+              "[one]" in blob and "[two]" in blob, blob[-600:])
+        check("team ui: the roster was announced",
+              "launching 2 agents" in blob, blob[-800:])
+
+        # The workers' spend must survive the synthesis turn. _handle_event
+        # recomputes the bar from self.agent alone, so without the team total
+        # being banked the figure would drop back to the main agent's own.
+        bar = app.query_one(StatusBar)
+        team_in, team_out, team_cost = app._team_tokens
+        check("team ui: the workers' usage was banked", team_in > 0 and team_out > 0,
+              f"{app._team_tokens}")
+        check("team ui: the bar still carries the team's tokens",
+              bar.input_tokens >= team_in and bar.output_tokens >= team_out,
+              f"bar=({bar.input_tokens},{bar.output_tokens}) team=({team_in},{team_out})")
+
+        # ---- an unreadable roster falls back to a single turn --------------
+        bad_factory = _team_factory({"roster": "I cannot do that.", "names": ["x"]})
+        app._team_agent_factory = bad_factory
+        app._handle_command("/team fallback please")
+        for _ in range(60):
+            await pilot.pause()
+        await asyncio.sleep(0.25)
+        await pilot.pause()
+        blob2 = "\n".join(s.text for s in app.query_one("#transcript").lines)
+        check("team ui: an unreadable roster still runs the task",
+              "could not read a roster" in blob2 or "no team needed" in blob2,
+              blob2[-500:])
+        check("team ui: the fallback leaves the harness free", app.busy is False)
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
@@ -683,6 +1149,14 @@ async def main() -> int:
         await test_ui(wd)
         await test_ui_rails(wd)
         await test_termbg(wd)
+        test_team_roster(wd)
+        test_team_waves(wd)
+        test_team_isolation(wd)
+        await test_team_run(wd)
+        await test_team_parallel(wd)
+        await test_team_failure_contained(wd)
+        await test_team_tool_hook(wd)
+        await test_team_ui(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

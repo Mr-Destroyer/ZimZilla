@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import AsyncIterator, Awaitable, Callable
+from typing import AsyncContextManager, AsyncIterator, Awaitable, Callable
 
 from .config import Config, price_for
 from . import tools as tools_mod
@@ -30,6 +30,13 @@ from .scope import Scope
 
 # Callback signature: async (name, args, preview) -> "yes" | "no" | "always"
 PermissionHandler = Callable[[str, dict, object], Awaitable[str]]
+
+# Callback signature: (name, args) -> an async context manager, entered around
+# the tool's execution. It exists so /team can hold a cross-worker lock for the
+# duration of a mutating call; a single agent passes None and nothing changes.
+# Returning a context manager rather than a plain coroutine is what lets the
+# lock span the whole call instead of being released the instant it is taken.
+ToolHook = Callable[[str, dict], AsyncContextManager[None]]
 
 IDENTITY = """You are ZimZilla, a specialised agentic coding CLI created by ZIM (Mr-Destroyer).
 
@@ -101,15 +108,34 @@ MODE_PROMPTS = {
 }
 
 
+class _null_guard:
+    """A no-op async context manager, for when no tool_hook is installed.
+
+    ``contextlib.nullcontext`` is not async, and entering it with ``async with``
+    would fail. This keeps the execution path in run_turn identical whether or
+    not a hook is present, rather than duplicating the block behind an if.
+    """
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
 class Agent:
     def __init__(
         self,
         cfg: Config,
         permission_handler: PermissionHandler | None = None,
+        tool_hook: ToolHook | None = None,
     ) -> None:
         self.cfg = cfg
         self.messages: list[dict] = []
         self.permission_handler = permission_handler
+        # Awaited immediately before every tool executes. None for a normal
+        # single-agent session — the hook is /team's serialisation point.
+        self.tool_hook = tool_hook
 
         # accounting
         self.session_input_tokens = 0
@@ -404,17 +430,30 @@ class Agent:
                         }
 
                     if result is None:
-                        # Tool execution is BLOCKING: bash waits on
-                        # subprocess.run (up to cfg.bash_timeout, default 120s)
-                        # and the web tools wait on a urllib socket (15s). Run
-                        # it on a worker thread — awaiting it here keeps the
-                        # event loop free, so the TUI keeps painting, the
-                        # spinner keeps turning and Ctrl-C still lands while a
-                        # slow command runs. Called directly it would freeze the
-                        # whole interface for the duration.
-                        result = await asyncio.to_thread(
-                            tools_mod.execute, call.name, args, self.cfg
+                        # /team's serialisation point: a hook returning a lock
+                        # that is held for the whole call, entered here — after
+                        # the permission decision, around the execution — so a
+                        # worker holds it for exactly the duration of the call
+                        # it is protecting. None in a single-agent session, so
+                        # this is a plain call there.
+                        guard = (
+                            self.tool_hook(call.name, args)
+                            if self.tool_hook is not None
+                            else _null_guard()
                         )
+                        async with guard:
+                            # Tool execution is BLOCKING: bash waits on
+                            # subprocess.run (up to cfg.bash_timeout, default
+                            # 120s) and the web tools wait on a urllib socket
+                            # (15s). Run it on a worker thread — awaiting it
+                            # here keeps the event loop free, so the TUI keeps
+                            # painting, the spinner keeps turning and Ctrl-C
+                            # still lands while a slow command runs. Called
+                            # directly it would freeze the whole interface for
+                            # the duration.
+                            result = await asyncio.to_thread(
+                                tools_mod.execute, call.name, args, self.cfg
+                            )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # noqa: BLE001
