@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
+from pathlib import Path
 
 from rich.text import Text
 from textual import on, work
@@ -14,6 +15,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from .. import osint as osint_mod
 from .. import session as session_mod
 from .. import sources as sources_mod
 from .. import team as team_mod
@@ -891,6 +893,7 @@ class ZimZillaApp(App):
             "load": self._cmd_load,
             "compact": lambda a: self._cmd_compact(),
             "team": lambda a: self._cmd_team(a),
+            "osint": lambda a: self._cmd_osint(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-source": lambda a: self._cmd_zim_source(None),
@@ -1490,6 +1493,99 @@ class ZimZillaApp(App):
                 self.agent.cancel_turn()
                 self._sys_line("team interrupted", warn=True)
             self.query_one("#input", Input).focus()
+
+    # ---- osint ------------------------------------------------------------
+    def _cmd_osint(self, args) -> None:
+        """/osint [kind] <target> — recon on a declared target.
+
+        A router, not an engine: pick the kind, validate the target, open a
+        case directory, then hand that kind's playbook to the main agent as a
+        single turn. The playbook is long, so the transcript shows the short
+        `/osint email <target>` label while the agent receives the briefing
+        behind it — see _run_turn's `display`.
+        """
+        p = self.palette
+
+        # Bare `/osint` → the menu, so the surface is discoverable without the
+        # README.
+        if not args:
+            self._osint_menu()
+            return
+
+        kind_name = args[0].lower()
+        kind = osint_mod.OSINT_KINDS.get(kind_name)
+        if kind is None:
+            self._sys_line(
+                f"unknown osint kind: {kind_name} — try "
+                + " | ".join(osint_mod.KIND_ORDER),
+                warn=True,
+            )
+            return
+
+        target = " ".join(args[1:]).strip()
+
+        if not kind.built:
+            self._sys_line(
+                f"/osint {kind.name} is not built yet — email is the one that "
+                "works today",
+                warn=True,
+            )
+            return
+
+        if not target:
+            self._sys_line(f"usage: /osint {kind.name} <{kind.target_label}>", warn=True)
+            return
+
+        ok, err = osint_mod.validate(kind, target)
+        if not ok:
+            self._sys_line(
+                f"usage: /osint {kind.name} <{kind.target_label}>  ({err})", warn=True
+            )
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        case = osint_mod.case_dir(self.cfg, kind, target)
+        prompt = osint_mod.build_prompt(kind, target, case)
+        label = osint_mod.normalise_email(target) if kind.name == "email" else target
+
+        t = Text()
+        t.append("  ◈ CASE      ", style=f"bold {p.accent}")
+        t.append(f"{kind.name} · {label}\n", style=p.primary)
+        t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
+        t.append(str(case) + "\n", style=p.dim)
+        t.append("  ◈ NOTICE    ", style=f"bold {p.amber}")
+        t.append(
+            "authorised use only — your own footprint, a consented audit, "
+            "or a declared engagement\n",
+            style=p.dim,
+        )
+        self.query_one(ChatPane).write_block(t)
+
+        self._run_turn(prompt, display=f"⚑ /osint {kind.name} {label}")
+
+    def _osint_menu(self) -> None:
+        """The kind list, shown by a bare `/osint`."""
+        p = self.palette
+        t = Text()
+        t.append("  OSINT\n\n", style=f"bold {p.accent}")
+        for name in osint_mod.KIND_ORDER:
+            kind = osint_mod.OSINT_KINDS[name]
+            built = kind.built
+            t.append(f"  {'◉' if built else '○'} {name:<10}",
+                     style=f"bold {p.accent}" if built else p.dim)
+            t.append(kind.blurb + "\n", style=p.primary if built else p.dim)
+        t.append("\n  usage: ", style=p.dim)
+        t.append("/osint <kind> <target>\n", style=p.primary)
+        # Read from cfg rather than hard-coding ~/.zimzilla: state_dir is
+        # configurable, and a menu that names the wrong directory is worse
+        # than one that names none.
+        t.append("  evidence lands in ", style=p.dim)
+        t.append(f"{Path(self.cfg.state_dir) / 'osint'}/<kind>-<target>-<stamp>/\n",
+                 style=p.primary)
+        self.query_one(ChatPane).write_block(t)
 
     def _team_agent_factory(self, cfg: Config, **kw) -> Agent:
         """Build a team Agent. The seam tests replace to stub the model.
