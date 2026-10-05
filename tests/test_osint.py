@@ -298,6 +298,25 @@ def test_prompt_github(tmp: Path) -> None:
     check("github prompt: says not to reproduce secrets",
           "without reproducing the secret" in p)
 
+    # Same shared report format as the email playbook — this is the assertion
+    # that keeps the two kinds' reports structurally identical.
+    for needle in ("**What**", "**Where**", "**Confidence**", "**Means**",
+                   "**Verify**", "| Phase | Ran? | Result |",
+                   "## Headline", "Gaps and next steps"):
+        check(f"github prompt: report format has {needle!r}", needle in p)
+
+    # The speed work: the run must lead with the unmetered git path and batch
+    # its API calls rather than spending one round-trip per fact. These pin the
+    # instructions that make the difference, so an edit cannot quietly undo it.
+    check("github prompt: checks the rate limit up front",
+          "rate_limit" in p)
+    check("github prompt: promotes the clone over the API",
+          "not metered" in p or "not\n    metered" in p or "unmetered" in p)
+    check("github prompt: tells the agent to batch per phase",
+          "ONE script" in p or "One script" in p)
+    check("github prompt: says the API budget is 60/hour",
+          "60 requests" in p)
+
 
 # ---------------------------------------------------------------------------
 # Wiring — the command must be reachable from every surface

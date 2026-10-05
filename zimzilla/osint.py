@@ -260,8 +260,29 @@ EVIDENCE DIRECTORY
 {case_dir}
 
 Write every artefact you produce into that directory: raw API responses,
-cloned metadata, and the final `report.md`. Use absolute paths. Create
-subfiles rather than letting long output scroll away — the report cites them.
+cloned metadata, and the final `report.md`. Use absolute paths.
+
+BUDGET AND PACE — READ THIS FIRST
+---------------------------------
+This run is timed and the unauthenticated GitHub API allows only **60 requests
+an hour**. Burning them one call per step is what makes this command slow, so
+the whole method is built to avoid it:
+
+  * **Prefer `git` over the API.** `git clone --bare` and `git log` are *not*
+    metered by the API rate limit. They are the primary tool here, not a
+    fallback. A single clone yields every address that ever touched a repo.
+  * **One script per phase, not one command per fact.** Write a small bash
+    script that fetches everything a phase needs in one shot and writes each
+    response to a file under the evidence directory. Do **not** run a separate
+    tool call per URL — each tool call is a full model round-trip and is what
+    makes the run take minutes.
+  * **Check the budget once.** `curl -s https://api.github.com/rate_limit`
+    tells you how many calls remain. Read it, then spend them deliberately.
+
+If a token is present (`GITHUB_TOKEN` in the environment, or `gh auth token`),
+use it — it raises the limit to 5000/hour and the API becomes cheap. Never
+hard-code a token. With no token, keep API calls to the handful that matter
+and get everything else from git.
 
 METHOD
 ------
@@ -270,58 +291,73 @@ almost always leaks its owner's email address, and once you have that, the
 account stops being a handle and becomes a person you can pivot on.
 
 **1. Account profiling.**
-   Establish who this account is, without authenticating.
-   - `curl -s https://api.github.com/users/<username>` — the public profile:
-     name, company, blog, location, bio, twitter_username, public email (often
-     null, but when present it is a CONFIRMED address), created_at, followers,
-     public_repos.
-   - `https://api.github.com/users/<username>/events/public` — recent activity,
-     which reveals which repos and orgs they actually touch now.
-   - `https://api.github.com/users/<username>/orgs` — organisation
-     memberships, which usually name their employer.
-   - If a token is available (`GITHUB_TOKEN` in the environment), send it as
-     `-H "Authorization: Bearer $GITHUB_TOKEN"` — it raises the rate limit from
-     60 to 5000 requests an hour. Never hard-code a token; if there is none,
-     work within the unauthenticated limit and space the calls out.
+   Establish who this account is, and do it in ONE script. Write a bash script
+   that curls each of these into its own file under the evidence directory,
+   sending the auth header only when a token exists:
+
+     - `https://api.github.com/users/<username>`            -> profile.json
+     - `https://api.github.com/users/<username>/events/public` -> events.json
+     - `https://api.github.com/users/<username>/orgs`       -> orgs.json
+     - `https://api.github.com/users/<username>/repos?per_page=100&sort=updated`
+                                                            -> repos.json
+     - `https://api.github.com/users/<username>/gpg_keys`   -> gpg.json
+     - `https://github.com/<username>.keys`                 -> ssh.keys
+
+   Then read the files. From `profile.json`: name, company, blog, location,
+   bio, twitter_username, public email (often null, but when present it is a
+   CONFIRMED address), created_at, followers, public_repos. `orgs.json`
+   usually names their employer. `ssh.keys` holds no address but the
+   fingerprints are identifiers worth recording.
 
 **2. Email discovery — the pivot.**
-   This is the phase the run exists for. Try every one of these; they leak
-   independently and often disagree, which is itself a finding.
-   - **Commit metadata.** The single richest source. Every commit carries an
-     author name and email. Fetch a few:
-     `https://api.github.com/repos/<username>/<repo>/commits?per_page=100`
-     — read `commit.author.email` and `commit.committer.email`.
-   - **Patch headers.** For any commit sha,
-     `https://github.com/<username>/<repo>/commit/<sha>.patch` begins with
-     `From: Name <email>` in plain text. This works even when the JSON API
-     redacts, and it is the most reliable single trick here.
-   - **The full clone.** When the API is rate-limited, clone shallow and read
-     the history directly: `git clone --bare <repo-url> && git -C <repo> log
-     --format='%an <%ae>%n%cn <%ce>' | sort -u`. This gives every address that
-     ever touched the repo, including old ones the owner has since changed —
-     and old addresses are frequently the ones that appear in breaches.
-   - **GPG and SSH keys.** `https://api.github.com/users/<username>/gpg_keys`
-     returns the public key, whose uid typically carries a real name and email.
-     `https://github.com/<username>.keys` returns SSH public keys — record the
-     fingerprints as identifiers even though they hold no address.
-   - **Manifest and config files.** Read the account's repos for the addresses
-     developers habitually commit: `package.json` (`author.email`),
+   This is the phase the run exists for, and it is done with **git, not the
+   API**. One script, in this order, all writing to the evidence directory:
+
+   - **The clone harvest — do this first, it is unmetered and the richest.**
+     From `repos.json`, take the account's own non-fork repos (skip forks —
+     the history is someone else's) and clone each shallow-bare, then read the
+     whole history in one pass:
+
+         for r in <their repos>; do
+           git clone --bare --quiet "https://github.com/<username>/$r.git" \\
+             "{case_dir}/clone/$r.git" 2>/dev/null
+         done
+         for d in {case_dir}/clone/*.git; do
+           git -C "$d" log --format='%an <%ae>%n%cn <%ce>' 2>/dev/null
+         done | sort -u > {case_dir}/emails.txt
+
+     This gives every name and address that ever committed, including old ones
+     the owner has since changed — and old addresses are frequently the ones
+     that appear in breaches. It costs zero API calls.
+   - **`.mailmap` and manifest files — check the clone for these first.**
+     `.mailmap` exists solely to map contributor names to addresses, so it is
+     the single best file to read when present. Then grep the clone for the
+     addresses developers habitually commit: `package.json` (`author.email`),
      `setup.py`/`pyproject.toml` (`author_email`, `maintainer_email`),
-     `Cargo.toml`, `.mailmap` (a file whose entire purpose is mapping
-     contributor names to addresses — check it first when it exists),
-     `CODE_OF_CONDUCT.md` and `SECURITY.md` (contact addresses), and
+     `Cargo.toml`, `CODE_OF_CONDUCT.md` and `SECURITY.md` (contact addresses),
      `.github/` templates.
-   - **The web profile.** If the API shows a null email, the rendered profile
-     at `https://github.com/<username>` sometimes still displays one.
+   - **Patch headers.** `https://github.com/<username>/<repo>/commit/<sha>.patch`
+     begins with `From: Name <email>` in plain text. This is a plain web
+     fetch, not an API call, so it does not touch the rate limit — use it to
+     confirm an address the clone gave you, or to recover one from a repo you
+     did not clone.
+   - **Commit metadata via the API** — only if the clone was impossible (no
+     network to git, private repos). `https://api.github.com/repos/<username>/<repo>/commits?per_page=100`,
+     read `commit.author.email` and `commit.committer.email`. It costs a call,
+     so spend it last.
+   - **The web profile.** If everything shows a null email, the rendered
+     profile at `https://github.com/<username>` sometimes still displays one.
    - Deduplicate every address you find and record, for each, exactly where it
      came from and the date of the commit that carried it. An address from a
      2014 commit is a historical artefact, not necessarily a current contact.
 
 **3. Identity correlation.**
-   Turn the account into a person.
-   - The `name` and `company` fields against the emails from phase 2.
-   - `twitter_username` and any `blog` URL — fetch the blog, it is often a
-     personal site with a contact page and a fuller bio.
+   Turn the account into a person. This phase is mostly local — read what the
+   earlier phases already put on disk before fetching anything new.
+   - The `name` and `company` fields from `profile.json` against the addresses
+     in `emails.txt`.
+   - `twitter_username` and any `blog` URL — fetch the blog (a plain web
+     fetch), it is often a personal site with a contact page and a fuller bio.
    - Search the username across other services (the same handle on GitLab,
      HackerNews, Reddit, Stack Overflow, Keybase). `sherlock`/`maigret` if
      installed; manual search otherwise.
@@ -329,54 +365,52 @@ account stops being a handle and becomes a person you can pivot on.
      Gravatar, breach exposure — to deepen what the handle alone gave you.
 
 **4. Repository inventory.**
-   What they build, and what that says about them.
-   - `https://api.github.com/users/<username>/repos?per_page=100&sort=updated`
-     — languages, topics, descriptions, creation dates, whether each is a fork.
-   - Read the READMEs. A README often states an employer, a team, a
-     conference talk, or a personal URL.
-   - Commit timing across repos reconstructs a working pattern: timezone from
-     commit hours, and employment changes from activity gaps.
+   What they build, and what that says about them. Read `repos.json` — it is
+   already on disk, so this phase needs no new API calls: languages, topics,
+   descriptions, creation dates, fork status.
+   - Read the READMEs from the clones you already have. A README often states
+     an employer, a team, a conference talk, or a personal URL.
+   - Commit timing across the clones reconstructs a working pattern: timezone
+     from commit hours, and employment changes from activity gaps.
 
 **5. Secrets and exposure.**
-   What the account has accidentally published.
-   - Search their repos for committed secrets: `.env`, `*.pem`, `id_rsa`,
-     `credentials.json`, API-key-shaped strings. Use
-     `https://github.com/search?q=user:<username>+<term>&type=code` and, if
-     installed, `trufflehog` or `gitleaks` against a clone.
+   What the account has accidentally published. Work from the clones — no API
+   calls needed.
+   - Search the cloned trees for committed secrets: `.env`, `*.pem`, `id_rsa`,
+     `credentials.json`, API-key-shaped strings. If `trufflehog` or `gitleaks`
+     is installed, run it against the clone; otherwise grep.
+   - `https://github.com/search?q=user:<username>+<term>&type=code` reaches
+     code you did not clone, but code search is heavily rate-limited — use it
+     sparingly and only after the clones are exhausted.
    - Note leaked secrets in the report **without reproducing the secret
      itself** — describe it and its location. The operator's job is to tell
      the owner, not to use it.
 
 **6. Social graph.**
-   - Collaborators: who else commits to their repos
-     (`https://api.github.com/repos/<user>/<repo>/contributors`), and which
-     orgs they belong to. Co-authors and reviewers are the closest signal to
-     colleagues.
-   - Who they follow, and who follows them, for the professional circle.
+   - Collaborators: who else commits to their repos. The clone already holds
+     this — `git -C <clone> shortlog -sne` lists every co-author and their
+     address in one command. Also note which orgs they belong to (`orgs.json`).
+     Co-authors and reviewers are the closest signal to colleagues.
+   - Who they follow, and who follows them, for the professional circle
+     (`https://api.github.com/users/<username>/followers` and `/following` —
+     one call each, only if the budget allows).
 
 **7. Timeline.**
    - `created_at` is the account's birthday; the first and last commit dates
-     across all repos bound the active period; bursts and gaps map to projects
-     and job changes. Reconstruct it as a dated sequence.
+     across the clones bound the active period; bursts and gaps map to projects
+     and job changes. `git log --format='%ad' --date=short` across the clones
+     gives this with no API calls. Reconstruct it as a dated sequence.
 
-CONFIDENCE
-----------
-Every finding carries one of three levels, and you never upgrade one without
-evidence:
-  CONFIRMED   — verified against a primary source you can cite.
-  PROBABLE    — two or more independent sources agree.
-  UNVERIFIED  — a single source, not yet corroborated.
-
+{report_guide}
+{confidence_guide}
 An email taken from a commit is CONFIRMED as *an email this account
 committed under*; whether it is the person's current address is a separate
 claim, and a weaker one.
 
 REPORT
 ------
-Finish by writing `report.md` into the evidence directory, in this shape:
-
-    # GitHub OSINT — <username>
-    Date: <date>   Analyst: ZimZilla /osint
+Finish by writing `report.md` into the evidence directory. It opens with the
+`## Headline` block and the coverage table, then these sections in order:
 
     1. ACCOUNT          name, id, created, followers, company, location, bio
     2. EMAILS           table: address · source · commit date · confidence
@@ -387,12 +421,13 @@ Finish by writing `report.md` into the evidence directory, in this shape:
     7. EXPOSURE         leaked secrets, sensitive files (described, not quoted)
     8. SOCIAL GRAPH     collaborators, orgs, follows
     9. TIMELINE         dated reconstruction of the account's life
-    10. NEXT STEPS      what a human should check that you could not
 
-Cite the source beside every claim, and for every email give the commit or
-file it came from. Where a phase produced nothing, say so explicitly — an
-empty section is a finding. Do not pad the report with a narrative of what
-you tried; the operator wants the intelligence and the gaps, not a diary.
+Every finding inside those sections is written as a five-line block — What,
+Where, Confidence, Means, Verify — and for every email give the commit or file
+it came from. A section that found nothing says so explicitly rather than
+being dropped. The format, the coverage table and the closing `## Gaps and
+next steps` section are specified in full above; follow them exactly, they are
+what makes the report readable.
 
 Close the turn with a short prose summary of the headline findings: who this
 account appears to belong to, which email addresses are attributable to it,
