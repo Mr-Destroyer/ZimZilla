@@ -341,6 +341,20 @@ writes: `set -a; . ~/.zimzilla/logfare/source; set +a`. Or just launch with
 
 **`the endpoint rejected the model name`** — run `/model` for valid names.
 
+**`pip install` dies with `IncompleteRead` on the same package every time** —
+a corrupt entry in pip's download cache, not a network problem. The tell is
+that the byte counts in the error are identical across runs; a genuine
+connection drop gives you different numbers and a different package. Clear it
+and reinstall:
+
+```bash
+pip cache purge
+pip install --retries 10 --timeout 60 -r requirements.txt
+```
+
+`pip install --no-cache-dir -r requirements.txt` bypasses the cache without
+clearing it, if you would rather not re-download everything else.
+
 **It says the endpoint is up but stalled** — something between you and the
 model went quiet. It will time out rather than hang; check the endpoint is
 actually serving.
