@@ -4,8 +4,11 @@ Run:  python tests/test_osint.py   (from an activated venv)
 
 Two layers, matching the split in zimzilla/osint.py itself:
 
-The pure logic — registry shape, target validation, slugging, the case
-directory, the playbook prompt — exercised directly and with no terminal.
+* the pure logic — registry shape, target validation, slugging, the case
+  directory, the playbook prompt — exercised directly and with no terminal;
+* the wiring — that the slash dispatch, the help table, the palette and the
+  completion popup all actually expose the command, so a rename in one place
+  cannot silently orphan it in another.
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ sys.path.insert(0, str(ROOT))
 
 from zimzilla import osint  # noqa: E402
 from zimzilla.config import Config  # noqa: E402
+from zimzilla.ui.app import ZimZillaApp  # noqa: E402
+from zimzilla.ui.complete import SLASH_COMMANDS  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -188,6 +193,102 @@ def test_prompt(tmp: Path) -> None:
           "phone" in s and "+15551234567" in s)
 
 
+# ---------------------------------------------------------------------------
+# Wiring — the command must be reachable from every surface
+# ---------------------------------------------------------------------------
+
+def test_wiring() -> None:
+    # Completion popup lists it...
+    names = [c for c, _ in SLASH_COMMANDS]
+    check("wiring: /osint is in the completion menu", "/osint" in names, f"{names}")
+
+    # ...and the dispatch, help and palette tables reference it. Read from the
+    # source rather than importing a copy, so a rename cannot drift past this.
+    app_src = (ROOT / "zimzilla" / "ui" / "app.py").read_text()
+    check("wiring: dispatch has an osint entry", '"osint": lambda a:' in app_src)
+    check("wiring: _cmd_osint is defined", "def _cmd_osint(" in app_src)
+    check("wiring: help table lists it", '("/osint [kind] <target>"' in app_src)
+    check("wiring: palette lists it",
+          '("/osint", "open-source recon on a target", "osint")' in app_src)
+
+
+class _Blk:
+    def __init__(self, **k):
+        self.__dict__.update(k)
+
+    def model_dump(self, exclude_none: bool = False) -> dict:
+        return {k: v for k, v in self.__dict__.items()
+                if not (exclude_none and v is None)}
+
+
+class _Msg:
+    def __init__(self, content, usage=None):
+        self.content = content
+        self.usage = usage
+
+
+async def test_ui(wd: Path) -> None:
+    """Drive the command through the live app: menu, refusal, bad target.
+
+    The model is stubbed so no request leaves the machine, and the turn is
+    held open on an event so `busy` can be observed while it is genuinely in
+    flight rather than raced against an instant completion.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    # Point state_dir at the temp dir — the default is ~/.zimzilla, and this
+    # test must not scatter case directories into the operator's home.
+    cfg.state_dir = wd / "state"
+
+    app = ZimZillaApp(cfg)
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        gate = asyncio.Event()
+
+        async def held_stream():
+            await gate.wait()
+            yield (None, _Msg([_Blk(type="text", text="done")]))
+
+        app.agent._stream_once = held_stream
+
+        # ---- every refusal path must leave the harness idle ----------------
+        app._handle_command("/osint")
+        await pilot.pause()
+        check("ui: bare /osint does not start a turn", app.busy is False)
+
+        app._handle_command("/osint nosuchkind foo")
+        await pilot.pause()
+        check("ui: unknown kind is refused", app.busy is False)
+
+        app._handle_command("/osint phone +15551234567")
+        await pilot.pause()
+        check("ui: a stub kind does not start a turn", app.busy is False)
+
+        app._handle_command("/osint email not-an-address")
+        await pilot.pause()
+        check("ui: a bad email is refused", app.busy is False)
+        # No case dir for the *refused* target — checked by its own glob, not
+        # by the parent existing, which an earlier test in this file shares.
+        check("ui: a refused run creates no case dir",
+              not list((cfg.state_dir / "osint").glob("email-not-an-address-*")))
+
+        # ---- the happy path launches a turn --------------------------------
+        app._handle_command("/osint email target@example.com")
+        await pilot.pause()
+        check("ui: a valid email launches the recon turn", app.busy is True)
+
+        made = list((cfg.state_dir / "osint").glob("email-target-example.com-*"))
+        check("ui: the case directory was created", len(made) == 1,
+              f"{[p.name for p in made]}")
+
+        # Let the stubbed turn finish and confirm the harness returns to idle.
+        gate.set()
+        for _ in range(5):
+            await pilot.pause()
+        check("ui: the turn completes and the harness idles", app.busy is False)
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -196,6 +297,8 @@ async def main() -> int:
         test_normalise()
         test_case_dir(tmp)
         test_prompt(tmp)
+        test_wiring()
+        await test_ui(tmp)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
