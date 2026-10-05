@@ -8,7 +8,7 @@
 
 export ANTHROPIC_BASE_URL="http://localhost:4001"
 export ANTHROPIC_AUTH_TOKEN="lfu_REPLACE_ME"
-export ANTHROPIC_MODEL="claude-opus-4.6"
+export ANTHROPIC_MODEL="grok-4.6"
 
 # Load-bearing: ZimZilla (like Claude Code) prefers ANTHROPIC_AUTH_TOKEN
 # (Bearer) and only falls back to ANTHROPIC_API_KEY (x-api-key) if the token is
