@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: zimzilla
-Version: 1.0.0
-Summary: An agentic coding CLI over the Anthropic Messages API with a green-on-black hacker TUI.
-Requires-Python: >=3.11
-Requires-Dist: anthropic>=0.40
-Requires-Dist: textual>=0.80
-Requires-Dist: rich>=13.7
-Requires-Dist: pyyaml>=6.0

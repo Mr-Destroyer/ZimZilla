@@ -1,0 +1,12 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Packaging / build artifacts
+*.egg-info/
+build/
+dist/
+
+# Virtualenvs — the user brings their own
+.venv/
+venv/
