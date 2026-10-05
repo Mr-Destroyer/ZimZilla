@@ -128,7 +128,7 @@ mkdir -p "$LOG_DIR"
     printf '# Treat this file as a credential. Never commit it.\n\n'
     printf 'export ANTHROPIC_BASE_URL="http://localhost:%s"\n' "$PORT"
     printf 'export ANTHROPIC_AUTH_TOKEN="%s"\n' "$KEY"
-    printf 'export ANTHROPIC_MODEL="claude-opus-4.6"\n\n'
+    printf 'export ANTHROPIC_MODEL="grok-4.6"\n\n'
     printf '# Load-bearing: an empty string keeps ANTHROPIC_AUTH_TOKEN authoritative\n'
     printf '# and clears any real API key inherited from the shell.\n'
     printf 'export ANTHROPIC_API_KEY=""\n\n'
