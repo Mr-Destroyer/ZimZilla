@@ -1146,6 +1146,12 @@ def test_default_model(wd: Path) -> None:
     check("default model: the shipped default is grok-4.6",
           DEFAULT_MODEL == "grok-4.6", DEFAULT_MODEL)
 
+    from zimzilla.config import KNOWN_MODELS
+
+    check("default model: it is in KNOWN_MODELS",
+          DEFAULT_MODEL in KNOWN_MODELS,
+          f"registry has {len(KNOWN_MODELS)} entries")
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
