@@ -1550,7 +1550,7 @@ class ZimZillaApp(App):
 
         case = osint_mod.case_dir(self.cfg, kind, target)
         prompt = osint_mod.build_prompt(kind, target, case)
-        label = osint_mod.normalise_email(target) if kind.name == "email" else target
+        label = osint_mod.normalise(kind, target)
 
         t = Text()
         t.append("  ◈ CASE      ", style=f"bold {p.accent}")
