@@ -1158,6 +1158,12 @@ def test_default_model(wd: Path) -> None:
           DEFAULT_MODEL in PRICING and PRICING[DEFAULT_MODEL] != DEFAULT_PRICE,
           f"{PRICING.get(DEFAULT_MODEL)}")
 
+    from zimzilla.sources import LOGFARE_MODELS
+
+    check("default model: Logfare actually serves it",
+          DEFAULT_MODEL in LOGFARE_MODELS,
+          f"{len(LOGFARE_MODELS)} served")
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
