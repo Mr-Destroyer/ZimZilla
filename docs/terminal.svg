@@ -34,7 +34,7 @@
     <line x1="0" y1="46" x2="1100" y2="46" stroke="#0c5a22" stroke-opacity="0.6"/>
 
     <text x="34" y="76" fill="#0c5a22" style="font:13px ui-monospace,Menlo,monospace;letter-spacing:1.4px">
-      ◆ ZIMZILLA   ◆ AUTO   ◆ claude-opus-4.6   ▸ /home/zim   ◈ scope off   ⛨ sandbox on
+      ◆ ZIMZILLA   ◆ AUTO   ◆ grok-4.6   ▸ /home/zim   ◈ scope off   ⛨ sandbox on
     </text>
 
       <text class="ln" x="34" y="104" fill="#00ff41" style="animation-delay:0.55s">› recon the target and map the attack surface</text>
@@ -49,7 +49,7 @@
 
     <line x1="0" y1="388" x2="1100" y2="388" stroke="#0c5a22" stroke-opacity="0.6"/>
     <text x="34" y="413" fill="#0c5a22" style="font:13px ui-monospace,Menlo,monospace">
-      ● claude-opus-4.6   |   tok ↑18.4k ↓612   |   $ 0.0142   |   turn 3   |   ● idle
+      ● grok-4.6   |   tok ↑18.4k ↓612   |   $ 0.0142   |   turn 3   |   ● idle
     </text>
     <rect x="0.5" y="0.5" width="1099" height="429" rx="12" fill="none" stroke="#0c5a22" stroke-opacity="0.55"/>
   </g>
