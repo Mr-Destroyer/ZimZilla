@@ -592,7 +592,12 @@ class ZimZillaApp(App):
 
     # ---- turn worker ------------------------------------------------------
     @work(exclusive=True)
-    async def _run_turn(self, text: str, display: str | None = None) -> None:
+    async def _run_turn(
+        self,
+        text: str,
+        display: str | None = None,
+        osint_case: Path | None = None,
+    ) -> None:
         p = self.palette
         chat = self.query_one(ChatPane)
         bar = self.query_one(StatusBar)
@@ -648,6 +653,14 @@ class ZimZillaApp(App):
             if self._cancelled:
                 self.agent.cancel_turn()
                 self._sys_line("turn interrupted", warn=True)
+            # An osint run leaves its whole case directory behind — clones,
+            # raw API dumps, avatars. Once the report is written, archive it
+            # and delete the rest, so ~/.zimzilla does not grow without bound.
+            # Runs in the finally block, so an interrupted run is tidied too.
+            # finalise_case deletes NOTHING unless it found a report, so a run
+            # that failed or was cut short keeps its evidence for inspection.
+            if osint_case is not None:
+                self._finalise_osint(osint_case)
             self.query_one("#input", Input).focus()
 
     async def _handle_event(self, ev: dict) -> None:
@@ -1565,7 +1578,31 @@ class ZimZillaApp(App):
         )
         self.query_one(ChatPane).write_block(t)
 
-        self._run_turn(prompt, display=f"⚑ /osint {kind.name} {label}")
+        self._run_turn(
+            prompt,
+            display=f"⚑ /osint {kind.name} {label}",
+            osint_case=case,
+        )
+
+    def _finalise_osint(self, case: Path) -> None:
+        """Archive the run's report and clear the case directory.
+
+        Reports are the one artefact worth keeping, so they move to
+        ``<state_dir>/reports/`` and everything else — the clones, the raw API
+        responses, the avatars — is deleted. A run that produced no report
+        (failed, or interrupted before the write) is left untouched so the
+        operator can see what it managed to collect.
+        """
+        report, cleaned = osint_mod.finalise_case(self.cfg, case)
+        if report is not None:
+            self._sys_line(f"report archived: {report}", ok=True)
+            if cleaned:
+                self._sys_line("case directory cleared (evidence discarded)")
+        else:
+            self._sys_line(
+                f"no report found — case directory kept for inspection: {case}",
+                warn=True,
+            )
 
     def _osint_menu(self) -> None:
         """The kind list, shown by a bare `/osint`."""

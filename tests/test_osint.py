@@ -217,6 +217,95 @@ def test_case_dir(tmp: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Finalising a case — archive the report, delete the rest
+# ---------------------------------------------------------------------------
+
+def test_finalise(tmp: Path) -> None:
+    email = osint.OSINT_KINDS["email"]
+    cfg = _cfg(tmp)
+    cfg.state_dir = tmp / "fin-state"
+
+    # ---- a completed run: report archived, case dir gone -------------------
+    case = osint.case_dir(cfg, email, "done@example.com")
+    (case / "report.md").write_text("# Email OSINT — done@example.com\n")
+    # Bulky evidence that must NOT survive the cleanup.
+    (case / "clone").mkdir()
+    (case / "clone" / "big.git").write_text("x" * 5000)
+
+    report, cleaned = osint.finalise_case(cfg, case)
+    check("finalise: returns the archived report path", report is not None,
+          str(report))
+    check("finalise: the report is archived under reports/",
+          report is not None and report.parent == cfg.state_dir / "reports",
+          str(report) if report else "")
+    check("finalise: the archived report keeps the case name",
+          report is not None and report.name == f"{case.name}.md",
+          report.name if report else "")
+    check("finalise: the report content survived the move",
+          report is not None and "done@example.com" in report.read_text())
+    check("finalise: the case directory was deleted", not case.exists())
+    check("finalise: reports that cleaned is True", cleaned is True)
+
+    # ---- a failed run: no report, so nothing is deleted --------------------
+    # The whole point: a run that produced no report must keep its evidence,
+    # never be tidied away on the assumption it finished.
+    case2 = osint.case_dir(cfg, email, "failed@example.com")
+    (case2 / "profile.json").write_text("{}")
+    report2, cleaned2 = osint.finalise_case(cfg, case2)
+    check("finalise: no report yields no path", report2 is None)
+    check("finalise: no report leaves the case dir in place", case2.exists())
+    check("finalise: no report reports cleaned False", cleaned2 is False)
+    check("finalise: no report keeps the collected evidence",
+          (case2 / "profile.json").is_file())
+
+    # ---- a report under a different name or in a subdir is still found -----
+    # The agent does not always follow the filename to the letter; a report it
+    # did write must still be archived rather than deleted as evidence.
+    case3 = osint.case_dir(cfg, email, "nested@example.com")
+    (case3 / "out").mkdir()
+    (case3 / "out" / "Report.md").write_text("# nested\n")
+    report3, cleaned3 = osint.finalise_case(cfg, case3)
+    check("finalise: finds a report in a subdirectory", report3 is not None,
+          str(report3))
+    check("finalise: nested case dir still deleted", not case3.exists())
+    check("finalise: nested run cleaned True", cleaned3 is True)
+
+    # A non-report .md must not be mistaken for the report.
+    case4 = osint.case_dir(cfg, email, "notes@example.com")
+    (case4 / "notes.md").write_text("scratch\n")
+    report4, cleaned4 = osint.finalise_case(cfg, case4)
+    check("finalise: a stray .md is not treated as the report", report4 is None)
+    check("finalise: a stray .md leaves the case dir alone", case4.exists())
+
+    # A report.md that belongs to a CLONED repo is not this run's report. The
+    # run's own report must win, and the clone's must not be archived as it —
+    # mistaking them would archive the wrong file and delete the real evidence.
+    case5 = osint.case_dir(cfg, email, "cloned@example.com")
+    (case5 / "report.md").write_text("# the run's report\n")
+    repo = case5 / "clone" / "some.git"
+    repo.mkdir(parents=True)
+    (repo / "report.md").write_text("# the repo's own report\n")
+    report5, cleaned5 = osint.finalise_case(cfg, case5)
+    check("finalise: the run's report wins over a clone's",
+          report5 is not None and "the run's report" in report5.read_text(),
+          report5.name if report5 else "")
+
+    # With NO top-level report, a clone's report.md must not be promoted: the
+    # case dir is kept so the operator can see the run never produced one.
+    case6 = osint.case_dir(cfg, email, "cloneonly@example.com")
+    repo6 = case6 / "clone" / "only.git"
+    repo6.mkdir(parents=True)
+    (repo6 / "report.md").write_text("# not the run's\n")
+    report6, cleaned6 = osint.finalise_case(cfg, case6)
+    check("finalise: a clone's report is never promoted", report6 is None)
+    check("finalise: a clone-only case dir is kept", case6.exists())
+
+    # reports_dir is the documented location and agrees with what finalise used.
+    check("finalise: reports_dir matches the archive parent",
+          osint.reports_dir(cfg) == cfg.state_dir / "reports")
+
+
+# ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
 
@@ -425,12 +514,33 @@ async def test_ui(wd: Path) -> None:
             await pilot.pause()
         check("ui: the turn completes and the harness idles", app.busy is False)
 
+        # The stub produced no report, so the case dir must be KEPT — a run
+        # that did not finish writing is never tidied away.
+        check("ui: a run with no report keeps its case dir",
+              len(made) == 1 and made[0].is_dir(),
+              f"{[p.name for p in made]}")
+
         # ---- github, launched from a pasted profile URL -------------------
         # The URL must be unwrapped before it reaches the case directory, so
         # the evidence path is named after the handle and not the host. The
         # glob is enough on its own: this test has its own state_dir, so any
         # match here is one this run created.
+        #
+        # This run's stub writes a report into the case dir before finishing,
+        # so the finalise path is exercised end to end: report archived,
+        # case dir cleared.
         gate.clear()
+
+        async def reporting_stream():
+            await gate.wait()
+            # The case dir is the only one under osint/ for this state_dir.
+            case = next((cfg.state_dir / "osint").glob("github-torvalds-*"))
+            (case / "report.md").write_text("# GitHub OSINT — torvalds\n")
+            (case / "clone").mkdir(exist_ok=True)
+            yield (None, _Msg([_Blk(type="text", text="done")]))
+
+        app.agent._stream_once = reporting_stream
+
         app._handle_command("/osint github https://github.com/torvalds")
         await pilot.pause()
         check("ui: a github URL launches the recon turn", app.busy is True)
@@ -444,6 +554,13 @@ async def test_ui(wd: Path) -> None:
             await pilot.pause()
         check("ui: the github turn completes", app.busy is False)
 
+        # The report was archived and the bulky case dir removed.
+        check("ui: the case dir is cleared after a reported run",
+              not gmade[0].exists(), str(gmade[0]))
+        archived = list((cfg.state_dir / "reports").glob("github-torvalds-*.md"))
+        check("ui: the report is archived under reports/",
+              len(archived) == 1, f"{[p.name for p in archived]}")
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
@@ -452,6 +569,7 @@ async def main() -> int:
         test_validation()
         test_normalise()
         test_case_dir(tmp)
+        test_finalise(tmp)
         test_prompt(tmp)
         test_prompt_github(tmp)
         test_wiring()

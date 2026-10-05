@@ -27,6 +27,7 @@ check it.
 from __future__ import annotations
 
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -567,6 +568,90 @@ def case_dir(cfg, kind: Kind, target: str) -> Path:
     d = Path(cfg.state_dir) / "osint" / f"{kind.name}-{label}-{stamp}"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _inside_git_tree(path: Path, stop: Path) -> bool:
+    """True if *path* sits inside a git checkout somewhere beneath *stop*.
+
+    Used to keep a cloned repository's own files out of the report search: a
+    repo can ship a `report.md` of its own, and mistaking it for the run's
+    report would archive the wrong file and then delete the real evidence.
+    A bare clone is caught by its `.git` suffix, a normal one by its `.git`
+    directory.
+    """
+    for parent in path.parents:
+        if parent == stop:
+            return False
+        if (parent / ".git").exists() or parent.name.endswith(".git"):
+            return True
+    return False
+
+
+def _find_report(case: Path) -> Path | None:
+    """Locate the report inside *case*, or None if there isn't one.
+
+    The playbook asks for `report.md` at the top level, but a run that wrote it
+    into a subdirectory, or under a different name, should still be picked up
+    rather than deleted along with the evidence.
+
+    Deliberately not a full `rglob`: the case directory holds git clones, and a
+    recursive walk would both trawl a huge checkout and risk matching a file
+    that belongs to a cloned repo rather than to this run. Only the top level
+    and its immediate subdirectories are considered, and anything inside a git
+    tree is skipped.
+    """
+    direct = case / "report.md"
+    if direct.is_file():
+        return direct
+    for p in (*sorted(case.glob("*.md")), *sorted(case.glob("*/*.md"))):
+        if "report" in p.name.lower() and not _inside_git_tree(p, case):
+            return p
+    return None
+
+
+def reports_dir(cfg) -> Path:
+    """Where finished reports are kept, under state_dir beside the sessions."""
+    return Path(cfg.state_dir) / "reports"
+
+
+def finalise_case(cfg, case: Path) -> tuple[Path | None, bool]:
+    """Archive the report, then delete the bulky case directory.
+
+    Returns ``(report_path, cleaned)``. The contract, in order:
+
+      * No report -> delete nothing. The case dir is left exactly as it is, so
+        a run that failed or was interrupted keeps its evidence for the
+        operator to inspect. ``(None, False)``.
+      * Report found -> move it to ``<state_dir>/reports/<case-name>.md`` (a
+        flat, permanent store that outlives the case), then remove the whole
+        case directory — clones, raw JSON, avatars and all. ``(path, True)``.
+
+    The move is a real move, not a copy, so the report is never left behind in
+    a directory that is about to be deleted. If the move fails for any reason,
+    the deletion is skipped entirely: an error here must never destroy the only
+    copy of the report. Cleanup is best-effort and must not raise into the UI —
+    a recon run that produced a report has succeeded regardless of whether the
+    disk tidy-up worked.
+    """
+    report = _find_report(case)
+    if report is None:
+        return None, False
+
+    dest_dir = reports_dir(cfg)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{case.name}.md"
+        shutil.move(str(report), str(dest))
+    except OSError:
+        # Could not archive — leave everything untouched rather than delete.
+        return None, False
+
+    try:
+        shutil.rmtree(case)
+    except OSError:
+        # Report is safely archived; a failed tidy-up is not worth surfacing.
+        return dest, False
+    return dest, True
 
 
 # ---------------------------------------------------------------------------
