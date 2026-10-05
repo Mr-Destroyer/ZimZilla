@@ -204,7 +204,7 @@ def terminal() -> str:
     <line x1="0" y1="46" x2="{W}" y2="46" stroke="{DIM}" stroke-opacity="0.6"/>
 
     <text x="{pad}" y="76" fill="{DIM}" style="font:13px ui-monospace,Menlo,monospace;letter-spacing:1.4px">
-      ◆ ZIMZILLA   ◆ AUTO   ◆ claude-opus-4.6   ▸ /home/zim   ◈ scope off   ⛨ sandbox on
+      ◆ ZIMZILLA   ◆ AUTO   ◆ grok-4.6   ▸ /home/zim   ◈ scope off   ⛨ sandbox on
     </text>
 
       {body}
