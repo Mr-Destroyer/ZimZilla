@@ -230,7 +230,7 @@ fi
 # A live round-trip through the proxy proves the key actually works. The
 # upstream reports "temporarily unavailable" under load, so give it one retry
 # before calling the key bad.
-BODY='{"model":"claude-opus-4.6","max_tokens":8,"messages":[{"role":"user","content":"say ok"}]}'
+BODY='{"model":"grok-4.6","max_tokens":8,"messages":[{"role":"user","content":"say ok"}]}'
 probe() {
   curl -s -o /tmp/zim-setup-probe.json -w '%{http_code}' \
     -X POST "http://127.0.0.1:$PORT/v1/messages" \
