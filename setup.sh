@@ -133,7 +133,7 @@ mkdir -p "$LOG_DIR"
     printf '# and clears any real API key inherited from the shell.\n'
     printf 'export ANTHROPIC_API_KEY=""\n\n'
     printf '# Model aliases — see litellm-config.yaml for the full list.\n'
-    printf 'export MODEL_DEFAULT="claude-opus-4.6"\n'
+    printf 'export MODEL_DEFAULT="grok-4.6"\n'
     printf 'export MODEL_OPUS="claude-opus-4.6"\n'
     printf 'export MODEL_SONNET="claude-sonnet-4.6"\n'
     printf 'export MODEL_DEEPSEEK="deepseek-v3.2"\n'
