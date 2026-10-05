@@ -924,6 +924,7 @@ class ZimZillaApp(App):
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
             ("/team <task>", "fan the task out across parallel agents"),
+            ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
             ("/exit", "leave the harness        (Ctrl+D also works)"),
         ]
         t = Text()
@@ -1623,6 +1624,7 @@ class ZimZillaApp(App):
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),
             ("/team", "fan the task out across parallel agents", "team"),
+            ("/osint", "open-source recon on a target", "osint"),
             ("/clear", "wipe transcript and history", "clear"),
             ("/exit", "leave the harness", "exit"),
         ]

@@ -19,6 +19,7 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from ..osint import KIND_ORDER as OSINT_KIND_ORDER
 from ..theme import Palette
 
 # (command, description)
@@ -36,6 +37,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/save", "write the session to disk"),
     ("/load", "restore a saved session"),
     ("/compact", "summarise history to free context"),
+    ("/team", "fan the task out across parallel agents"),
+    ("/osint", "open-source recon on a target"),
     ("/clear", "wipe transcript and history"),
     ("/exit", "leave the harness"),
 ]
@@ -140,7 +143,11 @@ class CompletionPopup(VerticalScroll):
                 parts = text[1:].split()
                 cmd = "/" + parts[0].lower() if parts else "/"
                 arg = parts[1].lower() if len(parts) > 1 else ""
-                pool = {"mode": MODE_NAMES, "theme": THEME_NAMES}.get(parts[0].lower(), [])
+                pool = {
+                    "mode": MODE_NAMES,
+                    "theme": THEME_NAMES,
+                    "osint": OSINT_KIND_ORDER,
+                }.get(parts[0].lower(), [])
                 items = [(a, "") for a in pool if a.startswith(arg) and a != arg]
             else:
                 items = [(c, d) for c, d in SLASH_COMMANDS if c.startswith(query)]
