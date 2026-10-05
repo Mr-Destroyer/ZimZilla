@@ -1152,6 +1152,12 @@ def test_default_model(wd: Path) -> None:
           DEFAULT_MODEL in KNOWN_MODELS,
           f"registry has {len(KNOWN_MODELS)} entries")
 
+    from zimzilla.config import DEFAULT_PRICE, PRICING
+
+    check("default model: it has a real price, not the fallback",
+          DEFAULT_MODEL in PRICING and PRICING[DEFAULT_MODEL] != DEFAULT_PRICE,
+          f"{PRICING.get(DEFAULT_MODEL)}")
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
