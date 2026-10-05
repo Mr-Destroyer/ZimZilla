@@ -374,30 +374,51 @@ the case directory.
 **`github`** runs the same idea in reverse — it starts from a handle and hunts
 for the person behind it. Phase 2 is the point of the run: a GitHub account
 almost always leaks its owner's email address, and that is the pivot from a
-username to an identity. It checks commit metadata and `.patch` headers
-(`From: Name <email>`), GPG uids and SSH keys, and the files developers
-routinely commit addresses into — `package.json`, `pyproject.toml`, and
-`.mailmap`, whose whole purpose is mapping contributors to addresses. From
-there it profiles the account, inventories the repos, maps the social graph
-(orgs, collaborators) and reconstructs a timeline. Committed secrets are
-reported by location and described, **never reproduced**. A pasted profile URL
-is accepted and unwrapped, so `https://github.com/torvalds` and `torvalds` are
-the same run.
+username to an identity. It mines `git` history (every name and address that
+ever committed), `.patch` headers (`From: Name <email>`), GPG uids and SSH
+keys, and the files developers routinely commit addresses into —
+`package.json`, `pyproject.toml`, and `.mailmap`, whose whole purpose is
+mapping contributors to addresses. From there it profiles the account,
+inventories the repos, maps the social graph (orgs, collaborators) and
+reconstructs a timeline. Committed secrets are reported by location and
+described, **never reproduced**. A pasted profile URL is accepted and
+unwrapped, so `https://github.com/torvalds` and `torvalds` are the same run.
 
 ```bash
 /osint github torvalds
 /osint github https://github.com/torvalds    # same thing
 ```
 
-With a `GITHUB_TOKEN` in the environment the rate limit goes from 60 to 5000
-requests an hour; without one it works within the unauthenticated limit and
-says so.
+**Why it is fast.** The unauthenticated GitHub API allows only 60 requests an
+hour, and spending them one call per step is what used to make this run drag.
+The playbook is built to avoid it: it checks `rate_limit` once up front, then
+does its work with `git clone --bare` and `git log`, which are **not** metered
+by the API at all, and batches the few API calls it still needs into one script
+per phase instead of one round-trip per fact. A single clone yields every
+address that ever touched a repo — including old ones the owner has since
+changed, which are often the ones that turn up in breaches. With a
+`GITHUB_TOKEN` in the environment (or a `gh auth` login) the limit rises to
+5000 an hour and the API becomes cheap, but no token is required.
 
-**Where evidence lands.** Each run gets its own directory under
-`<state_dir>/osint/<kind>-<target>-<timestamp>/` — by default
+**The report.** Every kind ends by writing `report.md`. Each finding is a
+five-line block — **What** it is, **Where** it came from, **Confidence**,
+what it **Means** in plain language, and how to **Verify** it — so the report
+explains itself instead of dumping tool output. It opens with a `## Headline`
+and a coverage table showing which phases ran, and closes with `## Gaps and
+next steps`. A section that found nothing says so explicitly: an empty section
+is a finding, not an omission. The format is shared by every kind, so the email
+and github reports read the same way.
+
+**Where evidence lands, and where it goes.** Each run gets its own directory
+under `<state_dir>/osint/<kind>-<target>-<timestamp>/` — by default
 `~/.zimzilla/osint/…`, beside your sessions rather than in whatever repo you
-happen to be sitting in. The agent writes its raw output, downloaded avatars
-and the final report there, and the path is printed when the run starts.
+happen to be sitting in. The agent writes its raw output, downloaded avatars,
+clones and the final report there, and the path is printed when the run starts.
+**When the run finishes, the report is moved to `<state_dir>/reports/` and the
+case directory is deleted** — clones and raw API dumps can run to hundreds of
+megabytes, and they are not worth keeping once the report cites them. A run
+that produced *no* report (it failed, or you interrupted it before the write)
+is left exactly as it is, so you can inspect what it managed to collect.
 
 **Tools it uses, if you have them.** Breach lookups, `holehe` and `sherlock`
 are optional — the playbook runs without them and says which sources it had to
@@ -426,7 +447,7 @@ zimzilla/                     the package
   sandbox.py                  the filesystem jail
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
-  osint.py                    /osint kinds, playbooks, case dirs
+  osint.py                    /osint kinds, playbooks, case dirs, report archive
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan palettes
   termbg.py                   asks the terminal for its own background
