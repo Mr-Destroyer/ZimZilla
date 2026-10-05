@@ -1135,6 +1135,18 @@ async def test_team_ui(wd: Path) -> None:
         check("team ui: the fallback leaves the harness free", app.busy is False)
 
 
+# ---- default model --------------------------------------------------------
+# The shipped default moved to grok-4.6. These pin the parts of that which
+# can silently drift apart: the constant, the registry it must belong to, the
+# price it must have, and the environment override that outranks it.
+
+def test_default_model(wd: Path) -> None:
+    from zimzilla.config import DEFAULT_MODEL
+
+    check("default model: the shipped default is grok-4.6",
+          DEFAULT_MODEL == "grok-4.6", DEFAULT_MODEL)
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
@@ -1149,6 +1161,7 @@ async def main() -> int:
         await test_ui(wd)
         await test_ui_rails(wd)
         await test_termbg(wd)
+        test_default_model(wd)
         test_team_roster(wd)
         test_team_waves(wd)
         test_team_isolation(wd)
