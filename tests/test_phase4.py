@@ -1164,6 +1164,31 @@ def test_default_model(wd: Path) -> None:
           DEFAULT_MODEL in LOGFARE_MODELS,
           f"{len(LOGFARE_MODELS)} served")
 
+    # from_env prefers ZIMZILLA_MODEL, then ANTHROPIC_MODEL, then the
+    # constant. The profile exports ANTHROPIC_MODEL, so in a real session the
+    # constant is never consulted — which means a wrong value there would be
+    # invisible until someone ran without the profile.
+    import os
+
+    saved = {k: os.environ.pop(k, None) for k in ("ZIMZILLA_MODEL", "ANTHROPIC_MODEL")}
+    try:
+        check("default model: an unset environment yields the default",
+              _cfg(wd).model == DEFAULT_MODEL, _cfg(wd).model)
+
+        os.environ["ANTHROPIC_MODEL"] = "grok-4.6"
+        check("default model: ANTHROPIC_MODEL outranks it",
+              _cfg(wd).model == "grok-4.6", _cfg(wd).model)
+
+        os.environ["ZIMZILLA_MODEL"] = "kimi-k2.5"
+        check("default model: ZIMZILLA_MODEL outranks both",
+              _cfg(wd).model == "kimi-k2.5", _cfg(wd).model)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
