@@ -271,6 +271,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |
 | `/team <task>` | fan the task out across parallel agents |
+| `/osint <kind> <target>` | open-source recon on a target |
 | `/clear` | wipe transcript and history |
 | `/exit` | leave |
 
@@ -289,6 +290,64 @@ and a file you half-remember is three characters away.
 
 ---
 
+## OSINT
+
+`/osint` runs open-source intelligence on a target you declare. It is a
+router: pick a *kind*, and the command validates the target, opens a case
+directory, and hands that kind's playbook to the main agent as one turn. The
+recon then runs exactly like any other turn — same tools, same scope guard,
+same transcript, same `Ctrl+C` — so you can watch it and interrupt it.
+
+```
+/osint email target@example.com
+
+  ◈ CASE      email · target@example.com
+  ◈ EVIDENCE  ~/.zimzilla/osint/email-target-example.com-20261005-143210/
+  ◈ NOTICE    authorised use only — your own footprint, a consented audit, or a declared engagement
+```
+
+Run `/osint` with no arguments for the menu:
+
+| Kind | Target | Status |
+|---|---|---|
+| `email` | email address | **built** |
+| `phone` | phone number | not built yet |
+| `facebook` | profile URL or id | not built yet |
+| `tiktok` | username or profile URL | not built yet |
+| `instagram` | username or profile URL | not built yet |
+| `discord` | user id or invite | not built yet |
+| `github` | username | not built yet |
+
+The unbuilt kinds are listed so the surface is discoverable; selecting one
+says so and stops rather than pretending to work. Each is a drop-in playbook
+away — the registry in `zimzilla/osint.py` is the only place that changes.
+
+**`email`** works the address through seven phases: validation and provider
+fingerprinting (MX/TXT, whois), Gravatar, breach exposure, account discovery
+(`holehe`, `sherlock`), identity correlation, domain intelligence for custom
+domains, and paste/code leak search. Every finding is tagged **CONFIRMED**,
+**PROBABLE** or **UNVERIFIED**, and the run ends by writing `report.md` into
+the case directory.
+
+**Where evidence lands.** Each run gets its own directory under
+`<state_dir>/osint/<kind>-<target>-<timestamp>/` — by default
+`~/.zimzilla/osint/…`, beside your sessions rather than in whatever repo you
+happen to be sitting in. The agent writes its raw output, downloaded avatars
+and the final report there, and the path is printed when the run starts.
+
+**Tools it uses, if you have them.** Breach lookups, `holehe` and `sherlock`
+are optional — the playbook runs without them and says which sources it had to
+skip. Any API keys (DeHashed, IntelX, LeakCheck) are read from the
+environment; none are hard-coded.
+
+> **Authorised use only.** `/osint` is for investigating your own footprint, a
+> consented audit, or a target declared in an engagement. The command states
+> this on every run and cannot verify it — that part is yours. Recon against
+> people or accounts you have no lawful basis to investigate is not what this
+> is for.
+
+---
+
 ## Layout
 
 ```
@@ -303,6 +362,7 @@ zimzilla/                     the package
   sandbox.py                  the filesystem jail
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
+  osint.py                    /osint kinds, playbooks, case dirs
   theme.py                    green / amber / cyan palettes
   termbg.py                   asks the terminal for its own background
   ui/                         the terminal interface
