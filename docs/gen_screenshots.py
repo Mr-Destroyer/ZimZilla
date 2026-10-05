@@ -1,6 +1,6 @@
 """Regenerate the README screenshots (docs/screenshots/*.png).
 
-Run:  .venv/bin/python docs/gen_screenshots.py
+Run:  python docs/gen_screenshots.py   (from an activated venv)
 
 Each shot is a real ZimZilla app driven by a stub agent, exported with
 Textual's own ``export_screenshot()`` and rasterised with headless chromium.

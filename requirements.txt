@@ -1,4 +1,20 @@
+# ZimZilla — dependencies.
+#
+#   python -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# This installs the dependencies, the LiteLLM proxy, and zimzilla itself (the
+# trailing `-e .`), which drops a `zimzilla` command into the venv's bin.
+
 anthropic>=0.40
 textual>=0.80
 rich>=13.7
 pyyaml>=6.0
+
+# The translation proxy the harness talks to (Anthropic /v1/messages -> the
+# upstream's OpenAI API). Started and managed by setup.sh / the launcher.
+litellm[proxy]>=1.40
+
+# zimzilla itself, editable, so the `zimzilla` console script is installed and
+# the package is importable from any directory.
+-e .

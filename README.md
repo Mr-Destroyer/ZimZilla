@@ -92,13 +92,19 @@ want; it works out the steps, does them, and shows you everything it did.
 
 ## Install
 
+Bring your own venv. ZimZilla ships a `requirements.txt`; that is the whole
+install.
+
 ```bash
 git clone <this-repo> ~/zimzilla && cd ~/zimzilla
-./install.sh        # venv, dependencies, a `zimzilla` command on PATH
-./setup.sh          # verify the route end-to-end
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt     # deps + the LiteLLM proxy + zimzilla
+./setup.sh                          # verify the route end-to-end
 ```
 
-Then, from any directory:
+`requirements.txt` ends with `-e .`, so it installs the package too and drops a
+`zimzilla` command into your venv's `bin/`. Then, from any directory (with the
+venv active):
 
 ```bash
 zimzilla                           # launch
@@ -108,7 +114,9 @@ zimzilla --allow allow.yaml        # declare your targets
 zimzilla --deny out-of-scope.yaml  # hosts that are never touched
 ```
 
-Prefer not to install? `./run.sh` starts it straight from the checkout.
+`zimzilla` reads its credentials from the environment, so the venv must be
+active and the profile sourced. If you would rather not export anything by
+hand, `./run.sh` starts from the checkout and sources the profile for you.
 
 ---
 
@@ -275,9 +283,9 @@ and a file you half-remember is three characters away.
 ## Layout
 
 ```
-install.sh                    venv + deps + PATH command
+requirements.txt              dependencies (incl. zimzilla itself, via -e .)
 setup.sh                      route check
-run.sh                        run from the checkout without installing
+run.sh                        run from the checkout, sourcing the profile
 
 zimzilla/                     the package
   agent.py                    the tool-use loop and mode doctrine
@@ -304,7 +312,7 @@ tests/                        the test suite
 ## Tests
 
 ```bash
-.venv/bin/python tests/test_phase4.py
+python tests/test_phase4.py        # from an activated venv
 ```
 
 Stubs the model and drives the interface directly, so it needs no network and
@@ -314,10 +322,13 @@ no credentials.
 
 ## Troubleshooting
 
-**`zimzilla: command not found`** — `~/.local/bin` is not on your PATH. Add
-`export PATH="$HOME/.local/bin:$PATH"` and open a new shell.
+**`zimzilla: command not found`** — your venv is not active, or the package is
+not installed in it. Activate it (`source .venv/bin/activate`) and run
+`pip install -r requirements.txt`.
 
-**`no credentials found`** — run `./setup.sh`.
+**`no credentials found`** — run `./setup.sh`, then source the profile it
+writes: `set -a; . ~/.zimzilla/logfare/source; set +a`. Or just launch with
+`./run.sh`, which does that for you.
 
 **`the endpoint rejected the model name`** — run `/model` for valid names.
 

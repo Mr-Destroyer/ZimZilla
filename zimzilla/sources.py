@@ -41,7 +41,7 @@ class Source:
     service: Path       # start-litellm.sh-compatible manager
     config: Path        # the litellm yaml
     model: str          # default model name for this upstream
-    root: Path          # checkout whose .venv the service should use
+    root: Path          # checkout the service manager is started from
     models: tuple[str, ...] = ()   # everything this upstream actually serves
 
     @property

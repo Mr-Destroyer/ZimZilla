@@ -1,6 +1,6 @@
 """Phase-4 regression suite: identity, modes, zim/AGENTS.md, completion popup, @mentions.
 
-Run:  ./.venv/bin/python tests/test_phase4.py
+Run:  python tests/test_phase4.py   (from an activated venv)
 """
 
 from __future__ import annotations

@@ -18,13 +18,22 @@
 
 set -euo pipefail
 
-# Find the checkout. When this script is run in place, that is its own
-# directory; when install.sh has put a launcher on PATH, that launcher exports
-# ZIMZILLA_ROOT first, because readlink here would resolve to ~/.local/bin and the
-# venv would appear to be missing.
+# Find the checkout. run.sh (and any wrapper the user keeps) exports
+# ZIMZILLA_ROOT first, because readlink here resolves to this file's own
+# directory — packaging/ — which is not the checkout.
 _self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
 ZIMZILLA_ROOT="${ZIMZILLA_ROOT:-$_self_dir}"
-VENV_PY="$ZIMZILLA_ROOT/.venv/bin/python"
+
+# Resolve the interpreter that carries ZimZilla's dependencies. The venv is the
+# user's own — created wherever they like and activated — so prefer the active
+# one ($VIRTUAL_ENV), then a python3 on PATH. This script never creates one.
+if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+  PY="$VIRTUAL_ENV/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="$(command -v python3)"
+else
+  PY=""
+fi
 
 ZIMZILLA_HOME="${ZIMZILLA_HOME:-$HOME/.zimzilla}"
 
@@ -41,7 +50,7 @@ if [[ -r "$ZIMZILLA_HOME/current-source" ]]; then
 fi
 
 if [[ "$_current_source" == "tokenjuice" ]]; then
-  # Prefer the installed route, which install.sh populates; fall back to the
+  # Prefer the installed route, which setup.sh populates; fall back to the
   # standalone deepseek-claude layout for a machine that had one before
   # ZimZilla was installed. Checking the installed copy first is what makes
   # this work on a fresh machine — the old hardcoded $HOME paths only exist on
@@ -79,8 +88,22 @@ info() { printf '\033[36m[zimzilla]\033[0m %s\n' "$*" >&2; }
 
 # --- preconditions -----------------------------------------------------------
 
-[[ -x "$VENV_PY" ]] || die "venv missing at $ZIMZILLA_ROOT/.venv
-       Run ./install.sh in $ZIMZILLA_ROOT first."
+[[ -n "$PY" ]] || die "no python3 on PATH.
+       Create a venv, activate it, then install the dependencies:
+           python3 -m venv .venv && source .venv/bin/activate
+           pip install -r requirements.txt"
+
+# The dependencies must be importable by THIS interpreter. Checking here turns
+# a confusing ImportError at launch into the one command that fixes it. Run
+# from / so a stray checkout on sys.path cannot satisfy the import; zimzilla
+# itself is made importable by the PYTHONPATH export below, so only the
+# third-party packages are checked.
+if ! ( cd / && "$PY" -c 'import anthropic, textual, rich, yaml' ) >/dev/null 2>&1; then
+  die "ZimZilla's dependencies are not installed for $PY
+       Create a venv, activate it, then install them:
+           python3 -m venv .venv && source .venv/bin/activate
+           pip install -r requirements.txt"
+fi
 
 # Fail CLOSED. Without the profile, the harness would silently use whatever
 # ANTHROPIC_* the shell already exports — a session against the wrong provider
@@ -167,4 +190,4 @@ export PYTHONPATH="$ZIMZILLA_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # exec: no extra bash layer, so exit status, signal delivery and TTY ownership
 # all belong to the harness. NOTE: exec discards EXIT traps.
-exec "$VENV_PY" -m zimzilla "$@"
+exec "$PY" -m zimzilla "$@"

@@ -1,6 +1,6 @@
 # ZimZilla — Token Juice profile
 #
-# This file is the credential profile for the Token Juice route. install.sh
+# This file is the credential profile for the Token Juice route. setup.sh
 # copies the real one next to this example as `source`, with mode 600, and
 # never commits it. This example exists so the format is visible without
 # exposing a key.

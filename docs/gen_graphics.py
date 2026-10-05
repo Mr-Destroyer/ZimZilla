@@ -1,6 +1,6 @@
 """Regenerate the animated README graphics (docs/hero.svg, docs/terminal.svg).
 
-Run:  .venv/bin/python docs/gen_graphics.py
+Run:  python docs/gen_graphics.py   (from an activated venv)
 
 Both files are plain, self-contained SVG — no external assets, no JS. GitHub
 renders the CSS animations in place. Every animation is layered ON TOP of a

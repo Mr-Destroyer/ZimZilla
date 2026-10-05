@@ -50,5 +50,5 @@ async def main():
 
 raise SystemExit(asyncio.run(main()))
 
-# Run: ./.venv/bin/python tests/check_no_freeze.py
+# Run: python tests/check_no_freeze.py   (from an activated venv)
 # A blocking tool call would report ~0 ticks here; a threaded one reports ~60.
