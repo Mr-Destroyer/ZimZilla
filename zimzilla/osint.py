@@ -53,6 +53,73 @@ class Kind:
 
 
 # ---------------------------------------------------------------------------
+# The report format — shared by every kind
+# ---------------------------------------------------------------------------
+# Both playbooks end in a report, and the operator asked for one that explains
+# each finding rather than dumping it: what was found, where it came from, how
+# sure we are, what it means, and how to check it. That shape is the same
+# whether the target was an address or a handle, so it lives here once and is
+# interpolated into both playbooks. Keeping it in one place is the point: the
+# email and github reports cannot drift apart in structure.
+#
+# These are plain strings interpolated with str.format at prompt-build time,
+# not f-strings, so the literal `{target}` and `{case_dir}` in the playbooks
+# survive into the template. The guides themselves carry no braces.
+
+_REPORT_GUIDE = """\
+EVIDENCE, NOT ASSERTION
+-----------------------
+The report is read by a human deciding what to do next, so every finding has
+to explain itself. Do not write a wall of prose and do not dump raw tool
+output — one block per finding, always these five lines, always in this order:
+
+    ### <short title — what this is>
+    **What**       — the finding itself, in one sentence.
+    **Where**      — the exact source: a URL, a command, a file and line, a
+                     commit sha. A finding with no `Where` is not a finding.
+    **Confidence** — CONFIRMED | PROBABLE | UNVERIFIED (defined below).
+    **Means**      — what this tells the operator, in plain language. This is
+                     the line that answers "so what?" — never leave it out.
+    **Verify**     — the one step a human would take to confirm or refute it.
+
+Group the blocks under the numbered sections below. A section with nothing in
+it still gets its heading and the single line `Nothing found — <why>`, because
+an empty section is itself a finding and must never be silently omitted.
+
+COVERAGE
+--------
+The report opens with a coverage table, so the operator can see at a glance
+what ran and what did not — a phase skipped for want of a tool or a key is
+reported as skipped, never quietly dropped:
+
+    | Phase | Ran? | Result |
+    |-------|------|--------|
+    | 1. ... | yes/no/skipped (why) | one line |
+
+Then a `## Headline` block at the very top: three to six lines of plain prose
+stating who or what this target turned out to be and the single most important
+thing about it. An operator who reads only this must not be misled.
+
+CLOSING
+-------
+End the file with a `## Gaps and next steps` section: every question the run
+could not answer, every source that was unavailable, and the concrete manual
+checks that would close them. Do not pad the report with a narrative of what
+you tried — the operator wants the intelligence, the confidence, and the gaps.
+"""
+
+_CONFIDENCE_GUIDE = """\
+CONFIDENCE
+----------
+Every finding carries one of three levels, and you never upgrade one without
+evidence:
+  CONFIRMED   — verified against a primary source you can cite.
+  PROBABLE    — two or more independent sources agree.
+  UNVERIFIED  — a single source, not yet corroborated.
+"""
+
+
+# ---------------------------------------------------------------------------
 # The email playbook
 # ---------------------------------------------------------------------------
 # Handed to the agent verbatim as the turn's user message, with {target} and
@@ -137,20 +204,12 @@ matters when the domain is not a free provider.
    - Search paste sites and code hosts for the address: GitHub code/gist
      search, `psbdmp.ws`, and `site:pastebin.com "<address>"` style queries.
 
-CONFIDENCE
-----------
-Every finding carries one of three levels, and you never upgrade one without
-evidence:
-  CONFIRMED   — verified against a primary source you can cite.
-  PROBABLE    — two or more independent sources agree.
-  UNVERIFIED  — a single source, not yet corroborated.
-
+{report_guide}
+{confidence_guide}
 REPORT
 ------
-Finish by writing `report.md` into the evidence directory, in this shape:
-
-    # Email OSINT — <address>
-    Date: <date>   Analyst: ZimZilla /osint
+Finish by writing `report.md` into the evidence directory. It opens with the
+`## Headline` block and the coverage table, then these sections in order:
 
     1. VALIDATION        provider, MX, free/corporate, disposable?
     2. IDENTITY          name, aliases, handles — each with confidence
@@ -161,12 +220,12 @@ Finish by writing `report.md` into the evidence directory, in this shape:
     7. DOMAIN / TECH     whois, subdomains, cert transparency (if custom)
     8. LEAKS             paste/code exposures
     9. TIMELINE          reconstruction of the digital footprint
-    10. NEXT STEPS       what a human should check that you could not
 
-Cite the source beside every claim. Where a phase produced nothing, say so
-explicitly — an empty section is a finding. Do not pad the report with a
-narrative of what you tried; the operator wants the intelligence and the
-gaps, not a diary.
+Every finding inside those sections is written as a five-line block — What,
+Where, Confidence, Means, Verify — and a section that found nothing says so
+explicitly rather than being dropped. The format, the coverage table and the
+closing `## Gaps and next steps` section are specified in full above; follow
+them exactly, they are what makes the report readable.
 
 Close the turn with a short prose summary of the headline findings: how
 identifying the address turned out to be, and what the operator should do
@@ -493,7 +552,12 @@ def build_prompt(kind: Kind, target: str, case: Path) -> str:
         "confirmation between steps.\n\n"
     )
     if kind.playbook:
-        return header + kind.playbook.format(target=target, case_dir=case)
+        return header + kind.playbook.format(
+            target=target,
+            case_dir=case,
+            report_guide=_REPORT_GUIDE,
+            confidence_guide=_CONFIDENCE_GUIDE,
+        )
     # Not reachable through the UI (it refuses unbuilt kinds first), but a
     # caller should get something sane rather than a KeyError on the format.
     return header + f"(no playbook is defined for the {kind.name} kind yet)"

@@ -248,6 +248,14 @@ def test_prompt(tmp: Path) -> None:
     check("prompt: defines the confidence levels",
           "CONFIRMED" in p and "PROBABLE" in p and "UNVERIFIED" in p)
 
+    # The report format is shared with the github playbook, so both kinds must
+    # carry the same five-line finding block, coverage table and closing
+    # section. A drift between the two is what this catches.
+    for needle in ("**What**", "**Where**", "**Confidence**", "**Means**",
+                   "**Verify**", "| Phase | Ran? | Result |",
+                   "## Headline", "Gaps and next steps"):
+        check(f"prompt: report format has {needle!r}", needle in p)
+
     # An unbuilt kind still yields a string rather than raising on .format().
     stub = osint.OSINT_KINDS["phone"]
     s = osint.build_prompt(stub, "+15551234567", case)
