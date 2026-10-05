@@ -52,10 +52,12 @@ def test_registry() -> None:
     check("registry: KIND_ORDER lists them in the operator's order",
           osint.KIND_ORDER == want, f"{osint.KIND_ORDER}")
 
-    # Exactly one kind is built. If a second is flipped on later, this test
-    # should be updated deliberately rather than passing by accident.
+    # The built kinds, listed deliberately. If a third is flipped on later,
+    # this test should be updated on purpose rather than passing by accident —
+    # it is the reminder that a new playbook needs its own coverage.
     built = [n for n, k in osint.OSINT_KINDS.items() if k.built]
-    check("registry: email is the built kind", built == ["email"], f"{built}")
+    check("registry: email and github are the built kinds",
+          sorted(built) == ["email", "github"], f"{built}")
 
     # The stubs must NOT carry a playbook — otherwise a stub would look
     # runnable to build_prompt and the "not built" guard would be the only
@@ -106,6 +108,32 @@ def test_validation() -> None:
     check("validate: empty target names the kind's label",
           not ok and "email address" in err, err)
 
+    # ---- github ----------------------------------------------------------
+    gh = osint.OSINT_KINDS["github"]
+
+    for handle in ["torvalds", "Mr-Destroyer", "a", "x" * 39,
+                   "user123", "user-name-123"]:
+        ok, err = osint.validate(gh, handle)
+        check(f"validate: accepts github {handle!r}", ok, err)
+
+    # A pasted profile URL is the common way this gets typed, so it is
+    # accepted and unwrapped rather than refused.
+    for pasted in ["https://github.com/torvalds", "http://github.com/torvalds",
+                   "github.com/torvalds", "https://github.com/torvalds/"]:
+        ok, err = osint.validate(gh, pasted)
+        check(f"validate: accepts the URL form {pasted!r}", ok, err)
+
+    for handle in ["", "-leading", "trailing-", "has space", "x" * 40,
+                   "user@example.com", "two--hyphens", "under_score",
+                   # A URL with a path is a repo, not an account.
+                   "https://github.com/torvalds/linux"]:
+        ok, _ = osint.validate(gh, handle)
+        check(f"validate: rejects github {handle!r}", not ok)
+
+    ok, err = osint.validate(gh, "   ")
+    check("validate: github names its own label in the error",
+          not ok and "GitHub username" in err, err)
+
 
 def test_normalise() -> None:
     # Domain lowercased, local part's case preserved — the local part is
@@ -118,6 +146,31 @@ def test_normalise() -> None:
     # rpartition, not split: a quoted local part may itself contain '@'.
     check("normalise: splits on the last '@'",
           osint.normalise_email('"a@b"@Example.com') == '"a@b"@example.com')
+
+    # The github normaliser unwraps a pasted profile URL, case preserved (a
+    # handle's case is cosmetic, so it is left as typed).
+    gh = osint.OSINT_KINDS["github"]
+    check("normalise: a bare github handle is unchanged",
+          osint.normalise_github("torvalds") == "torvalds")
+    check("normalise: strips a github profile URL",
+          osint.normalise_github("https://github.com/torvalds") == "torvalds",
+          osint.normalise_github("https://github.com/torvalds"))
+    check("normalise: strips a trailing slash and surrounding space",
+          osint.normalise_github("  github.com/Torvalds/  ") == "Torvalds",
+          osint.normalise_github("  github.com/Torvalds/  "))
+    # A URL with a path is a repo, and is deliberately NOT unwrapped — it must
+    # then fail validation rather than silently recon the wrong thing.
+    check("normalise: a repo URL is left to fail validation",
+          osint.normalise_github("https://github.com/torvalds/linux")
+          == "torvalds/linux")
+
+    # The shared dispatch picks the right one per kind, so the UI label, the
+    # evidence path and the playbook cannot disagree.
+    check("normalise: dispatches by kind",
+          osint.normalise(gh, "https://github.com/torvalds") == "torvalds"
+          and osint.normalise(osint.OSINT_KINDS["email"], " Bob@GMail.COM ")
+          == "Bob@gmail.com"
+          and osint.normalise(osint.OSINT_KINDS["phone"], "  +1555  ") == "+1555")
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +205,15 @@ def test_case_dir(tmp: Path) -> None:
     check("case_dir: stamp is YYYYMMDD-HHMMSS",
           len(stamp) == 15 and stamp[8] == "-" and stamp.replace("-", "").isdigit(),
           stamp)
+
+    # A github case is slugged from the NORMALISED handle, so a pasted URL
+    # does not produce a path segment like "github.com-torvalds".
+    gh = osint.OSINT_KINDS["github"]
+    gd = osint.case_dir(cfg, gh, "https://github.com/torvalds")
+    check("case_dir: github slugs the bare handle, not the URL",
+          gd.name.startswith("github-torvalds-"), gd.name)
+    check("case_dir: no URL fragments in the path",
+          "github.com" not in gd.name, gd.name)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +253,42 @@ def test_prompt(tmp: Path) -> None:
     s = osint.build_prompt(stub, "+15551234567", case)
     check("prompt: an unbuilt kind degrades gracefully",
           "phone" in s and "+15551234567" in s)
+
+
+def test_prompt_github(tmp: Path) -> None:
+    gh = osint.OSINT_KINDS["github"]
+    case = tmp / "ghcase"
+    p = osint.build_prompt(gh, "torvalds", case)
+
+    check("github prompt: carries the handle", "torvalds" in p)
+    check("github prompt: carries the case dir", str(case) in p)
+    check("github prompt: no unsubstituted placeholders",
+          "{target}" not in p and "{case_dir}" not in p)
+    check("github prompt: states the authorised-use condition",
+          "Authorised investigation only" in p)
+
+    # A pasted URL must be normalised out of the briefing, so the agent and
+    # the report title both see a bare handle.
+    p_url = osint.build_prompt(gh, "https://github.com/torvalds", case)
+    check("github prompt: normalises a pasted profile URL",
+          "github — GitHub username: torvalds" in p_url
+          and "github.com/torvalds" not in p_url)
+
+    # The phases the operator asked for — email discovery above all, since
+    # that is the stated purpose of the command.
+    for needle in ("Account profiling", "Email discovery", "commit",
+                   ".patch", ".mailmap", "GPG", "Repository inventory",
+                   "Secrets", "Social graph", "Timeline"):
+        check(f"github prompt: covers {needle!r}", needle in p)
+
+    check("github prompt: asks for report.md", "report.md" in p)
+    check("github prompt: defines the confidence levels",
+          "CONFIRMED" in p and "PROBABLE" in p and "UNVERIFIED" in p)
+
+    # The one restraint that matters: a leaked secret is described, never
+    # reproduced into the report.
+    check("github prompt: says not to reproduce secrets",
+          "without reproducing the secret" in p)
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +335,13 @@ async def test_ui(wd: Path) -> None:
     cfg = _cfg(wd, boot_rain=False)
     # Point state_dir at the temp dir — the default is ~/.zimzilla, and this
     # test must not scatter case directories into the operator's home.
-    cfg.state_dir = wd / "state"
+    #
+    # A state_dir of its own, not the one test_case_dir uses: the case-dir
+    # stamp is second-resolution, so two tests creating a directory for the
+    # same target within the same second land on the SAME path (mkdir with
+    # exist_ok=True reuses it). Sharing would make any count- or delta-based
+    # assertion here depend on how fast the suite runs.
+    cfg.state_dir = wd / "ui-state"
 
     app = ZimZillaApp(cfg)
     async with app.run_test(size=(110, 40)) as pilot:
@@ -273,6 +377,12 @@ async def test_ui(wd: Path) -> None:
         check("ui: a refused run creates no case dir",
               not list((cfg.state_dir / "osint").glob("email-not-an-address-*")))
 
+        app._handle_command("/osint github not a handle")
+        await pilot.pause()
+        check("ui: a bad github handle is refused", app.busy is False)
+        check("ui: a refused github run creates no case dir",
+              not list((cfg.state_dir / "osint").glob("github-not*")))
+
         # ---- the happy path launches a turn --------------------------------
         app._handle_command("/osint email target@example.com")
         await pilot.pause()
@@ -288,6 +398,25 @@ async def test_ui(wd: Path) -> None:
             await pilot.pause()
         check("ui: the turn completes and the harness idles", app.busy is False)
 
+        # ---- github, launched from a pasted profile URL -------------------
+        # The URL must be unwrapped before it reaches the case directory, so
+        # the evidence path is named after the handle and not the host. The
+        # glob is enough on its own: this test has its own state_dir, so any
+        # match here is one this run created.
+        gate.clear()
+        app._handle_command("/osint github https://github.com/torvalds")
+        await pilot.pause()
+        check("ui: a github URL launches the recon turn", app.busy is True)
+
+        gmade = list((cfg.state_dir / "osint").glob("github-torvalds-*"))
+        check("ui: the github case dir is named after the handle",
+              len(gmade) == 1, f"{[q.name for q in gmade]}")
+
+        gate.set()
+        for _ in range(5):
+            await pilot.pause()
+        check("ui: the github turn completes", app.busy is False)
+
 
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
@@ -297,6 +426,7 @@ async def main() -> int:
         test_normalise()
         test_case_dir(tmp)
         test_prompt(tmp)
+        test_prompt_github(tmp)
         test_wiring()
         await test_ui(tmp)
 
