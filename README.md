@@ -118,6 +118,14 @@ zimzilla --deny out-of-scope.yaml  # hosts that are never touched
 active and the profile sourced. If you would rather not export anything by
 hand, `./run.sh` starts from the checkout and sources the profile for you.
 
+Out of the box it runs **`grok-4.6`** against Logfare. Switch any time with
+`/model`, or override before launch:
+
+```bash
+zimzilla -m claude-opus-4.6        # this run only
+ANTHROPIC_MODEL=$MODEL_KIMI zimzilla   # via a profile alias
+```
+
 ---
 
 ## Usage
