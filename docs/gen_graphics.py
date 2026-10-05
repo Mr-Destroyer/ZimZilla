@@ -213,7 +213,7 @@ def terminal() -> str:
 
     <line x1="0" y1="{H-42}" x2="{W}" y2="{H-42}" stroke="{DIM}" stroke-opacity="0.6"/>
     <text x="{pad}" y="{H-17}" fill="{DIM}" style="font:13px ui-monospace,Menlo,monospace">
-      ● claude-opus-4.6   |   tok ↑18.4k ↓612   |   $ 0.0142   |   turn 3   |   ● idle
+      ● grok-4.6   |   tok ↑18.4k ↓612   |   $ 0.0142   |   turn 3   |   ● idle
     </text>
     <rect x="0.5" y="0.5" width="{W-1}" height="{H-1}" rx="12" fill="none" stroke="{DIM}" stroke-opacity="0.55"/>
   </g>
