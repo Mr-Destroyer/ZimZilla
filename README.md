@@ -358,7 +358,7 @@ Run `/osint` with no arguments for the menu:
 | `tiktok` | username or profile URL | not built yet |
 | `instagram` | username or profile URL | not built yet |
 | `discord` | user id or invite | not built yet |
-| `github` | username | not built yet |
+| `github` | username | **built** |
 
 The unbuilt kinds are listed so the surface is discoverable; selecting one
 says so and stops rather than pretending to work. Each is a drop-in playbook
@@ -370,6 +370,28 @@ fingerprinting (MX/TXT, whois), Gravatar, breach exposure, account discovery
 domains, and paste/code leak search. Every finding is tagged **CONFIRMED**,
 **PROBABLE** or **UNVERIFIED**, and the run ends by writing `report.md` into
 the case directory.
+
+**`github`** runs the same idea in reverse — it starts from a handle and hunts
+for the person behind it. Phase 2 is the point of the run: a GitHub account
+almost always leaks its owner's email address, and that is the pivot from a
+username to an identity. It checks commit metadata and `.patch` headers
+(`From: Name <email>`), GPG uids and SSH keys, and the files developers
+routinely commit addresses into — `package.json`, `pyproject.toml`, and
+`.mailmap`, whose whole purpose is mapping contributors to addresses. From
+there it profiles the account, inventories the repos, maps the social graph
+(orgs, collaborators) and reconstructs a timeline. Committed secrets are
+reported by location and described, **never reproduced**. A pasted profile URL
+is accepted and unwrapped, so `https://github.com/torvalds` and `torvalds` are
+the same run.
+
+```bash
+/osint github torvalds
+/osint github https://github.com/torvalds    # same thing
+```
+
+With a `GITHUB_TOKEN` in the environment the rate limit goes from 60 to 5000
+requests an hour; without one it works within the unauthenticated limit and
+says so.
 
 **Where evidence lands.** Each run gets its own directory under
 `<state_dir>/osint/<kind>-<target>-<timestamp>/` — by default
