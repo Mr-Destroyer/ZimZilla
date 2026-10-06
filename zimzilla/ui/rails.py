@@ -258,6 +258,23 @@ class Waveform(Static):
         self.palette = palette
         self.render_wave()
 
+    def on_resize(self, event) -> None:
+        # The rail is mouse-resizable, so the graph follows its column rather
+        # than stranding a fixed-width signal in a wider rail.
+        self.set_window(max(8, self.content_size.width or event.size.width - 2))
+
+    def set_window(self, width: int) -> None:
+        """Re-scale the sample window to *width* cells."""
+        width = max(8, int(width))
+        if width == self.width:
+            return
+        # Keep the newest samples and pad the left with idle ones, so the live
+        # edge of the signal stays anchored to the right.
+        self.width = width
+        self.samples = deque(self.samples, maxlen=width)
+        self.samples.extendleft([0.0] * max(0, width - len(self.samples)))
+        self.render_wave()
+
     def on_mount(self) -> None:
         self.render_wave()
 
