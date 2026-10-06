@@ -113,8 +113,8 @@ def _service_candidates(key: str) -> list[Path]:
             DEFAULT_ROOT / "packaging" / "logfare" / "start-litellm.sh",
         ]
     return [
-        DEFAULT_HOME / "start-litellm.sh",
         ZIMZILLA_HOME / "tokenjuice" / "start-litellm.sh",
+        DEFAULT_HOME / "start-litellm.sh",
     ]
 
 
@@ -125,8 +125,8 @@ def _config_candidates(key: str) -> list[Path]:
             DEFAULT_ROOT / "packaging" / "logfare" / "litellm-config.yaml",
         ]
     return [
-        DEFAULT_HOME / "litellm-config.yaml",
         ZIMZILLA_HOME / "tokenjuice" / "litellm-config.yaml",
+        DEFAULT_HOME / "litellm-config.yaml",
     ]
 
 
@@ -137,8 +137,8 @@ def _profile_candidates(key: str) -> list[Path]:
             DEFAULT_ROOT / "packaging" / "logfare" / "source",
         ]
     return [
-        DEFAULT_HOME / "claude-source" / "deepseek-claude",
         ZIMZILLA_HOME / "tokenjuice" / "source",
+        DEFAULT_HOME / "claude-source" / "deepseek-claude",
     ]
 
 
