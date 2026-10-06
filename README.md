@@ -347,6 +347,15 @@ immediately. `↑`/`↓` to move, `Tab` to accept, `Esc` to dismiss.
 **Keys.** `Ctrl+K` command palette · `Ctrl+C` interrupts the current turn ·
 `Ctrl+D` exits · `Ctrl+L` clears.
 
+**Mouse.** Drag across the transcript (or either rail) to select, and the
+selection is copied to your clipboard the moment you release — so you can paste
+a tool result straight into a report. The rails are resizable: grab the inner
+edge of the loop rail or the telemetry rail and drag it to trade width between
+the rail and the transcript. The transcript re-wraps to whatever width the pane
+ends up at, so nothing goes ragged when you resize the terminal and come back.
+Hold your terminal's usual modifier (usually `Shift` or `Alt`) if you want a
+native selection instead.
+
 The palette is the fastest way to reach anything: hit `Ctrl+K` and type a few
 letters. It searches every slash command, every mode, every model on your
 upstream, and every file in the working directory — so `/mode zim` is `mkz`,
