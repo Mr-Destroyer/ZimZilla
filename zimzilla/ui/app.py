@@ -13,6 +13,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import MouseUp, TextSelected
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
@@ -119,6 +120,10 @@ class PermissionModal(ModalScreen[str]):
 
 class ZimZillaApp(App):
     """Top-level application: boot screen, then the shell."""
+
+    # Textual already highlights on drag. We copy the highlight as soon as
+    # the mouse is released so the operator never has to remember a binding.
+    ALLOW_SELECT = True
 
     CSS = """
     Screen {
@@ -298,6 +303,46 @@ class ZimZillaApp(App):
         self.push_screen(
             BootScreen(self.palette, self._boot_checks(), self._boot_done, rain=self.cfg.boot_rain)
         )
+
+    def _copy_selection(self, text: str) -> None:
+        """Put *text* on the clipboard. Never fatal — a headless or
+        OSC-52-less terminal just keeps the in-app clipboard."""
+        text = (text or "").rstrip("\n")
+        if not text.strip():
+            return
+        try:
+            self.copy_to_clipboard(text)
+        except Exception:
+            return
+        try:
+            bar = self.query_one(StatusBar)
+            n = len(text)
+            bar.set_activity(f"copied {n} char{'s' if n != 1 else ''}", busy=False)
+            bar.render_bar()
+        except Exception:
+            pass
+
+    def on_text_selected(self, event: TextSelected) -> None:
+        """Mouse-up after a drag across the transcript, rails, or zim-pane."""
+        try:
+            text = self.screen.get_selected_text()
+        except Exception:
+            text = None
+        if text:
+            self._copy_selection(text)
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        """Input has its own selection and does not emit TextSelected.
+
+        Copy whatever is highlighted in the focused input when the mouse
+        is released, so the prompt field behaves like the rest of the UI.
+        """
+        focused = self.focused
+        if not isinstance(focused, Input):
+            return
+        selected = getattr(focused, "selected_text", "") or ""
+        if selected:
+            self._copy_selection(selected)
 
     def _boot_checks(self) -> list[tuple[str, str, bool]]:
         cfg = self.cfg
