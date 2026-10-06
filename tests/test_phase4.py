@@ -1532,6 +1532,7 @@ async def main() -> int:
         await test_team_tool_hook(wd)
         await test_team_ui(wd)
         await test_copy_on_select(wd)
+        await test_harness_copy_resize_mouse(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
