@@ -265,12 +265,20 @@ class Agent:
 
     def _load_agents(self) -> str | None:
         """In zim mode, the operator's AGENTS.md replaces the default prompt."""
+        from pathlib import Path
+
+        from .config import find_agents_file
+
         path = self.cfg.agents_path
+        # Fall back to the standard search when nothing was resolved at launch
+        # (or the file has since moved). This is the last line of defence: zim
+        # mode must never quietly run on the default prompt just because the
+        # session was opened in an unrelated directory.
+        if path is None or not Path(path).expanduser().is_file():
+            path = find_agents_file(self.cfg.workdir, self.cfg.state_dir)
         if path is None:
             return None
         try:
-            from pathlib import Path
-
             p = Path(path).expanduser()
             if p.exists() and p.is_file():
                 return p.read_text(errors="replace")
