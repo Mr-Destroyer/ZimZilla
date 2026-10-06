@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from . import update as update_mod
-from .config import KNOWN_MODELS, Config, DEFAULT_MODEL
+from .config import KNOWN_MODELS, Config, DEFAULT_MODEL, find_agents_file
 from .scope import find_legacy_scope
 
 
@@ -38,7 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["auto", "edits", "plan", "zim", "danger"],
                         help="agent mode: auto | edits | plan | zim | danger (default: auto)")
     parser.add_argument("--agents", default=None,
-                        help="path to AGENTS.md used by zim mode (default: next to the workdir)")
+                        help="path to AGENTS.md used by zim mode (default: workdir, "
+                             "its parent, ~/.zimzilla, then ~)")
     parser.add_argument("--max-tokens", type=int, default=None, help="max output tokens per reply")
     parser.add_argument("--no-update", action="store_true",
                         help="skip the launch-time check for new commits on the upstream")
@@ -88,20 +89,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         legacy_scope = find_legacy_scope(workdir, Path.home())
 
-    # Zim mode follows the operator's AGENTS.md. Default location: the working
-    # directory, then its parent, then ~.
+    # Zim mode follows the operator's AGENTS.md. The search order lives in
+    # config.find_agents_file so the CLI and the runtime /mode zim path cannot
+    # drift apart: workdir, its parent, the installed doctrine in ~/.zimzilla,
+    # then ~. The installed copy is what makes zim mode work from any directory.
     agents_path = None
     if args.agents:
         agents_path = Path(args.agents).expanduser()
     else:
-        for candidate in (Path(workdir) / "AGENTS.md", Path(workdir).parent / "AGENTS.md"):
-            if candidate.exists():
-                agents_path = candidate
-                break
-        if agents_path is None:
-            home_agents = Path.home() / "AGENTS.md"
-            if home_agents.exists():
-                agents_path = home_agents
+        agents_path = find_agents_file(workdir)
 
     # Shell rain is off unless requested. --no-rain kills rain everywhere,
     # including the boot screen.
