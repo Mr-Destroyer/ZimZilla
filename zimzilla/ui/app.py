@@ -21,7 +21,7 @@ from .. import sources as sources_mod
 from .. import team as team_mod
 from .. import tools as tools_mod
 from ..agent import Agent
-from ..config import KNOWN_MODELS, MODES, Config, price_for
+from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
 from ..theme import THINKING_VERBS, agent_color, get_palette
 from . import renderers as R
 from .boot import BootScreen
@@ -992,6 +992,14 @@ class ZimZillaApp(App):
         self.agent.set_mode(name)
         self.query_one(HeaderBar).set_mode(name)
         if name == "zim":
+            # Re-resolve rather than trusting the launch-time value: a session
+            # started in one directory and switched to zim from another (or
+            # launched before the doctrine was installed) would otherwise arm
+            # with no file at all. An explicit --agents path is never overridden.
+            if self.cfg.agents_path is None or not Path(self.cfg.agents_path).is_file():
+                found = find_agents_file(self.cfg.workdir, self.cfg.state_dir)
+                if found is not None:
+                    self.cfg.agents_path = found
             src = self.cfg.agents_path
             if src:
                 self._sys_line(f"ZIM MODE ARMED — following {src} · full auto", warn=True)
