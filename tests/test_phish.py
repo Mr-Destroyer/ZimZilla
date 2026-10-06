@@ -107,9 +107,13 @@ def test_target() -> None:
               '<form><input type="password" name="p"></form>'))
     check("looks_like_login: marketing page does not",
           not phish.looks_like_login(
-              "<html><body><h1>Welcome</h1><a href=/login>log in</a></body>"))
+              "<html><body><h1>Welcome</h1><p>shop the sale</p></body>"))
     check("looks_like_login: empty does not",
           not phish.looks_like_login(""))
+    check("looks_like_login: a JS Google shell still counts",
+          phish.looks_like_login(
+              "<!doctype html><html><title>Sign in - Google Accounts</title>"
+              "<body></body></html>"))
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +151,8 @@ def test_rewrite() -> None:
     check("rewrite: template posts to the capture endpoint",
           'action="/__zim_capture"' in tmpl)
     check("rewrite: template names the host", "lab.example" in tmpl)
+    check("rewrite: a live page gets the JS capture hook",
+          "zimHooked" in page)
 
 
 def test_clone_login_picks_the_real_form() -> None:
@@ -176,6 +182,25 @@ def test_clone_login_picks_the_real_form() -> None:
               html is not None and 'type="password"' in html)
         check("clone: note is the login fetch",
               note == "cloned login", note)
+
+        # A JS-only shell (Google) must still be served, not the generic card.
+        js_only = {
+            "https://accounts.google.com/ServiceLogin": (
+                "<!doctype html><html><title>Sign in - Google Accounts</title>"
+                "<body>js app</body></html>",
+                "cloned google",
+            ),
+        }
+
+        def fake_google(url: str, timeout: float = 12.0):
+            return js_only.get(url, (None, f"miss {url}"))
+
+        phish.fetch_page = fake_google  # type: ignore[assignment]
+        html, note, used = phish.clone_login("www.google.com")
+        check("clone: google JS shell is kept",
+              html is not None and "Google Accounts" in html, note)
+        check("clone: google is not the generic card",
+              html is not None and "Sign in to www.google.com" not in html)
     finally:
         phish.fetch_page = saved  # type: ignore[assignment]
 
