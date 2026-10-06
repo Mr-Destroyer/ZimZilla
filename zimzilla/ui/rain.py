@@ -200,8 +200,36 @@ class MatrixRain(Widget):
         return out
 
 
+def _freeze(content):
+    """A copy of *content* that is safe to keep for a later re-render.
+
+    ``RichLog`` copies a ``Text`` it defers, but renders a ``Text`` passed in
+    directly as-is; the caller may still hold a reference to it, so keep our own
+    copy rather than re-rendering whatever the caller does to theirs later.
+    """
+    return content.copy() if isinstance(content, Text) else content
+
+
 class RainRichLog(RichLog):
-    """A RichLog that renders matrix rain behind its own blank cells."""
+    """A RichLog that renders matrix rain behind its own blank cells.
+
+    It also carries the two behaviours the transcript needs but ``RichLog``
+    does not provide:
+
+    * *Copy.* ``RichLog`` never annotates its strips with content offsets, so
+      Textual cannot map a mouse highlight onto log text — ``get_selected_text``
+      finds no widget to ask and the transcript is uncopyable. ``render_line``
+      applies the offsets and ``get_selection`` extracts the highlighted span.
+    * *Reflow.* ``RichLog`` bakes the render width into every strip at write
+      time. A terminal resize therefore leaves the lines already written at
+      their old width and the transcript goes ragged. The renderables are kept
+      so a width change can re-render them at the new width.
+    """
+
+    #: Seconds to wait for a resize burst to settle before re-rendering. A
+    #: terminal drag emits a resize event per frame; reflowing the whole
+    #: transcript on each one would stutter.
+    REFLOW_DELAY = 0.05
 
     def __init__(self, palette: Palette, ascii_only: bool = True, rain_on: bool = True, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -210,6 +238,12 @@ class RainRichLog(RichLog):
         # Sparse and dim: this rain sits behind live text, so it is texture,
         # not a focal point.
         self._canvas = RainCanvas(palette, density=0.18, ascii_only=ascii_only)
+        #: Every renderable written, as ``(content, expand, shrink)`` — the
+        #: source of truth for a re-render when the width changes.
+        self._blocks: list[tuple[object, bool, bool]] = []
+        self._reflow_timer = None
+        #: Width the strips currently in ``self.lines`` were rendered at.
+        self._render_width = 0
 
     def on_mount(self) -> None:
         super().on_mount()
@@ -220,7 +254,65 @@ class RainRichLog(RichLog):
         # Content size ignores the pane border, so drops line up with the text.
         size = self.content_size
         self._canvas.resize(size.width, size.height or event.size.height)
+        # Only a width change can change how the transcript wraps; a height-only
+        # resize must not trigger a re-render. The first resize happens before
+        # `_size_known`, when the deferred writes still carry the right width —
+        # record it, but do not reflow content that was never rendered.
+        if event.size.width != self._render_width:
+            rendered = self._size_known
+            self._render_width = event.size.width
+            if rendered:
+                self._schedule_reflow()
 
+    # ---- write / clear ----------------------------------------------------
+    def write(self, content, width=None, expand=False, shrink=True,
+              scroll_end=None, animate=False):
+        # Record the write so it can be replayed at a new width. Guarded on
+        # `_size_known`: before the size is known RichLog defers the write and
+        # replays it through here on the first resize, which would otherwise
+        # record the same renderable twice.
+        if self._size_known:
+            self._blocks.append((_freeze(content), expand, shrink))
+        return super().write(content, width, expand, shrink, scroll_end, animate)
+
+    def clear(self) -> None:
+        self._blocks.clear()
+        self._stop_reflow_timer()
+        return super().clear()
+
+    # ---- reflow on resize -------------------------------------------------
+    def _stop_reflow_timer(self) -> None:
+        if self._reflow_timer is not None:
+            self._reflow_timer.stop()
+            self._reflow_timer = None
+
+    def _schedule_reflow(self) -> None:
+        self._stop_reflow_timer()
+        self._reflow_timer = self.set_timer(self.REFLOW_DELAY, self._reflow,
+                                             name="transcript-reflow")
+
+    def _reflow(self) -> None:
+        """Re-render the whole transcript at the current content width."""
+        self._reflow_timer = None
+        if not self._blocks:
+            return
+        blocks = list(self._blocks)
+        at_end = self.is_vertical_scroll_end
+        scroll_y = self.scroll_offset.y
+        # Drop the lines, the line cache and the virtual size, then rebuild
+        # them at the new width. `RichLog.clear`/`write` are called unbound so
+        # the re-render neither clears `_blocks` nor records itself.
+        RichLog.clear(self)
+        for content, expand, shrink in blocks:
+            RichLog.write(self, content, expand=expand, shrink=shrink,
+                          scroll_end=False)
+        if at_end:
+            self.scroll_end(animate=False, immediate=True)
+        else:
+            self.scroll_to(y=scroll_y, animate=False)
+        self.refresh()
+
+    # ---- rain -------------------------------------------------------------
     def _ensure_size(self) -> None:
         size = self.content_size
         if size.width and size.height:
