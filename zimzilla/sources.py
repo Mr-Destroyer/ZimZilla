@@ -251,7 +251,7 @@ def proxy_healthy(port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def start_proxy(src: Source, timeout: float = 45.0) -> tuple[bool, str]:
+def start_proxy(src: Source, timeout: float = 90.0) -> tuple[bool, str]:
     """Start the source's proxy if it is not already answering. Blocking."""
     if proxy_healthy(src.port):
         return True, "already running"
