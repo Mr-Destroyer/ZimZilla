@@ -178,13 +178,13 @@ class ChatPane(Vertical):
     # ---- transcript -------------------------------------------------------
     def write_block(self, renderable) -> None:
         log = self.query_one("#transcript", RainRichLog)
-        # RichLog.write clamps the render width up to `min_width`, which
-        # defaults to 78 — so a Panel written into a narrower pane renders at
-        # 78 columns, overflows, and switches on the horizontal scrollbar. Pass
-        # the pane's real width instead; that is the only way to get a box that
-        # fits. Falls back to the default when the size is not known yet.
-        width = log.scrollable_content_region.width or None
-        log.write(renderable, width=width)
+        # `expand` fills the pane's content width, so a panel always fits the
+        # width the pane has *now*. RichLog bakes that width into the strip at
+        # write time, so an explicit `width=` here would pin the block to the
+        # width it was written at and leave it ragged after a resize —
+        # RainRichLog re-renders its blocks from the renderable, which is only
+        # possible if the width is not baked in up front.
+        log.write(renderable, expand=True)
         log.write("")
 
     def set_rain(self, active: bool) -> None:
