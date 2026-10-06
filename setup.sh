@@ -205,6 +205,21 @@ else
   warn "no tokenjuice packaging — /zim-tokenjuice will be unavailable"
 fi
 
+# The doctrine file zim mode follows. Installed into ZIMZILLA_HOME so that
+# `zimzilla --mode zim` works from ANY directory: without a copy here, a session
+# opened in an unrelated project finds no AGENTS.md and silently falls back to
+# the default prompt. A project's own AGENTS.md still wins — the workdir is
+# searched first — so this is a fallback, not an override.
+#
+# Synced on content like the proxy files, but a locally-edited copy is kept as
+# .bak rather than overwritten silently: the operator may have tuned their
+# doctrine, and that is the one file here that is genuinely theirs.
+if [[ -f "$SELF/AGENTS.md" ]]; then
+  sync_shipped "$SELF/AGENTS.md" "$ZIMZILLA_HOME/AGENTS.md"
+else
+  warn "no AGENTS.md in the checkout — zim mode will fall back to the default prompt"
+fi
+
 # --- 4. litellm --------------------------------------------------------------
 
 step "Checking the LiteLLM proxy"
