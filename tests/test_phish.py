@@ -76,6 +76,40 @@ def test_target() -> None:
           phish.target_url("site.com/login") == "https://site.com/login")
     check("target_url: keeps an explicit scheme",
           phish.target_url("http://site.com") == "http://site.com")
+    check("target_url: facebook host maps to /login",
+          phish.target_url("www.facebook.com")
+          == "https://www.facebook.com/login/")
+    check("target_url: facebook.com (no www) maps to /login",
+          phish.target_url("facebook.com")
+          == "https://www.facebook.com/login/")
+    check("target_url: a pasted facebook path is kept",
+          phish.target_url("https://www.facebook.com/login.php")
+          == "https://www.facebook.com/login.php")
+    check("target_url: unknown host stays on itself",
+          phish.target_url("shop.example") == "https://shop.example")
+
+    cands = phish.login_candidates("shop.example")
+    check("candidates: unknown host tries /login first after itself",
+          cands[0] == "https://shop.example" and
+          "https://shop.example/login" in cands,
+          str(cands[:4]))
+    cands_fb = phish.login_candidates("www.facebook.com")
+    check("candidates: facebook starts at the real login url",
+          cands_fb[0] == "https://www.facebook.com/login/",
+          str(cands_fb[:3]))
+    cands_path = phish.login_candidates("shop.example/custom")
+    check("candidates: a pasted path is the only guess",
+          cands_path == ["https://shop.example/custom"],
+          str(cands_path))
+
+    check("looks_like_login: password form counts",
+          phish.looks_like_login(
+              '<form><input type="password" name="p"></form>'))
+    check("looks_like_login: marketing page does not",
+          not phish.looks_like_login(
+              "<html><body><h1>Welcome</h1><a href=/login>log in</a></body>"))
+    check("looks_like_login: empty does not",
+          not phish.looks_like_login(""))
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +147,37 @@ def test_rewrite() -> None:
     check("rewrite: template posts to the capture endpoint",
           'action="/__zim_capture"' in tmpl)
     check("rewrite: template names the host", "lab.example" in tmpl)
+
+
+def test_clone_login_picks_the_real_form() -> None:
+    """clone_login must skip a homepage with no form and take /login."""
+    pages = {
+        "https://shop.example": (
+            "<html><title>Shop</title><body>welcome</body></html>",
+            "cloned homepage",
+        ),
+        "https://shop.example/login": (
+            '<html><form action="/auth"><input name="email">'
+            '<input type="password" name="pass"></form></html>',
+            "cloned login",
+        ),
+    }
+
+    def fake_fetch(url: str, timeout: float = 12.0):
+        return pages.get(url, (None, f"miss {url}"))
+
+    saved = phish.fetch_page
+    phish.fetch_page = fake_fetch  # type: ignore[assignment]
+    try:
+        html, note, used = phish.clone_login("shop.example")
+        check("clone: skipped the homepage",
+              used == "https://shop.example/login", used)
+        check("clone: used the live login html",
+              html is not None and 'type="password"' in html)
+        check("clone: note is the login fetch",
+              note == "cloned login", note)
+    finally:
+        phish.fetch_page = saved  # type: ignore[assignment]
 
 
 def test_pick_credentials() -> None:
@@ -376,6 +441,7 @@ async def main() -> int:
         tmp = Path(td)
         test_target()
         test_rewrite()
+        test_clone_login_picks_the_real_form()
         test_pick_credentials()
         test_campaign_dir(tmp)
         test_server(tmp)
