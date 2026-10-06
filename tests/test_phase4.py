@@ -1395,6 +1395,26 @@ async def test_harness_copy_resize_mouse(wd: Path) -> None:
               selection_bg not in {s.style.bgcolor for s in log.render_line(0)},
               repr(log.render_line(0).text))
 
+        # The row just past the last line of text used to raise out of
+        # Selection.extract: it clamps the *end* of a selection to the text but
+        # never the start, and the transcript is mostly blank below its content.
+        text = "\n".join(strip.text.rstrip() for strip in log.lines)
+        row = len(text.splitlines())
+        copied.clear()
+        await pilot.mouse_down(log, (2, row))
+        await pilot._post_mouse_events([MouseMove], log, (9, row), button=1)
+        await pilot.mouse_up(log, (9, row))
+        await pilot.pause()
+        try:
+            app.screen.get_selected_text()
+            raised = None
+        except Exception as exc:
+            raised = f"{type(exc).__name__}: {exc}"
+        check("harness copy: a drag past the last line does not raise",
+              raised is None, raised)
+        check("harness copy: a drag past the last line copies nothing",
+              not copied, str(copied))
+
         copied.clear()
         await pilot.mouse_down(log, (5, 0))
         await pilot._post_mouse_events([MouseMove], log, (9, 1), button=1)
