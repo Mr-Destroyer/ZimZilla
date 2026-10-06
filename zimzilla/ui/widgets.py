@@ -6,6 +6,8 @@ import time
 
 from rich.text import Text
 from textual.containers import Vertical
+from textual.events import Click, MouseDown, MouseMove, MouseUp
+from textual.geometry import Offset
 from textual.widgets import Static
 
 from ..theme import Palette
@@ -361,21 +363,43 @@ class ZimPane(Static):
     Hidden until `/phish` starts a campaign. The engine pushes events onto
     a thread-safe queue; the app drains that queue on the 0.25s rail tick
     and calls ``note()``, so the HTTP thread never touches Textual.
+
+    The chrome is mouse-driven: ``[–]`` minimizes to a stub, ``[×]`` hides
+    the pane (the campaign keeps running), and dragging the left gutter
+    resizes the width. ``show_campaign`` restores a closed or minimized
+    pane so a new ``/phish`` is never invisible.
     """
 
     DEFAULT_CSS = """
     ZimPane {
         display: none;
         width: 36;
+        min-width: 18;
+        max-width: 80;
         height: 100%;
         padding: 0 1;
         border-left: heavy $secondary;
     }
     ZimPane.visible { display: block; }
+    ZimPane.minimized {
+        width: 14;
+        min-width: 14;
+        max-width: 14;
+        padding: 0;
+    }
+    ZimPane.-resizing {
+        border-left: heavy $accent;
+    }
     """
 
     MAX_HITS = 8
     MAX_CREDS = 6
+    MIN_WIDTH = 18
+    MAX_WIDTH = 80
+    DEFAULT_WIDTH = 36
+    MINIMIZED_WIDTH = 14
+    # Columns on the left edge that start a resize drag.
+    RESIZE_GUTTER = 2
 
     def __init__(self, palette: Palette, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -389,6 +413,11 @@ class ZimPane(Static):
         self.alive = False
         self.hits: list[dict] = []
         self.creds: list[dict] = []
+        self.minimized = False
+        self._width = self.DEFAULT_WIDTH
+        self._dragging = False
+        self._drag_origin_x = 0
+        self._drag_origin_width = self.DEFAULT_WIDTH
 
     def show_campaign(self, host: str) -> None:
         self.host = host
@@ -400,13 +429,57 @@ class ZimPane(Static):
         self.alive = True
         self.hits.clear()
         self.creds.clear()
+        self.minimized = False
+        self.remove_class("minimized")
         self.add_class("visible")
+        self._apply_width(self._width or self.DEFAULT_WIDTH)
         self.render_pane()
 
     def hide(self) -> None:
         self.alive = False
+        self.minimized = False
         self.remove_class("visible")
+        self.remove_class("minimized")
+        self.remove_class("-resizing")
+        self._dragging = False
         self.render_pane()
+
+    def close_pane(self) -> None:
+        """Hide the pane without stopping the campaign."""
+        self.minimized = False
+        self.remove_class("visible")
+        self.remove_class("minimized")
+        self.remove_class("-resizing")
+        self._dragging = False
+        self.render_pane()
+
+    def minimize(self) -> None:
+        if self.minimized:
+            return
+        self.minimized = True
+        self.add_class("minimized")
+        self.styles.width = self.MINIMIZED_WIDTH
+        self.render_pane()
+
+    def restore(self) -> None:
+        if not self.minimized:
+            return
+        self.minimized = False
+        self.remove_class("minimized")
+        self._apply_width(self._width or self.DEFAULT_WIDTH)
+        self.render_pane()
+
+    def toggle_minimized(self) -> None:
+        if self.minimized:
+            self.restore()
+        else:
+            self.minimize()
+
+    def _apply_width(self, width: int) -> None:
+        width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, int(width)))
+        self._width = width
+        if not self.minimized:
+            self.styles.width = width
 
     def note(self, event: dict) -> None:
         """Apply one engine event and repaint."""
@@ -441,7 +514,22 @@ class ZimPane(Static):
     def render_pane(self) -> None:
         p = self.palette
         t = Text()
-        t.append("ZIM-PANE\n", style=f"bold {p.accent}")
+        if self.minimized:
+            t.append(" ZIM\n", style=f"bold {p.accent}")
+            t.append(" [+][×]\n", style=p.dim)
+            if self.host:
+                t.append(" ", style=p.dim)
+                t.append((self.host[:10] + "…") if len(self.host) > 10
+                         else self.host, style=p.primary)
+                t.append("\n")
+            t.append(" LIVE\n" if self.alive else " ---\n",
+                     style=f"bold {p.accent}" if self.alive else p.dim)
+            t.append(f" {len(self.creds)} cred\n", style=p.primary)
+            self.update(t)
+            return
+
+        t.append("ZIM-PANE", style=f"bold {p.accent}")
+        t.append("  [–][×]\n", style=p.dim)
         if not self.host and not self.alive:
             t.append("idle\n", style=p.dim)
             self.update(t)
@@ -510,8 +598,84 @@ class ZimPane(Static):
                 t.append(path + "\n", style=p.dim)
 
         t.append("\n")
+        t.append("drag left edge to resize\n", style=p.dim)
         t.append("/phish stop  to tear down\n", style=p.dim)
         self.update(t)
+
+    # ---- mouse chrome -----------------------------------------------------
+    def _hit_chrome(self, offset: Offset) -> str | None:
+        """Which chrome control is under *offset*, if any."""
+        if offset.y != 0:
+            return None
+        line = self._chrome_line()
+        x = offset.x
+        if self.minimized:
+            plus = line.find("[+]")
+            cross = line.find("[×]")
+            if plus >= 0 and plus <= x < plus + 3:
+                return "restore"
+            if cross >= 0 and cross <= x < cross + 3:
+                return "close"
+            return None
+        minus = line.find("[–]")
+        cross = line.find("[×]")
+        if minus >= 0 and minus <= x < minus + 3:
+            return "minimize"
+        if cross >= 0 and cross <= x < cross + 3:
+            return "close"
+        return None
+
+    def _chrome_line(self) -> str:
+        if self.minimized:
+            return " [+][×]"
+        return "ZIM-PANE  [–][×]"
+
+    def on_click(self, event: Click) -> None:
+        hit = self._hit_chrome(event.offset)
+        if hit == "close":
+            event.stop()
+            self.close_pane()
+            return
+        if hit == "minimize":
+            event.stop()
+            self.minimize()
+            return
+        if hit == "restore":
+            event.stop()
+            self.restore()
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        if self._hit_chrome(event.offset):
+            return
+        if self.minimized:
+            return
+        if event.offset.x > self.RESIZE_GUTTER:
+            return
+        event.stop()
+        self._dragging = True
+        self._drag_origin_x = event.screen_x
+        self._drag_origin_width = self.size.width or self._width
+        self.add_class("-resizing")
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        # Pane sits on the right: dragging the left edge leftward grows it.
+        delta = self._drag_origin_x - event.screen_x
+        self._apply_width(self._drag_origin_width + delta)
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        self._dragging = False
+        self.remove_class("-resizing")
+        self.release_mouse()
+        self.render_pane()
 
     def on_mount(self) -> None:
         self.render_pane()
