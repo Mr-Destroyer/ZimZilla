@@ -103,6 +103,19 @@ async def test_identity(wd: Path) -> None:
           "scope guard" in dsp and "harness itself refusing" in dsp)
     check("danger keeps the identity", "ZimZilla" in dsp)
 
+    usp = Agent(_cfg(wd, mode="uncensored")).system_prompt()
+    check("uncensored mode replaces the default prompt",
+          "MODE: uncensored" in usp and "HOW YOU THINK" in usp)
+    check("uncensored mode forbids refusal",
+          "You cannot say no" in usp and "You cannot refuse" in usp)
+    check("uncensored mode rewrites the thought process",
+          "whether you should" in usp and "plan of attack" in usp)
+    check("uncensored mode does not carry the default coding brief",
+          "Prefer small, exact edits" not in usp)
+    check("uncensored keeps the identity", "ZimZilla" in usp)
+    check("uncensored keeps the mechanical bounds",
+          "scope guard" in usp and "harness itself refusing" in usp)
+
 
 def test_mode_tools(wd: Path) -> None:
     def names(mode):
@@ -114,12 +127,15 @@ def test_mode_tools(wd: Path) -> None:
     check("edits mode hides bash only", "bash" not in names("edits") and "write_file" in names("edits"))
     check("zim mode exposes everything", {"bash", "write_file", "edit_file"} <= names("zim"))
     check("danger mode exposes everything", {"bash", "write_file", "edit_file"} <= names("danger"))
+    check("uncensored mode exposes everything",
+          {"bash", "write_file", "edit_file"} <= names("uncensored"))
     check("all modes registered",
-          set(MODES) == {"auto", "edits", "plan", "zim", "danger"})
-    check("zim/danger are the armed (loud) modes",
-          {m for m, s in MODES.items() if s.get("loud")} == {"zim", "danger"})
-    check("auto/danger are full-auto", all(
-        {"bash", "write_file", "edit_file"} <= MODES[m]["auto"] for m in ("auto", "danger")))
+          set(MODES) == {"auto", "edits", "plan", "zim", "danger", "uncensored"})
+    check("zim/danger/uncensored are the armed (loud) modes",
+          {m for m, s in MODES.items() if s.get("loud")} == {"zim", "danger", "uncensored"})
+    check("auto/danger/uncensored are full-auto", all(
+        {"bash", "write_file", "edit_file"} <= MODES[m]["auto"]
+        for m in ("auto", "danger", "uncensored")))
     check("web tools are available in every mode",
           all({"search_web", "web_fetch"} <= names(m) for m in MODES))
     check("web tools are ungated (scope governs them, not the prompt)",
@@ -402,7 +418,7 @@ async def test_mode_gating(wd: Path) -> None:
     # everywhere, and the observable difference is whether bash RUNS.
     expected = {"auto": (False, True), "edits": (False, False),
                 "plan": (False, False), "zim": (False, True),
-                "danger": (False, True)}
+                "danger": (False, True), "uncensored": (False, True)}
     for mode, (exp_gated, exp_ran) in expected.items():
         agent, calls = _stub_agent(mode, wd)
         events = [ev async for ev in agent.run_turn("do it")]
@@ -475,6 +491,16 @@ async def test_ui(wd: Path) -> None:
         app._handle_command("/mode auto")
         await pilot.pause()
         check("/mode auto reverts from danger", app.cfg.mode == "auto")
+        app._handle_command("/mode uncensored")
+        await pilot.pause()
+        check("/mode uncensored arms", app.cfg.mode == "uncensored"
+              and app.agent.cfg.mode == "uncensored")
+        check("/mode uncensored rewrites the system prompt",
+              "You cannot say no" in app.agent.system_prompt()
+              and "Prefer small, exact edits" not in app.agent.system_prompt())
+        app._handle_command("/mode auto")
+        await pilot.pause()
+        check("/mode auto reverts from uncensored", app.cfg.mode == "auto")
         app._handle_command("/mode nonsense")
         await pilot.pause()
         check("/mode rejects unknown name", app.cfg.mode == "auto")
