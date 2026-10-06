@@ -1331,6 +1331,182 @@ async def test_copy_on_select(wd: Path) -> None:
               copied == ["steal this"], str(copied))
 
 
+async def test_harness_copy_resize_mouse(wd: Path) -> None:
+    """The transcript copies, survives a resize round-trip, and the rails drag."""
+    from textual.events import MouseMove
+
+    from zimzilla.ui.rails import ContextGauge, LoopRail, TelemetryRail, Waveform
+    from zimzilla.ui.rain import RainRichLog
+    from zimzilla.ui.widgets import ChatPane
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    copied: list[str] = []
+    app.copy_to_clipboard = lambda text: copied.append(text)  # type: ignore[method-assign]
+
+    async with app.run_test(size=(118, 34)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        app.query_one("#input").focus()
+        await pilot.pause()
+
+        chat = app.query_one(ChatPane)
+        log = app.query_one("#transcript", RainRichLog)
+        loop = app.query_one(LoopRail)
+        tele = app.query_one(TelemetryRail)
+
+        # ---- a drag over the transcript selects and copies its text ---------
+        chat.write_block(Text("COPY-ME-ALPHA zzz\nCOPY-ME-BETA qqq"))
+        await pilot.pause()
+        await asyncio.sleep(0.2)
+        await pilot.pause()
+
+        await pilot.mouse_down(log, (0, 0))
+        await pilot._post_mouse_events([MouseMove], log, (16, 0), button=1)
+        await pilot.mouse_up(log, (16, 0))
+        await pilot.pause()
+        check("harness copy: a transcript drag selects its text",
+              app.screen.get_selected_text() == "COPY-ME-ALPHA zzz",
+              repr(app.screen.get_selected_text()))
+        check("harness copy: the transcript drag reaches the clipboard",
+              copied == ["COPY-ME-ALPHA zzz"], str(copied))
+
+        copied.clear()
+        await pilot.mouse_down(log, (5, 0))
+        await pilot._post_mouse_events([MouseMove], log, (9, 1), button=1)
+        await pilot.mouse_up(log, (9, 1))
+        await pilot.pause()
+        check("harness copy: a mid-line drag keeps the exact columns",
+              app.screen.get_selected_text() == "ME-ALPHA zzz\nCOPY-ME-BE",
+              repr(app.screen.get_selected_text()))
+
+        # Rain blends a fresh strip on every render, so the offset annotation
+        # that makes copy work has to survive that path as well.
+        log.set_rain(True)
+        copied.clear()
+        await pilot.mouse_down(log, (0, 0))
+        await pilot._post_mouse_events([MouseMove], log, (16, 0), button=1)
+        await pilot.mouse_up(log, (16, 0))
+        await pilot.pause()
+        check("harness copy: a drag still selects with the rain on",
+              app.screen.get_selected_text() == "COPY-ME-ALPHA zzz",
+              repr(app.screen.get_selected_text()))
+        log.set_rain(False)
+        await pilot.pause()
+
+        # ---- resize round-trip: the transcript re-renders, nothing crumbles -
+        chat.write_block(Text("RESIZE-ROUNDTRIP-" + "x" * 100))
+        await pilot.pause()
+        await asyncio.sleep(0.2)
+        await pilot.pause()
+
+        def drawn_widths() -> list[int]:
+            """The width of each row actually painted, rain overlay included."""
+            return sorted({log.render_line(y).cell_length for y in range(log.size.height)})
+
+        before = [strip.text for strip in log.lines]
+        width = log.scrollable_content_region.width
+        check("harness resize: every drawn row starts out the pane width",
+              drawn_widths() == [width], f"{drawn_widths()} vs [{width}]")
+
+        await pilot.resize_terminal(92, 30)
+        await pilot.pause()
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+        check("harness resize: the narrower pane really re-renders",
+              [strip.text for strip in log.lines] != before,
+              "the transcript did not change at 92 cols")
+
+        await pilot.resize_terminal(118, 34)
+        await pilot.pause()
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+        width = log.scrollable_content_region.width
+        check("harness resize: growing back restores the exact transcript",
+              [strip.text for strip in log.lines] == before,
+              f"{len(log.lines)} lines vs {len(before)}")
+        check("harness resize: every drawn row is the pane width again",
+              drawn_widths() == [width], f"{drawn_widths()} vs [{width}]")
+        check("harness resize: nothing overflows horizontally",
+              log.virtual_size.width <= width, str(log.virtual_size))
+        check("harness resize: the reflow record is not duplicated",
+              len(log._blocks) == 4, str(len(log._blocks)))
+
+        # The same round-trip with rain on, where every render blends a fresh
+        # strip before the offsets are annotated.
+        log.set_rain(True)
+        await pilot.pause()
+        before_rain = [strip.text for strip in log.lines]
+        await pilot.resize_terminal(92, 30)
+        await pilot.pause()
+        await asyncio.sleep(0.25)
+        await pilot.pause()
+        await pilot.resize_terminal(118, 34)
+        await pilot.pause()
+        await asyncio.sleep(0.25)
+        await pilot.pause()
+        check("harness resize: the round-trip holds with the rain on",
+              [strip.text for strip in log.lines] == before_rain,
+              f"{len(log.lines)} lines vs {len(before_rain)}")
+        check("harness resize: drawn rows are the pane width with the rain on",
+              drawn_widths() == [log.scrollable_content_region.width],
+              f"{drawn_widths()} vs [{log.scrollable_content_region.width}]")
+        log.set_rain(False)
+        await pilot.pause()
+
+        # ---- the rails resize with the mouse --------------------------------
+        start = loop.region.width
+        copied.clear()
+        await pilot.mouse_down(loop, (start - 1, 3))
+        await pilot._post_mouse_events([MouseMove], loop, (start + 11, 3), button=1)
+        await pilot.pause()
+        await pilot.mouse_up(loop, (start + 11, 3))
+        await pilot.pause()
+        check("harness mouse: dragging the loop rail's edge widens it",
+              loop.region.width > start, f"{start} -> {loop.region.width}")
+        check("harness mouse: a resize drag does not copy the rail",
+              copied == [], str(copied))
+
+        start = tele.region.width
+        await pilot.mouse_down(tele, (0, 3))
+        await pilot._post_mouse_events([MouseMove], tele, (-10, 3), button=1)
+        await pilot.pause()
+        await pilot.mouse_up(tele, (-10, 3))
+        await pilot.pause()
+        check("harness mouse: dragging the telemetry rail's edge widens it",
+              tele.region.width > start, f"{start} -> {tele.region.width}")
+
+        start = loop.region.width
+        await pilot.mouse_down(loop, (2, 3))
+        await pilot._post_mouse_events([MouseMove], loop, (12, 3), button=1)
+        await pilot.mouse_up(loop, (12, 3))
+        await pilot.pause()
+        check("harness mouse: a drag away from the edge leaves the rail alone",
+              loop.region.width == start, f"{start} -> {loop.region.width}")
+
+        loop._apply_rail_width(999)
+        check("harness mouse: the rail clamps at its maximum",
+              loop._rail_width == LoopRail.MAX_WIDTH, str(loop._rail_width))
+        loop._apply_rail_width(1)
+        check("harness mouse: the rail clamps at its minimum",
+              loop._rail_width == LoopRail.MIN_WIDTH, str(loop._rail_width))
+
+        # ---- the rail's own readouts follow the rail width ------------------
+        wave = tele.query_one(Waveform)
+        gauge = tele.query_one(ContextGauge)
+        check("harness resize: the waveform spans its column",
+              wave.width == wave.content_size.width,
+              f"{wave.width} vs {wave.content_size.width}")
+        check("harness resize: the gauge bar leaves room for its percentage",
+              gauge.width + 5 <= gauge.content_size.width,
+              f"{gauge.width} vs {gauge.content_size.width}")
+
+        # ---- clearing the transcript drops the reflow record ----------------
+        chat.clear()
+        await pilot.pause()
+        check("harness resize: clearing drops the reflow record",
+              log._blocks == [], str(len(log._blocks)))
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
