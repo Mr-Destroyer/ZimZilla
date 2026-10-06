@@ -6,6 +6,7 @@ Run:  python tests/test_phase4.py   (from an activated venv)
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -225,7 +226,82 @@ def test_zim_agents(wd: Path) -> None:
     agents.write_text("# OPERATOR DOCTRINE\nOBEY THE ZIM.\n")
     sp = Agent(_cfg(wd, mode="zim", agents_path=agents)).system_prompt()
     check("zim mode loads AGENTS.md", "OBEY THE ZIM" in sp)
-    check("zim mode without file falls back", "ZimZilla" in Agent(_cfg(wd, mode="zim")).system_prompt())
+
+    # A directory with no doctrine anywhere — including no ~/AGENTS.md, which
+    # is why HOME is pinned to the temp tree for the duration.
+    saved_home = os.environ.get("HOME")
+    with tempfile.TemporaryDirectory() as td:
+        bare = Path(td)
+        os.environ["HOME"] = str(bare)
+        try:
+            cfg = _cfg(bare, mode="zim")
+            cfg.state_dir = bare / "state"  # nothing installed there either
+            check("zim mode without file falls back",
+                  "ZimZilla" in Agent(cfg).system_prompt())
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
+
+
+def test_agents_search(wd: Path) -> None:
+    """The doctrine search: workdir, parent, installed home, then ~.
+
+    The installed-home step is the point of the whole thing — it is what lets
+    `zimzilla --mode zim` run from a directory that has no AGENTS.md of its own.
+    """
+    from zimzilla.config import find_agents_file
+
+    saved_home = os.environ.get("HOME")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        home = root / "home"
+        home.mkdir()
+        # A user_home of its own: the real ~ may hold an AGENTS.md, and this
+        # test is about the search order, not about this machine's dotfiles.
+        nohome = root / "nohome"
+        nohome.mkdir()
+        os.environ["HOME"] = str(nohome)
+        proj = root / "proj"
+        sub = proj / "src"
+        sub.mkdir(parents=True)
+
+        try:
+            # Nothing anywhere -> no file, and zim mode falls back to the default.
+            check("no AGENTS.md anywhere resolves to None",
+                  find_agents_file(sub, home, nohome) is None)
+
+            # The installed doctrine is found from an unrelated directory.
+            (home / "AGENTS.md").write_text("INSTALLED DOCTRINE\n")
+            check("installed ~/.zimzilla/AGENTS.md is found from any workdir",
+                  find_agents_file(sub, home, nohome) == home / "AGENTS.md")
+
+            # A project's own file wins over the installed one.
+            (proj / "AGENTS.md").write_text("PROJECT DOCTRINE\n")
+            check("workdir parent beats the installed copy",
+                  find_agents_file(sub, home, nohome) == proj / "AGENTS.md")
+            (sub / "AGENTS.md").write_text("SUBDIR DOCTRINE\n")
+            check("workdir beats its parent",
+                  find_agents_file(sub, home, nohome) == sub / "AGENTS.md")
+
+            # And the agent actually reads it, with no agents_path set at all.
+            cfg = _cfg(sub, mode="zim")
+            cfg.state_dir = home
+            sp = Agent(cfg).system_prompt()
+            check("zim mode picks the doctrine up with no --agents",
+                  "SUBDIR DOCTRINE" in sp, sp.splitlines()[0][:40] if sp else "")
+
+            # A stale agents_path (file deleted since launch) falls back to the search.
+            cfg2 = _cfg(sub, mode="zim", agents_path=root / "gone" / "AGENTS.md")
+            cfg2.state_dir = home
+            check("a stale agents_path falls back to the search",
+                  "SUBDIR DOCTRINE" in Agent(cfg2).system_prompt())
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
 
 
 def test_scope_semantics(wd: Path) -> None:
@@ -1199,6 +1275,7 @@ async def main() -> int:
         test_mode_tools(wd)
         test_web_tools(wd)
         test_zim_agents(wd)
+        test_agents_search(wd)
         test_scope_semantics(wd)
         await test_mode_gating(wd)
         await test_ui(wd)
