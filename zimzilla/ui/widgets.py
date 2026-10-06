@@ -654,6 +654,10 @@ class ZimPane(Static):
         if event.offset.x > self.RESIZE_GUTTER:
             return
         event.stop()
+        # The screen arms a text selection on mouse-down before the widget sees
+        # the event; without this, releasing a resize drag copies the whole
+        # pane to the clipboard.
+        self.screen.clear_selection()
         self._dragging = True
         self._drag_origin_x = event.screen_x
         self._drag_origin_width = self.size.width or self._width
