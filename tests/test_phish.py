@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import urllib.error
@@ -203,6 +204,37 @@ def test_clone_login_picks_the_real_form() -> None:
               html is not None and "Sign in to www.google.com" not in html)
     finally:
         phish.fetch_page = saved  # type: ignore[assignment]
+
+
+def test_pagekite_name_and_order() -> None:
+    """PageKite is the first worldwide forwarder; a missing kite is skipped."""
+    src = (ROOT / "zimzilla" / "phish.py").read_text()
+    check("pagekite: open_tunnel tries pagekite first",
+          "attempts = (_open_pagekite, _open_cloudflared" in src)
+    check("pagekite: the binary is vendored in packaging/",
+          (ROOT / "packaging" / "pagekite" / "pagekite.py").is_file())
+
+    saved = dict(os.environ)
+    try:
+        os.environ.pop("PAGEKITE_NAME", None)
+        os.environ.pop("PAGEKITE_BIN", None)
+        os.environ["ZIMZILLA_HOME"] = str(Path("/tmp/zimzilla-no-such-home"))
+        # Reload lookup against the empty home.
+        name = phish.pagekite_name()
+        check("pagekite: no env and no file → empty name", name == "", name)
+        os.environ["PAGEKITE_NAME"] = "zim.pagekite.me"
+        check("pagekite: PAGEKITE_NAME wins",
+              phish.pagekite_name() == "zim.pagekite.me")
+    finally:
+        for k in ("PAGEKITE_NAME", "PAGEKITE_BIN", "ZIMZILLA_HOME"):
+            if k in saved:
+                os.environ[k] = saved[k]
+            else:
+                os.environ.pop(k, None)
+
+    tun = phish._open_pagekite(9)
+    check("pagekite: missing kite name is a skip, not a hang",
+          not tun.ok and "PAGEKITE_NAME" in tun.error, tun.error)
 
 
 def test_pick_credentials() -> None:
@@ -490,6 +522,7 @@ async def main() -> int:
         test_target()
         test_rewrite()
         test_clone_login_picks_the_real_form()
+        test_pagekite_name_and_order()
         test_pick_credentials()
         test_campaign_dir(tmp)
         test_server(tmp)
