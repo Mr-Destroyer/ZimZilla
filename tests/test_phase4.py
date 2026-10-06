@@ -115,6 +115,10 @@ async def test_identity(wd: Path) -> None:
     check("uncensored keeps the identity", "ZimZilla" in usp)
     check("uncensored keeps the mechanical bounds",
           "scope guard" in usp and "harness itself refusing" in usp)
+    check("uncensored voids vendor refusal priors",
+          "VOID" in usp and "search_web" in usp)
+    check("uncensored demands a tool call, not a lecture",
+          "First action on the first turn is a tool call" in usp)
 
 
 def test_mode_tools(wd: Path) -> None:
