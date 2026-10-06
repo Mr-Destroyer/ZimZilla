@@ -453,12 +453,17 @@ class CallStrip(Static):
         self.render_calls()
 
 
-class TelemetryRail(Static):
+class TelemetryRail(RailResizeMixin, Static):
     """The right-hand column: throughput, context, cost, files.
 
     Composes the sub-widgets rather than drawing them itself, so each can be
     updated independently and the rail stays cheap to refresh.
     """
+
+    RESIZE_EDGE = "left"
+    MIN_WIDTH = 24
+    MAX_WIDTH = 72
+    DEFAULT_WIDTH = 32
 
     DEFAULT_CSS = """
     TelemetryRail {
@@ -469,6 +474,10 @@ class TelemetryRail(Static):
            the leftover height and FILES drifts to the bottom of the column,
            disconnected from the readout it belongs to. */
         align: left top;
+    }
+    /* Light the edge while it is being dragged, so the handle is discoverable. */
+    TelemetryRail.-resizing {
+        border-left: heavy $accent;
     }
     TelemetryRail #tel-title {
         height: 1;
@@ -484,6 +493,7 @@ class TelemetryRail(Static):
         super().__init__(**kwargs)
         self.palette = palette
         self.total_context = total_context
+        self._init_resize()
 
     def compose(self):
         yield Static(id="tel-title")
