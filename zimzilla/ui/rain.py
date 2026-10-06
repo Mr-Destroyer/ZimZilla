@@ -386,6 +386,17 @@ class RainRichLog(RichLog):
         index ``self.lines`` directly, so the joined text of those strips is the
         space the selection addresses. Trailing padding is stripped so a copied
         panel does not come with a right margin of spaces.
+
+        ``Selection.extract`` splits that text with ``splitlines()`` — which
+        drops a trailing blank line — and clamps the end of the selection to the
+        text but never the start. A drag that begins on the blank row past the
+        last line would therefore index past the end and raise, which the app
+        catches and reports as "nothing to copy". Decline those selections
+        instead: there is no text down there to copy.
         """
         text = "\n".join(strip.text.rstrip() for strip in self.lines)
+        if selection.start is not None:
+            start_line, _ = selection.start.transpose
+            if start_line >= len(text.splitlines()):
+                return None
         return selection.extract(text), "\n"
