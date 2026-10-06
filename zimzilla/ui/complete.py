@@ -39,6 +39,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "summarise history to free context"),
     ("/team", "fan the task out across parallel agents"),
     ("/osint", "open-source recon on a target"),
+    ("/phish", "clone a login page and harvest creds"),
     ("/clear", "wipe transcript and history"),
     ("/exit", "leave the harness"),
 ]
@@ -147,6 +148,7 @@ class CompletionPopup(VerticalScroll):
                     "mode": MODE_NAMES,
                     "theme": THEME_NAMES,
                     "osint": OSINT_KIND_ORDER,
+                    "phish": ["stop", "status"],
                 }.get(parts[0].lower(), [])
                 items = [(a, "") for a in pool if a.startswith(arg) and a != arg]
             else:

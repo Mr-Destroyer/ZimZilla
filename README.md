@@ -329,6 +329,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/compact` | summarise history to free context |
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
+| `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
 | `/clear` | wipe transcript and history |
 | `/exit` | leave |
 
@@ -445,6 +446,52 @@ environment; none are hard-coded.
 > this on every run and cannot verify it — that part is yours. Recon against
 > people or accounts you have no lawful basis to investigate is not what this
 > is for.
+
+---
+
+## Phish
+
+`/phish` clones a login page, serves it locally, opens a public tunnel if a
+forwarder is installed, and streams every hit and every captured credential
+into **zim-pane** — a live rail on the right of the transcript.
+
+```
+/phish site.com
+
+  ◈ PHISH     site.com
+  ◈ LOCAL     http://127.0.0.1:43127/
+  ◈ PUBLIC    https://random-words.trycloudflare.com  via cloudflared
+  ◈ CLONE     cloned https://site.com (18421 bytes)
+  ◈ LOGS      ~/.zimzilla/phish/site.com-20261005-143210/
+  · watch zim-pane for hits and credentials
+```
+
+What happens, in order:
+
+1. The target is validated and checked against `out-of-scope.yaml`. A denied
+   host is refused before anything is fetched.
+2. The live page is fetched and every `<form>` is rewritten to POST back here.
+   Relative assets keep resolving against the real origin via `<base href>`,
+   so the clone still looks like the original. If the fetch fails, a branded
+   template for that host is served instead — zim-pane says so.
+3. A local HTTP server binds an ephemeral port. GET serves the page; POST
+   captures the fields, appends them to `creds.jsonl`, and returns a holding
+   page.
+4. A public tunnel is opened if one of `cloudflared`, `ngrok` or `lt`
+   (localtunnel) is on `PATH`. First URL wins. No forwarder means LAN-only —
+   the local URL still works.
+5. zim-pane lights up and tails hits and credentials for as long as the
+   campaign is alive. `/phish status` reprints the URLs; `/phish stop` tears
+   the server and the tunnel down.
+
+A second `/phish <host>` replaces the running campaign. Quitting the harness
+stops it too. Campaign files stay under
+`<state_dir>/phish/<host>-<timestamp>/` so you can inspect the cloned HTML
+and the JSONL logs after the pane is gone.
+
+> **Authorised use only.** `/phish` is for your own property, a consented
+> audit, or a target declared in an engagement. The command states this on
+> every run and cannot verify it — that part is yours.
 
 ---
 
