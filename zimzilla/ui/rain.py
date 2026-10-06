@@ -20,6 +20,7 @@ from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.app import RenderResult
+from textual.selection import Selection
 from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import RichLog
@@ -242,5 +243,21 @@ class RainRichLog(RichLog):
         strip = super().render_line(y)
         if self.rain_on and self._canvas.active:
             self._ensure_size()
-            return _blend(strip, self._canvas.cells_for_row(y), self.palette)
-        return strip
+            strip = _blend(strip, self._canvas.cells_for_row(y), self.palette)
+        # Annotate every cell with its content offset so Textual can map a
+        # mouse highlight back onto this text. RichLog never does this itself,
+        # which is exactly why a RichLog cannot be copied from.
+        scroll_x, scroll_y = self.scroll_offset
+        return strip.apply_offsets(scroll_x, scroll_y + y)
+
+    # ---- copy -------------------------------------------------------------
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """Extract the highlighted transcript text.
+
+        The offsets annotated in ``render_line`` are content offsets, which
+        index ``self.lines`` directly, so the joined text of those strips is the
+        space the selection addresses. Trailing padding is stripped so a copied
+        panel does not come with a right margin of spaces.
+        """
+        text = "\n".join(strip.text.rstrip() for strip in self.lines)
+        return selection.extract(text), "\n"
