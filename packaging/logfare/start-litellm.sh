@@ -147,14 +147,14 @@ do_start() {
   disown 2>/dev/null || true
 
   local i
-  for i in $(seq 1 30); do
+  for i in $(seq 1 180); do
     if port_answers; then
       log "up and healthy (pid $(cat "$PID_FILE")) ✓"
       return 0
     fi
     sleep 1
   done
-  err "proxy did not become healthy within 30s — last log lines:"
+  err "proxy did not become healthy within 180s — last log lines:"
   tail -n 20 "$LOG" >&2 || true
   exit 1
 }
