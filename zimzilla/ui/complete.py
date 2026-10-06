@@ -25,7 +25,7 @@ from ..theme import Palette
 # (command, description)
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show the command reference"),
-    ("/mode", "switch mode: auto | edits | plan | zim | danger"),
+    ("/mode", "switch mode: auto | edits | plan | zim | danger | uncensored"),
     ("/model", "show or switch the model"),
     ("/cost", "session token and cost breakdown"),
     ("/scope", "show scope guard status"),
@@ -44,7 +44,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/exit", "leave the harness"),
 ]
 
-MODE_NAMES = ["auto", "edits", "plan", "zim", "danger"]
+MODE_NAMES = ["auto", "edits", "plan", "zim", "danger", "uncensored"]
 THEME_NAMES = ["green", "amber", "cyan"]
 
 MAX_ROWS = 8

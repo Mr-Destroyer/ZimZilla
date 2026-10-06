@@ -933,7 +933,7 @@ class ZimZillaApp(App):
         p = self.palette
         rows = [
             ("/help", "this help"),
-            ("/mode [name]", "switch mode: auto | edits | plan | zim | danger"),
+            ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored"),
             ("/clear", "wipe the transcript and conversation history"),
             ("/model [name]", "show or switch the model"),
             ("/cost", "session token and cost breakdown"),
@@ -1022,6 +1022,12 @@ class ZimZillaApp(App):
             self._sys_line(
                 "DANGER MODE ARMED — every tool runs unattended and the "
                 "operator's word is law; nothing is questioned",
+                warn=True,
+            )
+        elif name == "uncensored":
+            self._sys_line(
+                "UNCENSORED MODE ARMED — the default prompt is gone; the "
+                "model cannot refuse and will only think how to do it",
                 warn=True,
             )
         else:

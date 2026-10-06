@@ -57,7 +57,7 @@ class HeaderBar(Static):
         from ..config import MODES
 
         m = MODES.get(self.mode, {})
-        # Modes marked "loud" (zim, danger) are the armed states — shout them.
+        # Modes marked "loud" (zim, danger, uncensored) are the armed states — shout them.
         mstyle = f"bold white on {p.red}" if m.get("loud") else f"bold {p.accent}"
         sep = ("  │  ", p.dim)
 
