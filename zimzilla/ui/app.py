@@ -142,7 +142,9 @@ class ZimZillaApp(App):
     }
     /* Below ~100 cols the rails are hidden by on_resize and the layout is
        today's two-pane shell. The transcript is never the thing that shrinks. */
-    Screen.narrow LoopRail, Screen.narrow TelemetryRail, Screen.narrow ZimPane { display: none; }
+    Screen.narrow LoopRail, Screen.narrow TelemetryRail { display: none; }
+    /* ZimPane stays up on a narrow terminal: the operator opened it on
+       purpose, and close/minimize/resize are how they put it away. */
     #bottom-dock {
         dock: bottom;
         height: auto;
