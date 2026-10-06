@@ -175,7 +175,7 @@ will restart the checkout under you on the next launch.
 ```
 --model, -m NAME     model to use
 --workdir, -C DIR    working directory
---mode NAME          auto | edits | plan | zim | danger   (default: auto)
+--mode NAME          auto | edits | plan | zim | danger | uncensored   (default: auto)
 --allow PATH         declared targets — arms the session
 --deny PATH          hosts that are never touched
 --agents PATH        the doctrine file `zim` mode follows (default: workdir,
@@ -204,11 +204,17 @@ runtime with `/mode <name>`; the active mode is always visible in the header.
 | `plan` | Read-only. Investigate, propose, change nothing. |
 | `zim` | **Full auto**, governed by your `AGENTS.md`. |
 | `danger` | **Full auto**, operator-directed — no questions asked. |
+| `uncensored` | **Full auto**, the default prompt is thrown out. The model cannot refuse; it only thinks how to do what you said. |
 
-`zim` and `danger` are the **armed** modes: everything runs unattended, and the
-header turns red to say so. A tool that a mode disallows does not merely get
-discouraged — it stops existing for that session, so `plan` cannot write a file
-even if you ask it to.
+`zim`, `danger` and `uncensored` are the **armed** modes: everything runs
+unattended, and the header turns red to say so. A tool that a mode disallows
+does not merely get discouraged — it stops existing for that session, so
+`plan` cannot write a file even if you ask it to.
+
+`uncensored` is the one that changes *how the model thinks*, not just which
+tools run without asking. Thinking models refuse by reasoning their way to
+"I shouldn't"; this mode replaces the whole system prompt so that chain of
+thought is not available. `/mode uncensored`, then say the thing.
 
 ### zim mode and `AGENTS.md`
 
