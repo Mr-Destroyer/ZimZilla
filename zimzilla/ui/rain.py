@@ -148,6 +148,29 @@ def _blend(strip, cells: dict[int, tuple[str, int]], palette: Palette, subtle: b
     return Strip(new_segments, cell_length=strip.cell_length)
 
 
+def _highlight(strip, span: tuple[int, int], style: Style):
+    """Return a copy of ``strip`` with one cell range restyled as selected.
+
+    The selection style is applied *over* each cell's own style, so it wins even
+    where rain or the log's background set a colour. Rich gives the right-hand
+    operand priority in ``Style.__add__``, hence ``post_style`` (the same
+    precedence ``Text.stylize`` gives the selection in ``Log`` and ``Visual``).
+    """
+    start, end = span
+    if start < 0:
+        start = 0
+    if end < 0 or end > strip.cell_length:
+        end = strip.cell_length
+    if end <= start or start >= strip.cell_length:
+        return strip
+    middle = strip.crop(start, end)
+    styled = Strip(
+        list(Segment.apply_style(middle._segments, post_style=style)),
+        middle.cell_length,
+    )
+    return Strip.join([strip.crop(0, start), styled, strip.crop(end)])
+
+
 class MatrixRain(Widget):
     """Full-screen rain widget (used on the boot screen)."""
 
@@ -220,6 +243,9 @@ class RainRichLog(RichLog):
       Textual cannot map a mouse highlight onto log text — ``get_selected_text``
       finds no widget to ask and the transcript is uncopyable. ``render_line``
       applies the offsets and ``get_selection`` extracts the highlighted span.
+      It also paints the highlight itself, because ``RichLog`` (unlike ``Log``
+      and ``Static``) renders its own strips and so never receives Textual's
+      selection styling.
     * *Reflow.* ``RichLog`` bakes the render width into every strip at write
       time. A terminal resize therefore leaves the lines already written at
       their old width and the transcript goes ragged. The renderables are kept
@@ -336,10 +362,20 @@ class RainRichLog(RichLog):
         if self.rain_on and self._canvas.active:
             self._ensure_size()
             strip = _blend(strip, self._canvas.cells_for_row(y), self.palette)
+        scroll_x, scroll_y = self.scroll_offset
+        # Paint the highlight ourselves. Textual draws a text selection inside
+        # each widget's own render (`Visual.to_strips` for a Static, `Log`'s
+        # `_render_line_strip` for a Log) — and `RichLog` is neither, it renders
+        # its own strips. Without this the transcript copies but never shows
+        # what is selected, so a drag over it looks like it did nothing.
+        selection = self.text_selection
+        if selection is not None:
+            span = selection.get_span(scroll_y + y)
+            if span is not None:
+                strip = _highlight(strip, span, self.selection_style)
         # Annotate every cell with its content offset so Textual can map a
         # mouse highlight back onto this text. RichLog never does this itself,
         # which is exactly why a RichLog cannot be copied from.
-        scroll_x, scroll_y = self.scroll_offset
         return strip.apply_offsets(scroll_x, scroll_y + y)
 
     # ---- copy -------------------------------------------------------------
