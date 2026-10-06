@@ -338,6 +338,29 @@ def test_zim_pane() -> None:
     pane.note({"kind": "stopped"})
     check("pane: stopped event clears alive", pane.alive is False)
 
+    pane.minimize()
+    check("pane: minimize marks the pane minimized", pane.minimized)
+    check("pane: minimize keeps it visible", pane.has_class("visible"))
+    check("pane: minimize adds the minimized class", pane.has_class("minimized"))
+    pane.restore()
+    check("pane: restore clears minimized", not pane.minimized)
+    check("pane: restore drops the minimized class", not pane.has_class("minimized"))
+    pane.close_pane()
+    check("pane: close hides the pane", not pane.has_class("visible"))
+    check("pane: close does not kill the campaign flag", pane.alive is False)
+    pane.show_campaign("lab.example")
+    check("pane: a new campaign un-hides a closed pane", pane.has_class("visible"))
+    pane.minimize()
+    pane.show_campaign("other.example")
+    check("pane: a new campaign un-minimizes", not pane.minimized)
+
+    pane._apply_width(10)
+    check("pane: width floors at MIN_WIDTH", pane._width == pane.MIN_WIDTH)
+    pane._apply_width(200)
+    check("pane: width caps at MAX_WIDTH", pane._width == pane.MAX_WIDTH)
+    pane._apply_width(48)
+    check("pane: width accepts a value in range", pane._width == 48)
+
 
 # ---------------------------------------------------------------------------
 # Wiring
