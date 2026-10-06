@@ -220,6 +220,30 @@ else
   warn "no AGENTS.md in the checkout — zim mode will fall back to the default prompt"
 fi
 
+# --- 3b. pagekite (worldwide /phish forwarder) -------------------------------
+
+step "Checking PageKite"
+PK_DIR="$ZIMZILLA_HOME/pagekite"
+mkdir -p "$PK_DIR"
+if [[ -f "$SELF/packaging/pagekite/pagekite.py" ]]; then
+  sync_shipped "$SELF/packaging/pagekite/pagekite.py" "$PK_DIR/pagekite.py" 755
+else
+  printf '  downloading pagekite.py...\n'
+  if curl -fsSL -o "$PK_DIR/pagekite.py" https://pagekite.net/pk/pagekite.py; then
+    chmod 755 "$PK_DIR/pagekite.py"
+    ok "downloaded $PK_DIR/pagekite.py"
+  else
+    warn "could not download pagekite.py — /phish will fall back to cloudflared/ngrok"
+  fi
+fi
+if [[ ! -f "$ZIMZILLA_HOME/pagekite.name" ]]; then
+  warn "no kite name at $ZIMZILLA_HOME/pagekite.name"
+  warn "write your kite (e.g. zim.pagekite.me) there, or export PAGEKITE_NAME."
+  warn "first-time signup:  $PK_DIR/pagekite.py --signup"
+else
+  ok "kite name: $(tr -d '[:space:]' < "$ZIMZILLA_HOME/pagekite.name")"
+fi
+
 # --- 4. litellm --------------------------------------------------------------
 
 step "Checking the LiteLLM proxy"
