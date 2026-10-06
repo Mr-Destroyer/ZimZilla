@@ -1370,6 +1370,31 @@ async def test_harness_copy_resize_mouse(wd: Path) -> None:
         check("harness copy: the transcript drag reaches the clipboard",
               copied == ["COPY-ME-ALPHA zzz"], str(copied))
 
+        # A drag has to be *visible*. Textual paints a selection inside each
+        # widget's own render, and RichLog renders its own strips, so the
+        # transcript must paint the highlight itself or a drag looks inert.
+        selection_bg = log.selection_style.bgcolor
+        copied.clear()
+        await pilot.mouse_down(log, (0, 0))
+        await pilot._post_mouse_events([MouseMove], log, (15, 0), button=1)
+        await pilot.mouse_up(log, (15, 0))
+        await pilot.pause()
+        row = log.render_line(0)
+        highlighted = sum(
+            len(segment.text) for segment in row if segment.style.bgcolor == selection_bg
+        )
+        check("harness copy: the transcript paints the selection highlight",
+              highlighted == len(copied[0]) == 16,
+              f"{highlighted} highlighted cells, copied {copied}")
+        check("harness copy: rows outside the selection stay unhighlighted",
+              selection_bg not in {s.style.bgcolor for s in log.render_line(5)},
+              repr(log.render_line(5).text))
+        app.screen.clear_selection()
+        await pilot.pause()
+        check("harness copy: the highlight clears with the selection",
+              selection_bg not in {s.style.bgcolor for s in log.render_line(0)},
+              repr(log.render_line(0).text))
+
         copied.clear()
         await pilot.mouse_down(log, (5, 0))
         await pilot._post_mouse_events([MouseMove], log, (9, 1), button=1)
