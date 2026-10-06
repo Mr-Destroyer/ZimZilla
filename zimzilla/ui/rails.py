@@ -115,8 +115,13 @@ def _fmt_k(n: int) -> str:
     return str(n)
 
 
-class LoopRail(Static):
+class LoopRail(RailResizeMixin, Static):
     """The agent's cycle as a four-node state machine, with the active node lit."""
+
+    RESIZE_EDGE = "right"
+    MIN_WIDTH = 12
+    MAX_WIDTH = 44
+    DEFAULT_WIDTH = 14
 
     DEFAULT_CSS = """
     LoopRail {
@@ -124,6 +129,10 @@ class LoopRail(Static):
         height: 100%;
         padding: 0 1;
         border-right: heavy $secondary;
+    }
+    /* Light the edge while it is being dragged, so the handle is discoverable. */
+    LoopRail.-resizing {
+        border-right: heavy $accent;
     }
     """
 
@@ -136,6 +145,7 @@ class LoopRail(Static):
         self.pulse = False
         #: Last few stages, newest last — a short breadcrumb of the cycle.
         self.trail: deque[str] = deque(maxlen=6)
+        self._init_resize()
 
     def set_stage(self, stage: str) -> None:
         if stage not in STAGE_LABEL:
