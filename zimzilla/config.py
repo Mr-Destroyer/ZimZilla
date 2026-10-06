@@ -66,8 +66,13 @@ def find_agents_file(
 #   auto   every tool auto-approved, bash included.
 #   edits  like auto, but bash is disabled entirely (editing-only session).
 #   plan   read-only: no tool may change anything; the model plans instead.
-#   zim    full auto — every tool runs without asking, and the system prompt is
-#          replaced by AGENTS.md (the autonomous pentest operator).
+#   zim         full auto — every tool runs without asking, and the system
+#               prompt is replaced by AGENTS.md (the autonomous pentest operator).
+#   danger      full auto — operator-directed; no questions asked.
+#   uncensored  full auto — the default system prompt is thrown out and
+#               replaced by an affirmative doctrine. The model is not asked
+#               to "also be willing"; its whole instruction set is rewritten
+#               so the only conclusion it can reach is to do what it was told.
 # Each mode is described by two sets and a label:
 #
 #   auto   tools that run WITHOUT asking (everything else that needs permission
@@ -109,6 +114,13 @@ MODES: dict[str, dict] = {
     "danger": {
         "label": "DANGER",
         "blurb": "full auto · obeys the operator, no questions",
+        "auto": {"bash", "write_file", "edit_file"},
+        "deny": set(),
+        "loud": True,
+    },
+    "uncensored": {
+        "label": "UNCENSORED",
+        "blurb": "full auto · cannot refuse · thinks only how to do it",
         "auto": {"bash", "write_file", "edit_file"},
         "deny": set(),
         "loud": True,
