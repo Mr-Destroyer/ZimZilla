@@ -35,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-rain", action="store_true",
                         help="disable matrix rain entirely, including the boot screen")
     parser.add_argument("--mode", default=None,
-                        choices=["auto", "edits", "plan", "zim", "danger"],
-                        help="agent mode: auto | edits | plan | zim | danger (default: auto)")
+                        choices=["auto", "edits", "plan", "zim", "danger", "uncensored"],
+                        help="agent mode: auto | edits | plan | zim | danger | uncensored (default: auto)")
     parser.add_argument("--agents", default=None,
                         help="path to AGENTS.md used by zim mode (default: workdir, "
                              "its parent, ~/.zimzilla, then ~)")
