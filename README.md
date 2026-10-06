@@ -178,7 +178,8 @@ will restart the checkout under you on the next launch.
 --mode NAME          auto | edits | plan | zim | danger   (default: auto)
 --allow PATH         declared targets — arms the session
 --deny PATH          hosts that are never touched
---agents PATH        the doctrine file `zim` mode follows
+--agents PATH        the doctrine file `zim` mode follows (default: workdir,
+                     its parent, ~/.zimzilla, then ~)
 --theme {green,amber,cyan}
 --rain               start with matrix rain on
 --no-rain            no rain anywhere
@@ -212,8 +213,22 @@ even if you ask it to.
 ### zim mode and `AGENTS.md`
 
 `zim` mode hands the wheel to a doctrine file of your choosing. Write the rules
-you want followed; that file becomes the agent's whole operating manual. Found
-automatically at `<workdir>/AGENTS.md`, or point at it with `--agents PATH`.
+you want followed; that file becomes the agent's whole operating manual.
+
+It is looked for in this order, first hit wins:
+
+1. `<workdir>/AGENTS.md` — the project's own doctrine
+2. `<workdir>/../AGENTS.md` — a checkout's root file, seen from a subdirectory
+3. `~/.zimzilla/AGENTS.md` — the installed doctrine (`./setup.sh` puts it there)
+4. `~/AGENTS.md` — a hand-kept global file
+
+Step 3 is what makes `zim` mode work from **any** directory: the file is
+installed once, so a session opened in an unrelated project still finds your
+doctrine instead of silently falling back to the default prompt. A project that
+ships its own `AGENTS.md` still wins, because the workdir is checked first.
+Override the whole search with `--agents PATH`; switching to `zim` at runtime
+with `/mode zim` re-runs the search, so a session that started elsewhere picks
+the file up too.
 
 ---
 
