@@ -330,6 +330,20 @@ class ContextGauge(Static):
         self.palette = palette
         self.render_gauge()
 
+    def on_resize(self, event) -> None:
+        # The rail is mouse-resizable; widen the bar to match, keeping the
+        # " NN%" suffix that shares the bar's line inside the column.
+        width = self.content_size.width or event.size.width - 2
+        self.set_width(max(8, width - 5))
+
+    def set_width(self, width: int) -> None:
+        """Re-scale the bar to *width* cells."""
+        width = max(8, int(width))
+        if width == self.width:
+            return
+        self.width = width
+        self.render_gauge()
+
     def on_mount(self) -> None:
         self.render_gauge()
 
