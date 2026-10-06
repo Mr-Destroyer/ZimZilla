@@ -19,6 +19,47 @@ from pathlib import Path
 DEFAULT_BASE_URL = "http://localhost:4001"
 DEFAULT_MODEL = "grok-4.6"
 
+# The harness dotdir. setup.sh installs the proxy files, the doctrine file and
+# the session state here; ZIMZILLA_HOME moves the whole lot.
+DEFAULT_HOME = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
+
+
+def find_agents_file(
+    workdir: Path,
+    home: Path | None = None,
+    user_home: Path | None = None,
+) -> Path | None:
+    """Locate the doctrine file that zim mode follows.
+
+    Searched in order, first hit wins:
+
+      1. ``<workdir>/AGENTS.md``      — the project's own doctrine
+      2. ``<workdir>/../AGENTS.md``   — a checkout's root file, seen from a subdir
+      3. ``<home>/AGENTS.md``         — the installed doctrine (~/.zimzilla)
+      4. ``<user_home>/AGENTS.md``    — a hand-kept global file (~)
+
+    Step 3 is what makes zim mode work from any directory: the file is installed
+    once by setup.sh, so a session opened in an unrelated project still finds
+    the operator's doctrine instead of silently falling back to the default
+    prompt. A project that ships its own AGENTS.md still wins, because the
+    workdir is checked first.
+
+    ``home`` and ``user_home`` are injectable so a test can pin the search to a
+    temporary tree instead of whatever the machine happens to have installed.
+    """
+    home = Path(home) if home is not None else DEFAULT_HOME
+    user_home = Path(user_home) if user_home is not None else Path.home()
+    workdir = Path(workdir)
+    for candidate in (
+        workdir / "AGENTS.md",
+        workdir.parent / "AGENTS.md",
+        home / "AGENTS.md",
+        user_home / "AGENTS.md",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
@@ -177,9 +218,11 @@ class Config:
     rain: bool = False
     boot_rain: bool = True
     mode: str = DEFAULT_MODE
-    # Optional path to a zh-config; only consulted in zim mode.
+    # Optional path to a doctrine file; only consulted in zim mode. Resolved at
+    # launch by config.find_agents_file, and re-resolved on /mode zim so a
+    # session that started elsewhere still picks the file up.
     agents_path: Path | None = None
-    state_dir: Path = field(default_factory=lambda: Path.home() / ".zimzilla")
+    state_dir: Path = field(default_factory=lambda: Path(DEFAULT_HOME))
 
     @property
     def api_key_present(self) -> bool:
