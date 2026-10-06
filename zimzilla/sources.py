@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import urllib.error
 import urllib.request
@@ -263,13 +262,12 @@ def start_proxy(src: Source, timeout: float = 180.0) -> tuple[bool, str]:
     env["LITELLM_ENV_FILE"] = str(src.profile)
     env["LITELLM_CONFIG"] = str(src.config)
     env["LITELLM_PORT"] = str(src.port)
-    if shutil.which("flock"):
-        # Serialize with the launcher, which takes the same lock before it
-        # cold-starts a proxy — otherwise both could spawn litellm at once.
-        lock = Path(os.environ.get("TMPDIR", "/tmp")) / "zimzilla-proxy.lock"
-        argv = ["flock", str(lock), str(src.service), "start"]
-    else:
-        argv = [str(src.service), "start"]
+    # Do not wrap this in flock. The launcher already serialises its own
+    # cold-start, and wrapping here is how a leaked lock (LiteLLM inheriting
+    # the launcher's lock fd) made /zim-tokenjuice hang until timeout while
+    # a manual start of the same script finished in seconds. Two sources
+    # live on different ports, so they can come up independently.
+    argv = [str(src.service), "start"]
 
     try:
         proc = subprocess.run(
