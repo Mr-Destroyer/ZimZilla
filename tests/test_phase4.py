@@ -1292,6 +1292,41 @@ def test_default_model(wd: Path) -> None:
                 os.environ[k] = v
 
 
+async def test_copy_on_select(wd: Path) -> None:
+    """A mouse highlight copies itself — no binding required."""
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    copied: list[str] = []
+    app.copy_to_clipboard = lambda text: copied.append(text)  # type: ignore[method-assign]
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        check("copy: text selection is enabled", app.ALLOW_SELECT is True)
+
+        app._copy_selection("hello from zim")
+        check("copy: _copy_selection hits the clipboard",
+              copied == ["hello from zim"], str(copied))
+        check("copy: status bar reports the copy",
+              app.query_one(StatusBar).activity == "copied 14 chars",
+              app.query_one(StatusBar).activity)
+
+        copied.clear()
+        app._copy_selection("   \n")
+        check("copy: whitespace-only is ignored", copied == [])
+
+        # Input has its own selection and does not emit TextSelected.
+        inp = app.query_one("#input")
+        inp.focus()
+        inp.value = "steal this"
+        from textual.selection import Selection
+        inp.selection = Selection(0, len(inp.value))
+        await pilot.pause()
+        app.on_mouse_up(None)  # type: ignore[arg-type]
+        check("copy: mouse-up on a highlighted input copies it",
+              copied == ["steal this"], str(copied))
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
@@ -1316,6 +1351,7 @@ async def main() -> int:
         await test_team_failure_contained(wd)
         await test_team_tool_hook(wd)
         await test_team_ui(wd)
+        await test_copy_on_select(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
