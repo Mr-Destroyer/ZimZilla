@@ -20,6 +20,8 @@ from __future__ import annotations
 from collections import deque
 
 from rich.text import Text
+from textual.events import MouseDown, MouseMove, MouseUp
+from textual.geometry import Offset
 from textual.widgets import Static
 
 from ..theme import Palette
@@ -37,6 +39,72 @@ STAGE_LABEL = {
 _SPARK = " ▁▂▃▄▅▆▇█"
 # Fill glyphs for the context gauge.
 _FULL, _EMPTY = "▓", "░"
+
+
+class RailResizeMixin:
+    """Drag a rail's inner border to resize it with the mouse.
+
+    Mixed into both side rails so either edge of the transcript can be dragged.
+    ``RESIZE_EDGE`` names the border carrying the handle: ``"right"`` for a rail
+    on the left of the layout, ``"left"`` for one on the right. Subclasses call
+    ``_init_resize()`` from their own ``__init__``.
+    """
+
+    RESIZE_EDGE = "right"
+    MIN_WIDTH = 12
+    MAX_WIDTH = 48
+    DEFAULT_WIDTH = 14
+    #: Columns along the inner edge that start a drag.
+    RESIZE_GUTTER = 2
+
+    def _init_resize(self) -> None:
+        self._rail_width = self.DEFAULT_WIDTH
+        self._rail_dragging = False
+        self._rail_origin_x = 0
+        self._rail_origin_width = self.DEFAULT_WIDTH
+
+    def _rail_handle_at(self, offset: Offset) -> bool:
+        """Is *offset* on the draggable edge of this rail?"""
+        width = self.size.width or self._rail_width
+        if self.RESIZE_EDGE == "right":
+            return offset.x >= width - self.RESIZE_GUTTER
+        return offset.x < self.RESIZE_GUTTER
+
+    def _apply_rail_width(self, width: int) -> None:
+        width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, int(width)))
+        self._rail_width = width
+        self.styles.width = width
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1 or not self._rail_handle_at(event.offset):
+            return
+        event.stop()
+        # The screen arms a text selection on mouse-down *before* the widget
+        # sees the event, so without this a resize drag would end in a
+        # TextSelected that copies the whole rail to the clipboard.
+        self.screen.clear_selection()
+        self._rail_dragging = True
+        self._rail_origin_x = event.screen_x
+        self._rail_origin_width = self.size.width or self._rail_width
+        self.add_class("-resizing")
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if not self._rail_dragging:
+            return
+        event.stop()
+        delta = event.screen_x - self._rail_origin_x
+        if self.RESIZE_EDGE == "left":
+            delta = -delta
+        self._apply_rail_width(self._rail_origin_width + delta)
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if not self._rail_dragging:
+            return
+        event.stop()
+        self._rail_dragging = False
+        self.remove_class("-resizing")
+        self.release_mouse()
 
 
 def _fmt_k(n: int) -> str:
