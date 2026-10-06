@@ -20,6 +20,12 @@ ENV_FILE="${LITELLM_ENV_FILE:-$_self_dir/source}"
 CONFIG="${LITELLM_CONFIG:-$_self_dir/litellm-config.yaml}"
 PORT="${LITELLM_PORT:-4001}"
 PID_FILE="${LITELLM_PID_FILE:-/tmp/litellm-zim.pid}"
+# Bind loopback by default. litellm's own default is 0.0.0.0, which on a laptop
+# means every other machine on the network can reach the proxy and spend the
+# Logfare key. The harness only ever talks to it over localhost (the profile's
+# ANTHROPIC_BASE_URL is http://localhost:$PORT), so nothing needs the wider
+# bind. Override with LITELLM_HOST if a container or VM genuinely needs it.
+HOST="${LITELLM_HOST:-127.0.0.1}"
 
 # NOTE: litellm reads the env var LITELLM_LOG as its *log level* ("INFO",
 # "DEBUG"), so it must never carry a file path — doing so crashes it at import
@@ -133,10 +139,10 @@ do_start() {
   done < <(grep -oE 'os\.environ/[A-Za-z_][A-Za-z0-9_]*' "$CONFIG" 2>/dev/null | sed 's|os\.environ/||' | sort -u)
   if [[ "$missing" -ne 0 ]]; then exit 1; fi
 
-  log "starting proxy on :$PORT  (config: $CONFIG)"
+  log "starting proxy on $HOST:$PORT  (config: $CONFIG)"
   log "log: $LOG"
   : > "$LOG"
-  nohup "$LITELLM_BIN" --config "$CONFIG" --port "$PORT" >>"$LOG" 2>&1 </dev/null &
+  nohup "$LITELLM_BIN" --config "$CONFIG" --port "$PORT" --host "$HOST" >>"$LOG" 2>&1 </dev/null &
   echo $! > "$PID_FILE"
   disown 2>/dev/null || true
 

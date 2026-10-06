@@ -25,6 +25,8 @@ ENV_FILE="${LITELLM_ENV_FILE:-$_self_dir/source}"
 CONFIG="${LITELLM_CONFIG:-$_self_dir/litellm-config.yaml}"
 PORT="${LITELLM_PORT:-4000}"
 PID_FILE="${LITELLM_PID_FILE:-/tmp/litellm-tj.pid}"
+# Loopback by default — see the note in packaging/logfare/start-litellm.sh.
+HOST="${LITELLM_HOST:-127.0.0.1}"
 
 # NOTE: litellm reads the env var LITELLM_LOG as its *log level* ("INFO",
 # "DEBUG"), so it must never carry a file path — doing so crashes it at import
@@ -141,7 +143,7 @@ do_start() {
   log "starting proxy on :$PORT  (config: $CONFIG)"
   log "log: $LOG"
   : > "$LOG"
-  nohup "$LITELLM_BIN" --config "$CONFIG" --port "$PORT" >>"$LOG" 2>&1 </dev/null &
+  nohup "$LITELLM_BIN" --config "$CONFIG" --port "$PORT" --host "$HOST" >>"$LOG" 2>&1 </dev/null &
   echo $! > "$PID_FILE"
   disown 2>/dev/null || true
 

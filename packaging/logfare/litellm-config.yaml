@@ -8,6 +8,16 @@
 # is the same string, prefixed with `openai/` for LiteLLM's OpenAI-compatible
 # route. Add a model here *and* to zimzilla/config.py + zimzilla/sources.py to
 # make it selectable from /model.
+general_settings:
+  # Required since litellm 1.104: without a master key the proxy refuses to
+  # start, because it would otherwise accept every request with no
+  # authentication. This proxy is a local translation shim in front of Logfare,
+  # not a multi-tenant gateway, so the harness's own upstream token doubles as
+  # the proxy credential — ZimZilla already sends it as x-api-key, so the
+  # request that worked before keeps working, while anything else on the box
+  # that finds the port is now rejected.
+  master_key: os.environ/ANTHROPIC_AUTH_TOKEN
+
 model_list:
   # --- Claude ----------------------------------------------------------------
   # grok-4.6 is the shipped default (DEFAULT_MODEL / MODEL_DEFAULT).

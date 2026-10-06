@@ -8,12 +8,32 @@
 
 anthropic>=0.40
 textual>=0.80
-rich>=13.7
+# textual 8.x needs rich>=14.2. litellm[proxy] pulls rich in as well and will
+# happily downgrade it to 13.x to satisfy its own pins, which silently breaks
+# the TUI — so the floor has to be stated here, where it wins.
+rich>=14.2.0
 pyyaml>=6.0
 
 # The translation proxy the harness talks to (Anthropic /v1/messages -> the
 # upstream's OpenAI API). Started and managed by setup.sh / the launcher.
-litellm[proxy]>=1.40
+#
+# The floor is load-bearing, not cosmetic. The harness talks to this proxy over
+# Anthropic's /v1/messages, and every Logfare model is registered as
+# `openai/<name>`. Older litellm only served /v1/messages for provider
+# == anthropic, so an openai/* model raised "Anthropic messages provider config
+# not found for model: ..." — a 500 on the one route ZimZilla actually uses,
+# while /v1/chat/completions kept working and made the proxy look healthy.
+# 1.100+ routes openai_like providers through that endpoint. Do not lower this.
+litellm[proxy]>=1.100.1
+
+# litellm hardcodes uvicorn's event loop to uvloop on Linux (see
+# litellm/proxy/proxy_cli.py::_get_loop_type — it is not configurable, and no
+# flag or env var overrides it). uvloop < 0.22 still imports
+# BaseDefaultEventLoopPolicy, which Python 3.14 removed, so the proxy dies at
+# startup with "cannot import name 'BaseDefaultEventLoopPolicy'" and never binds
+# its port. Pin the floor explicitly: it arrives transitively via litellm[proxy],
+# and a resolve that picks the old version produces a venv that cannot run.
+uvloop>=0.22.1
 
 # zimzilla itself, editable, so the `zimzilla` console script is installed and
 # the package is importable from any directory.

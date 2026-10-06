@@ -1,3 +1,10 @@
+general_settings:
+  # Required since litellm 1.104 — see the note in packaging/logfare's config.
+  # Without a master key the proxy refuses to start rather than accept every
+  # request unauthenticated. The harness's own upstream token is the proxy
+  # credential, so requests it already sends keep working.
+  master_key: os.environ/ANTHROPIC_AUTH_TOKEN
+
 model_list:
   # Token Juice's whole catalog is one chat model, exposed upstream as
   # `deepseek-ai/DeepSeek-V4.1-Flash`. The alias below is what ZimZilla (and

@@ -154,14 +154,35 @@ ok "$PROFILE (mode 600)"
 # --- 3. proxy files ----------------------------------------------------------
 
 step "Checking the proxy files"
-if [[ ! -f "$CONFIG" || ! -x "$SERVICE" ]]; then
-  cp -f "$SELF/packaging/logfare/litellm-config.yaml" "$CONFIG"
-  cp -f "$SELF/packaging/logfare/start-litellm.sh"     "$SERVICE"
-  chmod +x "$SERVICE"
-  ok "installed from packaging/"
-else
-  ok "already in place"
-fi
+
+# These are shipped artifacts, not user config: the catalog and the manager are
+# maintained in packaging/ and an install has to track them. Copying only when
+# the file is *missing* left every existing install frozen at whatever it first
+# received — so a fix in packaging/ (a required config key, a pidfile guard)
+# never reached the copy that actually runs, and the proxy kept failing on a bug
+# that was already fixed in the tree. Sync on content instead, but keep a .bak
+# of any locally-edited copy rather than silently overwriting someone's work.
+sync_shipped() {
+  local src="$1" dst="$2" mode="${3:-}"
+  if [[ ! -f "$src" ]]; then
+    warn "missing from packaging/: $(basename "$src") — leaving $dst alone"
+    return 0
+  fi
+  if [[ ! -f "$dst" ]]; then
+    cp -f "$src" "$dst"; [[ -n "$mode" ]] && chmod "$mode" "$dst"
+    ok "installed $(basename "$dst")"
+  elif cmp -s "$src" "$dst"; then
+    [[ -n "$mode" ]] && chmod "$mode" "$dst"
+    ok "$(basename "$dst") up to date"
+  else
+    cp -f "$dst" "$dst.bak"
+    cp -f "$src" "$dst"; [[ -n "$mode" ]] && chmod "$mode" "$dst"
+    warn "$(basename "$dst") updated — previous copy kept at $dst.bak"
+  fi
+}
+
+sync_shipped "$SELF/packaging/logfare/litellm-config.yaml" "$CONFIG"
+sync_shipped "$SELF/packaging/logfare/start-litellm.sh"     "$SERVICE" 755
 
 # The Token Juice route is a sibling install, not a variant: its own port,
 # profile and manager. This step only lays the files down — it does not start
@@ -170,14 +191,11 @@ fi
 # ran setup.sh but never laid the route files down would have no Token Juice
 # route at all.
 TJ_DIR="$ZIMZILLA_HOME/tokenjuice"
-if [[ -x "$TJ_DIR/start-litellm.sh" && -f "$TJ_DIR/litellm-config.yaml" ]]; then
-  ok "tokenjuice route already in place"
-elif [[ -d "$SELF/packaging/tokenjuice" ]]; then
+if [[ -d "$SELF/packaging/tokenjuice" ]]; then
   mkdir -p "$TJ_DIR"
-  cp -f "$SELF/packaging/tokenjuice/litellm-config.yaml" "$TJ_DIR/litellm-config.yaml"
-  cp -f "$SELF/packaging/tokenjuice/start-litellm.sh"    "$TJ_DIR/start-litellm.sh"
-  cp -f "$SELF/packaging/tokenjuice/source.example"      "$TJ_DIR/source.example"
-  chmod +x "$TJ_DIR/start-litellm.sh"
+  sync_shipped "$SELF/packaging/tokenjuice/litellm-config.yaml" "$TJ_DIR/litellm-config.yaml"
+  sync_shipped "$SELF/packaging/tokenjuice/start-litellm.sh"    "$TJ_DIR/start-litellm.sh" 755
+  sync_shipped "$SELF/packaging/tokenjuice/source.example"      "$TJ_DIR/source.example"
   if [[ ! -f "$TJ_DIR/source" && -f "$SELF/packaging/tokenjuice/source" ]]; then
     ( umask 077; cp -f "$SELF/packaging/tokenjuice/source" "$TJ_DIR/source" )
     chmod 600 "$TJ_DIR/source"
