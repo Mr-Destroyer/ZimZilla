@@ -199,7 +199,7 @@ What it will and will not do:
 | **Untracked files** | ignored — a fast-forward cannot lose them, so they do not block the update |
 | **Your branch has diverged** | reports it and **does not pull** — never merges, never rebases |
 | **Offline, no remote, not a checkout** | says nothing and boots normally |
-| **`requirements.txt` changed** | updates, then tells you to re-run `./setup.sh` |
+| **`requirements.txt` changed** | updates, then installs the new dependencies into its own venv and restarts; a bring-your-own venv is told to `pip install -r requirements.txt` |
 
 If you are developing ZimZilla itself, `ZIMZILLA_NO_UPDATE=1` in your shell
 profile is the setting you want — otherwise a commit you push from elsewhere
@@ -551,8 +551,9 @@ and the JSONL logs after the pane is gone.
 
 ```
 requirements.txt              dependencies (incl. zimzilla itself, via -e .)
+install.sh                    one-line installer (clone + venv + PATH launcher)
 setup.sh                      route check
-run.sh                        run from the checkout, sourcing the profile
+run.sh                        run from the checkout, using ./.venv
 
 zimzilla/                     the package
   agent.py                    the tool-use loop and mode doctrine
@@ -581,23 +582,31 @@ tests/                        the test suite
 ## Tests
 
 ```bash
-python tests/test_phase4.py        # from an activated venv
+python tests/test_phase4.py        # from the checkout's venv
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_update.py        # self-update — real git, throwaway repos
+python tests/test_install.py       # install.sh + the launcher it writes
+python tests/test_requirements.py  # guard: litellm stays out of the harness venv
 ```
 
 Stubs the model and drives the interface directly, so it needs no network and
 no credentials. `test_update.py` runs real `git` against repositories it
 builds in a temp directory — it never touches your own checkout or the
-network.
+network. `test_install.py` does the same for the installer: it builds a
+throwaway repo, runs `install.sh` against it with the dependency and credential
+steps switched off, and checks the layout and the interpreter the launcher then
+chooses. `test_requirements.py` is a tripwire rather than a test of behaviour: it
+fails if `requirements.txt` ever lists `litellm` or `uvloop` again, which would
+make the harness environment unsatisfiable and install nothing at all.
 
 ---
 
 ## Troubleshooting
 
-**`zimzilla: command not found`** — your venv is not active, or the package is
-not installed in it. Activate it (`source .venv/bin/activate`) and run
-`pip install -r requirements.txt`.
+**`zimzilla: command not found`** — `~/.local/bin` is not on your `PATH`; the
+installer prints the line to add. If you are running from source instead, the
+package is not in the checkout's venv: `python3 -m venv .venv && pip install -r
+requirements.txt`.
 
 **`no credentials found`** — run `./setup.sh`, then source the profile it
 writes: `set -a; . ~/.zimzilla/logfare/source; set +a`. Or just launch with
