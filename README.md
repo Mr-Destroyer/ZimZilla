@@ -92,19 +92,16 @@ want; it works out the steps, does them, and shows you everything it did.
 
 ## Install
 
-Bring your own venv. ZimZilla ships a `requirements.txt`; that is the whole
-install.
+One line:
 
 ```bash
-git clone <this-repo> ~/zimzilla && cd ~/zimzilla
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt     # deps + the LiteLLM proxy + zimzilla
-./setup.sh                          # verify the route end-to-end
+curl -fsSL https://raw.githubusercontent.com/Mr-Destroyer/ZimZilla/main/install.sh | bash
 ```
 
-`requirements.txt` ends with `-e .`, so it installs the package too and drops a
-`zimzilla` command into your venv's `bin/`. Then, from any directory (with the
-venv active):
+That clones ZimZilla into `~/.local/share/zimzilla`, builds its own virtualenv
+there and installs the dependencies into it, then drops a `zimzilla` launcher on
+your `PATH` (`~/.local/bin`). Nothing to activate and nothing to `pip install`
+afterwards — the launcher finds that venv itself and runs from any directory:
 
 ```bash
 zimzilla                           # launch
@@ -114,9 +111,41 @@ zimzilla --allow allow.yaml        # declare your targets
 zimzilla --deny out-of-scope.yaml  # hosts that are never touched
 ```
 
-`zimzilla` reads its credentials from the environment, so the venv must be
-active and the profile sourced. If you would rather not export anything by
-hand, `./run.sh` starts from the checkout and sources the profile for you.
+If `~/.local/bin` is not on your `PATH`, the installer prints the line to add.
+Re-running the same command updates an existing install.
+
+The installer finishes by running `./setup.sh` to configure the route, which
+prompts for your credential on the terminal. To configure that yourself later,
+or to install somewhere other than the default:
+
+```bash
+curl -fsSL <install.sh-url> | ZIMZILLA_SKIP_SETUP=1 bash
+curl -fsSL <install.sh-url> | ZIMZILLA_INSTALL_DIR=~/zimzilla bash
+```
+
+`install.sh` honours `ZIMZILLA_REPO`, `ZIMZILLA_INSTALL_DIR`, `ZIMZILLA_BIN_DIR`,
+`ZIMZILLA_SKIP_DEPS` and `ZIMZILLA_SKIP_SETUP`.
+
+### From source
+
+Working on ZimZilla itself, you want the checkout you edit to be the one that
+runs. Same launcher, without the clone step:
+
+```bash
+git clone <this-repo> ~/zimzilla && cd ~/zimzilla
+python3 -m venv .venv && pip install -r requirements.txt
+./setup.sh                          # verify the route end-to-end
+./run.sh                            # launch, no activation
+```
+
+`requirements.txt` ends with `-e .`, so that `pip install` also installs the
+package and drops a `zimzilla` command into your venv's `bin/`. The launcher
+uses the checkout's `.venv` when it exists, then an activated `$VIRTUAL_ENV`,
+then `python3` on `PATH` — so a venv of your own works too.
+
+`zimzilla` reads its credentials from the environment. The launcher sources the
+profile `./setup.sh` wrote before the harness starts, so a normal launch needs
+nothing exported by hand.
 
 Out of the box it runs **`grok-4.6`** against Logfare. Switch any time with
 `/model`, or override before launch:
