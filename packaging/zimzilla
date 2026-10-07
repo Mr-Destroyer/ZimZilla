@@ -18,11 +18,18 @@
 
 set -euo pipefail
 
-# Find the checkout. run.sh (and any wrapper the user keeps) exports
-# ZIMZILLA_ROOT first, because readlink here resolves to this file's own
-# directory — packaging/ — which is not the checkout.
+# Find the checkout. This launcher lives in <root>/packaging/, so when
+# ZIMZILLA_ROOT is not already exported — run.sh and the installed shim both
+# export it — the checkout is the parent of this file's directory. readlink -f
+# resolves a symlink first, so the same rule holds however it was reached.
 _self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
-ZIMZILLA_ROOT="${ZIMZILLA_ROOT:-$_self_dir}"
+if [[ -z "${ZIMZILLA_ROOT:-}" ]]; then
+  if [[ "$(basename -- "$_self_dir")" == "packaging" ]]; then
+    ZIMZILLA_ROOT="$(dirname -- "$_self_dir")"
+  else
+    ZIMZILLA_ROOT="$_self_dir"
+  fi
+fi
 
 # Resolve the interpreter that carries ZimZilla's dependencies. The venv is the
 # user's own — created wherever they like and activated — so prefer the active
