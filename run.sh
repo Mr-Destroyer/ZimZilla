@@ -3,16 +3,16 @@
 #
 # The real launcher lives in packaging/; it needs ZIMZILLA_ROOT to point at the
 # checkout (its own directory is packaging/). This shim does exactly that, so
-# `./run.sh` starts the proxy and the harness for you. It resolves the
-# interpreter from the active venv ($VIRTUAL_ENV), then python3 on PATH — so
-# activate your venv first:
+# `./run.sh` starts the proxy and the harness for you. The launcher then uses
+# the checkout's own venv (./.venv) when it exists, so there is nothing to
+# activate:
 #
-#   python3 -m venv .venv && source .venv/bin/activate
-#   pip install -r requirements.txt
-#   ./run.sh
+#   python3 -m venv .venv && pip install -r requirements.txt
+#   ./setup.sh                          # verify the route end-to-end
+#   ./run.sh                            # launch
 #
-# If you ran `pip install -r requirements.txt`, a `zimzilla` command is already
-# on your PATH and this shim is not needed.
+# If you installed with install.sh, a `zimzilla` command is already on your PATH
+# and this shim is not needed.
 #
 # (The repo root cannot be named `zimzilla` — that name belongs to the Python
 # package directory — hence run.sh.)
