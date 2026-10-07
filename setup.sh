@@ -22,10 +22,16 @@ CONFIG="$LOG_DIR/litellm-config.yaml"
 SERVICE="$LOG_DIR/start-litellm.sh"
 PORT="${LITELLM_PORT:-4001}"
 
-# The interpreter that carries ZimZilla's dependencies — the user's own venv.
-# Prefer the active one ($VIRTUAL_ENV), then a python3 on PATH. This script
-# never creates a venv.
-if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+# The interpreter that carries ZimZilla's dependencies.
+#
+# Prefer the checkout's own venv — the one install.sh builds — so `./setup.sh`
+# works with no activation after a global install. Then an activated venv
+# ($VIRTUAL_ENV), then a python3 on PATH. This script never creates a venv.
+_self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+_root="${ZIMZILLA_ROOT:-$_self_dir}"
+if [[ -x "$_root/.venv/bin/python" ]]; then
+  PY="$_root/.venv/bin/python"
+elif [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
   PY="$VIRTUAL_ENV/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
   PY="$(command -v python3)"
