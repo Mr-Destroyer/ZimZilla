@@ -143,6 +143,14 @@ package and drops a `zimzilla` command into your venv's `bin/`. The launcher
 uses the checkout's `.venv` when it exists, then an activated `$VIRTUAL_ENV`,
 then `python3` on `PATH` — so a venv of your own works too.
 
+`requirements.txt` covers the **harness** only. The LiteLLM proxy is installed
+separately, into its own venv (`~/.zimzilla/venv`, built by `./setup.sh`),
+because the two cannot share one environment: `litellm[proxy]` requires
+`rich<14.0` while textual 8.x requires `rich>=14.2`, and a set listing both does
+not merely resolve badly — it fails to resolve at all, so nothing installs. If a
+`litellm` is already on your `PATH` or at `~/.local/bin/litellm`, `setup.sh`
+reuses it instead of building the proxy venv.
+
 `zimzilla` reads its credentials from the environment. The launcher sources the
 profile `./setup.sh` wrote before the harness starts, so a normal launch needs
 nothing exported by hand.
