@@ -44,8 +44,9 @@ if [[ -z "${LITELLM_BIN:-}" ]]; then
   LITELLM_BIN="$(command -v litellm 2>/dev/null || true)"
 fi
 if [[ -z "$LITELLM_BIN" ]]; then
-  for _c in "$HOME/.local/bin/litellm" "$HOME/.zimzilla/venv/bin/litellm" \
-            "$HOME/venv/bin/litellm"; do
+  for _c in "$HOME/.local/bin/litellm" \
+            "${ZIMZILLA_HOME:-$HOME/.zimzilla}/venv/bin/litellm" \
+            "$HOME/.zimzilla/venv/bin/litellm" "$HOME/venv/bin/litellm"; do
     [[ -x "$_c" ]] && LITELLM_BIN="$_c" && break
   done
 fi
