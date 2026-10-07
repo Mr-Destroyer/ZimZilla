@@ -1,30 +1,25 @@
-# ZimZilla — dependencies.
+# ZimZilla — the harness's dependencies.
 #
 #   python -m venv .venv && source .venv/bin/activate
 #   pip install -r requirements.txt
 #
-# This installs the dependencies, the LiteLLM proxy, and zimzilla itself (the
-# trailing `-e .`), which drops a `zimzilla` command into the venv's bin.
+# This installs the harness's dependencies and zimzilla itself (the trailing
+# `-e .`), which drops a `zimzilla` command into the venv's bin.
+#
+# The LiteLLM proxy is deliberately NOT in this file. It cannot share this
+# environment: litellm[proxy] requires rich<14.0, while textual 8.x requires
+# rich>=14.2. A requirements.txt that lists both is unsatisfiable — pip reports
+# ResolutionImpossible and installs *nothing*, which is why
+# `pip install -r requirements.txt` failed on a fresh checkout. The proxy gets
+# its own venv instead (~/.zimzilla/venv, built by setup.sh), which
+# start-litellm.sh already looks in.
 
 anthropic>=0.40
 textual>=0.80
-# textual 8.x needs rich>=14.2. litellm[proxy] pulls rich in as well and will
-# happily downgrade it to 13.x to satisfy its own pins, which silently breaks
-# the TUI — so the floor has to be stated here, where it wins.
+# textual 8.x needs rich>=14.2. This floor holds only because litellm[proxy] —
+# which pins rich<14 and would downgrade it — is kept out of this environment.
 rich>=14.2.0
 pyyaml>=6.0
-
-# The translation proxy the harness talks to (Anthropic /v1/messages -> the
-# upstream's OpenAI API). Started and managed by setup.sh / the launcher.
-#
-# The floor is load-bearing, not cosmetic. The harness talks to this proxy over
-# Anthropic's /v1/messages, and every Logfare model is registered as
-# `openai/<name>`. Older litellm only served /v1/messages for provider
-# == anthropic, so an openai/* model raised "Anthropic messages provider config
-# not found for model: ..." — a 500 on the one route ZimZilla actually uses,
-# while /v1/chat/completions kept working and made the proxy look healthy.
-# 1.100+ routes openai_like providers through that endpoint. Do not lower this.
-litellm[proxy]>=1.100.1
 
 # litellm hardcodes uvicorn's event loop to uvloop on Linux (see
 # litellm/proxy/proxy_cli.py::_get_loop_type — it is not configurable, and no
