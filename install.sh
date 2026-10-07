@@ -48,6 +48,54 @@ warn() { printf '  \033[33m⚠\033[0m %s\n' "$*" >&2; }
 die()  { printf '\n\033[31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
 note() { printf '      \033[36m%s\033[0m\n' "$*" >&2; }
 
+# Animate while a command runs, then report it exactly like ok() would have.
+#
+# The command's output is captured and replayed only if it fails, so a spinner
+# never interleaves with pip or git mid-line — and on failure the real error
+# lands right above the ✖ that explains it. When stdout is not a terminal (a
+# pipe, a redirect, CI, the test harness) this falls back to plain execution
+# and emits no control characters, so the log stays byte-clean.
+spin() {
+  local msg="$1"; shift
+  local rc=0
+
+  if [[ ! -t 1 ]]; then
+    "$@" || rc=$?
+    if [[ $rc -eq 0 ]]; then ok "$msg"; fi
+    return "$rc"
+  fi
+
+  if [[ -z "$SPIN_LOG" ]]; then
+    SPIN_LOG="$(mktemp "${TMPDIR:-/tmp}/zimzilla-install.XXXXXX")"
+  fi
+  : > "$SPIN_LOG"
+  "$@" >"$SPIN_LOG" 2>&1 &
+
+  # A braille spinner, plus the elapsed seconds once a step drags — the
+  # dependency install is a minute or two and wants a heartbeat.
+  local -a frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+  local pid=$! i=0 start=$SECONDS el
+  while kill -0 "$pid" 2>/dev/null; do
+    el=$((SECONDS - start))
+    printf '\r\033[K  \033[36m%s\033[0m %s' "${frames[i++ % ${#frames[@]}]}" "$msg"
+    if (( el > 0 )); then printf ' \033[2m%ds\033[0m' "$el"; fi
+    sleep 0.08
+  done
+  wait "$pid" || rc=$?
+  printf '\r\033[K'
+
+  if [[ $rc -eq 0 ]]; then
+    ok "$msg"
+  elif [[ -s "$SPIN_LOG" ]]; then
+    cat "$SPIN_LOG" >&2
+  fi
+  return "$rc"
+}
+
+# The spinner's scratch file, created on first use and removed on any exit.
+SPIN_LOG=""
+trap 'if [[ -n "$SPIN_LOG" ]]; then rm -f "$SPIN_LOG"; fi' EXIT
+
 # The hash the launcher also uses to decide whether the venv is stale. Same
 # algorithm in both places, so the stamp written here is honoured there.
 hash_file() {
