@@ -21,15 +21,6 @@ textual>=0.80
 rich>=14.2.0
 pyyaml>=6.0
 
-# litellm hardcodes uvicorn's event loop to uvloop on Linux (see
-# litellm/proxy/proxy_cli.py::_get_loop_type — it is not configurable, and no
-# flag or env var overrides it). uvloop < 0.22 still imports
-# BaseDefaultEventLoopPolicy, which Python 3.14 removed, so the proxy dies at
-# startup with "cannot import name 'BaseDefaultEventLoopPolicy'" and never binds
-# its port. Pin the floor explicitly: it arrives transitively via litellm[proxy],
-# and a resolve that picks the old version produces a venv that cannot run.
-uvloop>=0.22.1
-
 # zimzilla itself, editable, so the `zimzilla` console script is installed and
 # the package is importable from any directory.
 -e .
