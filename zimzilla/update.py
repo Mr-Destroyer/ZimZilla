@@ -66,6 +66,10 @@ class UpdateResult:
     commits: list[str] = field(default_factory=list)
     message: str = ""
     deps_changed: bool = False
+    #: Whether the checkout carries its own venv (built by install.sh). Such an
+    #: install refreshes the venv itself on the next launch, so a dependency
+    #: change is announced differently than for a bring-your-own venv.
+    bundled_venv: bool = False
     should_reexec: bool = False
 
     @property
@@ -205,6 +209,16 @@ def inspect(root: Path, timeout: float = GIT_TIMEOUT) -> UpdateResult:
     )
 
 
+def _has_bundled_venv(root: Path) -> bool:
+    """Whether *root* carries the venv install.sh builds.
+
+    A checkout with its own venv refreshes it automatically on the next launch
+    (see the launcher's sync_deps), so a dependency change needs no operator
+    action there — unlike a bring-your-own venv.
+    """
+    return (root / ".venv" / "bin" / "python").exists()
+
+
 def apply(root: Path, result: UpdateResult, timeout: float = GIT_TIMEOUT) -> UpdateResult:
     """Fast-forward onto the upstream and record what changed.
 
@@ -256,6 +270,7 @@ def apply(root: Path, result: UpdateResult, timeout: float = GIT_TIMEOUT) -> Upd
         commits=result.commits,
         message=f"updated by {result.behind} commit{'s' if result.behind != 1 else ''}",
         deps_changed=deps_changed,
+        bundled_venv=_has_bundled_venv(root),
         should_reexec=True,
     )
 
@@ -314,5 +329,8 @@ def format_result(result: UpdateResult, stream=None) -> None:
     for c in result.commits[:10]:
         line(f"    {c}")
     if result.deps_changed:
-        line(f"  · {DEPS_FILE} changed — re-run ./setup.sh to refresh the venv")
+        if result.bundled_venv:
+            line(f"  · {DEPS_FILE} changed — the venv refreshes itself on restart")
+        else:
+            line(f"  · {DEPS_FILE} changed — re-run ./setup.sh to refresh the venv")
     line("  · restarting on the new code…")
