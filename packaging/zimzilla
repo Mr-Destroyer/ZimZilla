@@ -99,12 +99,54 @@ die()  { printf '\033[31m[zimzilla]\033[0m %s\n' "$*" >&2; exit 2; }
 warn() { printf '\033[33m[zimzilla]\033[0m %s\n' "$*" >&2; }
 info() { printf '\033[36m[zimzilla]\033[0m %s\n' "$*" >&2; }
 
+# Keep the checkout's own venv in step with requirements.txt.
+#
+# install.sh builds $ZIMZILLA_ROOT/.venv once. requirements.txt can still move
+# under it — a launch-time update pulls a new one, or the operator edits it —
+# and a stale venv then fails the dependency check below on a missing import.
+# So reinstall only when the file's content differs from what was last
+# installed, recorded in a stamp inside the venv: an ordinary launch pays
+# nothing but a hash. Only a venv ZimZilla owns is touched — a bring-your-own
+# venv is left exactly as the operator set it up.
+sync_deps() {
+  local req="$ZIMZILLA_ROOT/requirements.txt" stamp="$ZIMZILLA_ROOT/.venv/.requirements.sha"
+  [[ "$PY" == "$ZIMZILLA_ROOT/.venv/bin/python" && -f "$req" ]] || return 0
+
+  local want=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    want="$(sha256sum "$req" | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then
+    want="$(shasum -a 256 "$req" | cut -d' ' -f1)"
+  else
+    return 0   # no hasher: leave the venv alone rather than reinstall every launch
+  fi
+  [[ -r "$stamp" && "$(cat "$stamp" 2>/dev/null)" == "$want" ]] && return 0
+
+  info "dependencies changed — refreshing the venv (one-off)..."
+  # pip resolves a bare `-e .` against the CURRENT directory, not against the
+  # requirements file it appears in — so this must run from the checkout, or
+  # the trailing `-e .` in requirements.txt installs whatever project the
+  # operator happened to be standing in. Subshell, so the launch's own cwd is
+  # left alone.
+  if ( cd "$ZIMZILLA_ROOT" && \
+       "$PY" -m pip install --quiet --disable-pip-version-check -r "$req" </dev/null ); then
+    printf '%s' "$want" > "$stamp"
+    info "venv up to date."
+  else
+    warn "could not refresh the venv — run $ZIMZILLA_ROOT/install.sh"
+  fi
+}
+
 # --- preconditions -----------------------------------------------------------
 
 [[ -n "$PY" ]] || die "no python3 on PATH.
        Create a venv, activate it, then install the dependencies:
            python3 -m venv .venv && source .venv/bin/activate
            pip install -r requirements.txt"
+
+# Bring the bundled venv up to date first, so the import check below tests the
+# interpreter as it will actually be after this launch, not as it was.
+sync_deps
 
 # The dependencies must be importable by THIS interpreter. Checking here turns
 # a confusing ImportError at launch into the one command that fixes it. Run
