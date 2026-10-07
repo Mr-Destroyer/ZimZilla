@@ -248,6 +248,13 @@ fi
 # Make the package importable regardless of the caller's cwd.
 export PYTHONPATH="$ZIMZILLA_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+# Exported so the harness can find this launcher again. After a launch-time
+# update replaces the code, __main__ re-execs *through this script* rather than
+# straight to the interpreter, so the dependency sync above runs against the
+# requirements.txt the update just pulled. Without the export it would have to
+# guess the path.
+export ZIMZILLA_ROOT
+
 # exec: no extra bash layer, so exit status, signal delivery and TTY ownership
 # all belong to the harness. NOTE: exec discards EXIT traps.
 exec "$PY" -m zimzilla "$@"
