@@ -130,11 +130,9 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
   # An existing install. Fast-forward only — never merge, never touch local
   # edits; a failed pull is a warning, not a stop, because the launcher's own
   # update check will report the same thing at run time.
-  if git -C "$INSTALL_DIR" pull --ff-only --quiet </dev/null 2>/dev/null; then
-    ok "updated $INSTALL_DIR"
-  else
-    warn "could not update $INSTALL_DIR (local changes or offline) — using what is there"
-  fi
+  spin "updated $INSTALL_DIR" \
+    git -C "$INSTALL_DIR" pull --ff-only --quiet </dev/null \
+    || warn "could not update $INSTALL_DIR (local changes or offline) — using what is there"
 elif [[ -e "$INSTALL_DIR" ]]; then
   die "$INSTALL_DIR exists but is not a git checkout — move it aside and re-run."
 else
@@ -142,9 +140,9 @@ else
   # A full clone, not --depth 1: the launcher's update check counts how far
   # behind the checkout is and fast-forwards it, and both want real history.
   # The repository is a couple of MB, so there is nothing to save by shallow.
-  git clone --quiet "$REPO" "$INSTALL_DIR" </dev/null \
+  spin "cloned into $INSTALL_DIR" \
+    git clone --quiet "$REPO" "$INSTALL_DIR" </dev/null \
     || die "could not clone $REPO"
-  ok "cloned into $INSTALL_DIR"
 fi
 
 # --- 2. build the venv -------------------------------------------------------
@@ -158,25 +156,30 @@ else
   if [[ -x "$VENV_PY" ]]; then
     ok "venv already present"
   else
-    "$PY" -m venv "$INSTALL_DIR/.venv" </dev/null || die "could not create the venv"
-    ok "venv at $INSTALL_DIR/.venv"
+    spin "venv at $INSTALL_DIR/.venv" \
+      "$PY" -m venv "$INSTALL_DIR/.venv" </dev/null \
+      || die "could not create the venv"
   fi
 
   step "Installing dependencies (a minute or two the first time)"
-  "$VENV_PY" -m pip install --quiet --disable-pip-version-check --upgrade pip </dev/null || true
-  # Run from the checkout: requirements.txt ends in `-e .`, and pip resolves
-  # that against the current directory rather than the requirements file. Under
-  # `curl | bash` the cwd is wherever the operator happened to be.
-  ( cd "$INSTALL_DIR" && \
-    "$VENV_PY" -m pip install --quiet --disable-pip-version-check \
-      -r "$INSTALL_DIR/requirements.txt" </dev/null ) \
+  # One spinner covers the whole step — the pip self-upgrade and then
+  # requirements.txt — because together they are the wait worth animating.
+  _install_deps() {
+    "$VENV_PY" -m pip install --quiet --disable-pip-version-check --upgrade pip </dev/null || true
+    # Run from the checkout: requirements.txt ends in `-e .`, and pip resolves
+    # that against the current directory rather than the requirements file.
+    # Under `curl | bash` the cwd is wherever the operator happened to be.
+    ( cd "$INSTALL_DIR" && \
+      "$VENV_PY" -m pip install --quiet --disable-pip-version-check \
+        -r "$INSTALL_DIR/requirements.txt" </dev/null )
+  }
+  spin "dependencies installed" _install_deps \
     || die "could not install the dependencies — see the pip output above."
   # Stamp the requirements hash so the launcher's incremental refresh sees a
   # matching venv and does nothing on the first launch.
   if _h="$(hash_file "$INSTALL_DIR/requirements.txt")"; then
     printf '%s' "$_h" > "$INSTALL_DIR/.venv/.requirements.sha"
   fi
-  ok "dependencies installed"
 fi
 
 # --- 3. the launcher on PATH -------------------------------------------------
