@@ -48,6 +48,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _launcher_path() -> str | None:
+    """The launcher script this run came through, if there is one.
+
+    ``packaging/zimzilla`` exports ``ZIMZILLA_ROOT`` before it execs the
+    interpreter, so the script is discoverable from there. A bare
+    ``python -m zimzilla`` — no launcher — leaves the variable unset and gets
+    ``None``.
+    """
+    root = os.environ.get("ZIMZILLA_ROOT")
+    if not root:
+        return None
+    launcher = Path(root) / "packaging" / "zimzilla"
+    if launcher.is_file() and os.access(launcher, os.X_OK):
+        return str(launcher)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     # Captured before parsing so the re-exec below can reproduce the original
     # invocation exactly, whatever it was.
@@ -167,6 +184,15 @@ def main(argv: list[str] | None = None) -> int:
             update_mod.format_result(result)
         if result.should_reexec:
             os.environ["ZIMZILLA_UPDATED"] = "1"
+            # Re-exec through the launcher when there is one, so the venv
+            # dependency sync it performs runs against the requirements.txt the
+            # update just pulled. Going straight to sys.executable would skip
+            # that and boot the new code against the old venv — exactly the
+            # case the update flagged. A bare `python -m zimzilla` has no
+            # launcher and re-execs the interpreter, as before.
+            launcher = _launcher_path()
+            if launcher is not None:
+                os.execv(launcher, [launcher, *raw_argv])
             os.execv(sys.executable, [sys.executable, "-m", "zimzilla", *raw_argv])
 
     from .ui.app import ZimZillaApp
