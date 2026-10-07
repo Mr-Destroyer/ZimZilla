@@ -338,7 +338,8 @@ def test_format(base: Path) -> None:
     check("format: names the commit", "remote work" in out, out.strip())
     check("format: says it is restarting", "restarting" in out, out.strip())
 
-    # A dependency change must add the setup.sh line.
+    # A dependency change must add the setup.sh line when the operator brings
+    # their own venv...
     commit_to_origin(base / "seed", origin, "bump deps",
                      files={"requirements.txt": "textual>=0.81\n"})
     r = update.apply(clone, update.inspect(clone))
@@ -346,6 +347,20 @@ def test_format(base: Path) -> None:
     update.format_result(r, stream=buf)
     check("format: flags the venv refresh on a dep change",
           "setup.sh" in buf.getvalue(), buf.getvalue().strip())
+
+    # ...and must say the venv refreshes itself when the checkout owns one (an
+    # install.sh install), so the operator is not sent to setup.sh needlessly.
+    # The marker is untracked, which git ignores for the dirty check.
+    (clone / ".venv" / "bin").mkdir(parents=True)
+    (clone / ".venv" / "bin" / "python").touch()
+    commit_to_origin(base / "seed", origin, "bump deps again",
+                     files={"requirements.txt": "textual>=0.82\n"})
+    r = update.apply(clone, update.inspect(clone))
+    buf = io.StringIO()
+    update.format_result(r, stream=buf)
+    out = buf.getvalue()
+    check("format: a bundled venv refreshes itself, not via setup.sh",
+          "refreshes itself" in out and "setup.sh" not in out, out.strip())
 
 
 def main() -> int:
