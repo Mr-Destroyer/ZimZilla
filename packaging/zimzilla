@@ -31,10 +31,16 @@ if [[ -z "${ZIMZILLA_ROOT:-}" ]]; then
   fi
 fi
 
-# Resolve the interpreter that carries ZimZilla's dependencies. The venv is the
-# user's own — created wherever they like and activated — so prefer the active
-# one ($VIRTUAL_ENV), then a python3 on PATH. This script never creates one.
-if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+# Resolve the interpreter that carries ZimZilla's dependencies.
+#
+# Prefer the checkout's own venv — the one install.sh builds — so a global
+# install runs with no activation at all. That is what lets `zimzilla` work
+# from any directory without the operator touching a shell. Failing that, fall
+# back to an activated venv ($VIRTUAL_ENV), then a python3 on PATH, which is
+# the bring-your-own-venv layout. This script never creates a venv.
+if [[ -x "$ZIMZILLA_ROOT/.venv/bin/python" ]]; then
+  PY="$ZIMZILLA_ROOT/.venv/bin/python"
+elif [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
   PY="$VIRTUAL_ENV/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
   PY="$(command -v python3)"
