@@ -252,17 +252,45 @@ fi
 
 # --- 4. litellm --------------------------------------------------------------
 
+# The proxy gets its OWN venv. It cannot live in the harness's: litellm[proxy]
+# requires rich<14.0 and textual 8.x requires rich>=14.2, so an environment
+# holding both cannot resolve at all. start-litellm.sh already looks in
+# $ZIMZILLA_HOME/venv, so that is where this goes. A litellm that already
+# exists anywhere is reused rather than duplicated.
+PROXY_VENV="$ZIMZILLA_HOME/venv"
+PROXY_PY="$PROXY_VENV/bin/python"
+
 step "Checking the LiteLLM proxy"
 if command -v litellm >/dev/null 2>&1; then
   ok "litellm on PATH"
-elif [[ -x "$HOME/.local/bin/litellm" || -x "$(dirname "$PY")/litellm" ]]; then
-  ok "litellm present"
+elif [[ -x "$HOME/.local/bin/litellm" ]]; then
+  ok "litellm present at ~/.local/bin/litellm"
+elif [[ -x "$PROXY_PY" ]] && "$PROXY_PY" -c 'import litellm' >/dev/null 2>&1; then
+  ok "litellm in $PROXY_VENV"
 else
-  # requirements.txt already lists litellm[proxy]; this is a safety net for a
-  # venv installed before it did, or one built without the file.
-  printf '  installing litellm[proxy] (this can take a minute)...\n'
-  "$PY" -m pip install --quiet "litellm[proxy]" || die "could not install litellm"
-  ok "installed into $PY's environment"
+  printf '  building the proxy venv at %s (this can take a minute)...\n' "$PROXY_VENV"
+  "$PY" -m venv "$PROXY_VENV" || die "could not create $PROXY_VENV"
+  "$PROXY_PY" -m pip install --quiet --disable-pip-version-check --upgrade pip || true
+  # Both floors are load-bearing, and they live here rather than in
+  # requirements.txt because this is the environment that has to satisfy them.
+  #
+  # litellm[proxy]>=1.100.1 — the harness talks to this proxy over Anthropic's
+  # /v1/messages, and every Logfare model is registered as `openai/<name>`.
+  # Older litellm only served /v1/messages for provider == anthropic, so an
+  # openai/* model raised "Anthropic messages provider config not found for
+  # model: ..." — a 500 on the one route ZimZilla actually uses, while
+  # /v1/chat/completions kept working and made the proxy look healthy.
+  #
+  # uvloop>=0.22.1 — litellm hardcodes uvicorn's event loop to uvloop on Linux
+  # (litellm/proxy/proxy_cli.py::_get_loop_type — not configurable, no flag or
+  # env var overrides it). uvloop <0.22 still imports
+  # BaseDefaultEventLoopPolicy, which Python 3.14 removed, so the proxy dies at
+  # startup with "cannot import name 'BaseDefaultEventLoopPolicy'" and never
+  # binds its port.
+  "$PROXY_PY" -m pip install --quiet --disable-pip-version-check \
+    "litellm[proxy]>=1.100.1" "uvloop>=0.22.1" </dev/null \
+    || die "could not install litellm[proxy] into $PROXY_VENV"
+  ok "litellm installed into $PROXY_VENV"
 fi
 
 # --- 5. start the proxy ------------------------------------------------------
