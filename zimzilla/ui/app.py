@@ -119,6 +119,101 @@ class PermissionModal(ModalScreen[str]):
         self.dismiss(value)
 
 
+class ReconOverlay(ModalScreen[None]):
+    """A centred window showing the recon phase working, live.
+
+    Recon can run for minutes against a live target, and until it finishes the
+    operator has nothing to look at — the zim-pane belongs to the waves, which
+    have not started. So this floats over the middle of the screen and narrates
+    what recon is actually doing: each tool call as it is made, and the model's
+    prose as it is written.
+
+    It is deliberately not a gate. There is nothing to confirm, so it takes no
+    input, has no keys and cannot be dismissed by the operator — ``run_hunt``
+    pops it when recon ends. ``can_focus = False`` keeps the prompt underneath
+    alive, which is what lets ``/stop-hunt`` and the other busy-permitted
+    commands still be typed while it is up.
+    """
+
+    can_focus = False
+
+    def __init__(self, target: str, palette, cfg: Config) -> None:
+        super().__init__()
+        self.target = target
+        self.palette = palette
+        self.cfg = cfg
+        #: The tail of the activity log. Bounded: a recon run makes dozens of
+        #: calls, and the window only has room for the last few.
+        self.lines: list[Text] = []
+        self.calls = 0
+        self.started = time.monotonic()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="recon-box"):
+            yield Static(id="recon-title")
+            yield Static(id="recon-status")
+            with VerticalScroll(id="recon-log"):
+                yield Static(id="recon-lines")
+
+    def on_mount(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  ⟩ RECON  ", style=f"bold {p.bg} on {p.accent}")
+        t.append("  mapping ", style=p.dim)
+        t.append(self.target, style=f"bold {p.primary}")
+        self.query_one("#recon-title", Static).update(t)
+        self._paint_status()
+
+    def note(self, event: dict) -> None:
+        """Apply one recon event and repaint."""
+        kind = event.get("type")
+        p = self.palette
+        if kind == "hunt_recon_tool":
+            self.calls += 1
+            tool = event.get("tool", "?")
+            detail = tools_mod.summarise_call(tool, event.get("args") or {}, self.cfg)
+            if len(detail) > 72:
+                detail = detail[:71] + "…"
+            t = Text()
+            t.append(f"  {self.calls:>3}  ", style=p.dim)
+            t.append("✗ " if event.get("blocked") else "▸ ", style=p.red if event.get("blocked") else p.accent)
+            t.append(f"{tool:<12}", style=f"bold {p.primary}")
+            t.append(detail, style=p.dim)
+            self._push(t)
+        elif kind == "hunt_recon_text":
+            text = (event.get("text") or "").strip()
+            if text:
+                t = Text()
+                t.append("       ", style=p.dim)
+                t.append(text, style=p.primary)
+                self._push(t)
+        self._paint_status()
+
+    def _push(self, line: Text) -> None:
+        self.lines.append(line)
+        if len(self.lines) > 200:
+            self.lines = self.lines[-200:]
+        self.query_one("#recon-lines", Static).update(
+            Text("\n").join(self.lines[-40:])
+        )
+        try:
+            self.query_one("#recon-log", VerticalScroll).scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _paint_status(self) -> None:
+        p = self.palette
+        elapsed = int(time.monotonic() - self.started)
+        t = Text()
+        t.append("  ", style=p.dim)
+        t.append(f"{self.calls} call{'s' if self.calls != 1 else ''}", style=p.primary)
+        t.append("   ·   ", style=p.dim)
+        t.append(f"{elapsed // 60}:{elapsed % 60:02d}", style=p.primary)
+        t.append("   ·   ", style=p.dim)
+        t.append("working", style=f"bold {p.accent}")
+        self.query_one("#recon-status", Static).update(t)
+
+
 class ZimZillaApp(App):
     """Top-level application: boot screen, then the shell."""
 
@@ -225,6 +320,34 @@ class ZimZillaApp(App):
     #perm-content { height: auto; }
     #perm-keys { height: 1; margin-top: 1; }
     #perm-progress { height: 1; color: #0b6e2a; }
+
+    /* The recon window. Centred and floating over the shell, so the operator
+       watches the mapping happen instead of staring at a frozen status line.
+       Its scrim is lighter than the permission modal's: this is a window you
+       look past, not one you answer, and the shell underneath is still live. */
+    ReconOverlay {
+        align: center middle;
+        background: $background 55%;
+    }
+    #recon-box {
+        width: 72%;
+        max-width: 96;
+        height: auto;
+        max-height: 70%;
+        border: heavy $accent;
+        background: $background;
+        padding: 1 2;
+    }
+    #recon-title { height: 1; }
+    #recon-status { height: 1; }
+    #recon-log {
+        height: auto;
+        max-height: 20;
+        margin-top: 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $secondary;
+    }
+    #recon-lines { height: auto; }
     """
 
     BINDINGS = [
@@ -2101,6 +2224,10 @@ class ZimZillaApp(App):
         self._hunt_tokens = (0, 0, 0.0)
 
         counter = {"running": 0, "total": 0, "wave": 0}
+        #: The live recon window, while recon is running. Held here so the
+        #: worker can pop exactly the screen it pushed, and so a stop mid-recon
+        #: can take it down from the `finally`.
+        overlay: dict = {"screen": None}
 
         async def on_event(ev: dict) -> None:
             if self._cancelled:
@@ -2110,11 +2237,32 @@ class ZimZillaApp(App):
             if pane is not None:
                 pane.note_hunt(ev)
 
+            # Recon narrates into its own window. Every recon event is consumed
+            # here and returns — nothing recon does belongs in the transcript,
+            # which is where the waves go.
+            if etype in ("hunt_recon_tool", "hunt_recon_text"):
+                screen = overlay["screen"]
+                if screen is not None:
+                    try:
+                        screen.note(ev)
+                    except Exception:
+                        pass
+                return
+
             if etype == "hunt_recon_start":
                 self._sys_line("recon — mapping the target…")
                 bar.set_activity("hunt: recon", busy=True)
+                # can_focus is False, so this does not steal the prompt: the
+                # operator can still type /stop-hunt while recon runs.
+                try:
+                    screen = ReconOverlay(ev.get("target", target), p, self.cfg)
+                    overlay["screen"] = screen
+                    self.push_screen(screen)
+                except Exception:
+                    overlay["screen"] = None
 
             elif etype == "hunt_recon_done":
+                self._close_recon(overlay)
                 text = (ev.get("text") or "").strip()
                 if text:
                     chat.write_block(R.agent_line("recon", text, p.accent, p))
@@ -2219,6 +2367,9 @@ class ZimZillaApp(App):
                 f"hunt failed: {type(e).__name__}: {e}", p))
         finally:
             spinner.cancel()
+            # A stop or a crash during recon must not leave the window up over
+            # a dead campaign.
+            self._close_recon(overlay)
             self.busy = False
             self._hunt_run = None
             chat.clear_stream()
@@ -2234,6 +2385,25 @@ class ZimZillaApp(App):
             self._sync_rails()
             self._set_rain(self.rain_on)
             self.query_one("#input", Input).focus()
+
+    def _close_recon(self, overlay: dict) -> None:
+        """Take the recon window down, if it is still up.
+
+        Popped by identity rather than with a bare ``pop_screen()``: between the
+        push and this call the operator can open the command palette or hit a
+        permission modal, and a blind pop would dismiss *that* instead — leaving
+        the recon window stranded over the shell. Idempotent, because both the
+        recon-done event and the worker's ``finally`` call it.
+        """
+        screen = overlay.get("screen")
+        overlay["screen"] = None
+        if screen is None:
+            return
+        try:
+            if self.screen is screen:
+                self.pop_screen()
+        except Exception:
+            pass
 
     def _team_agent_factory(self, cfg: Config, **kw) -> Agent:
         """Build a team Agent. The seam tests replace to stub the model.

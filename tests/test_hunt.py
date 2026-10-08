@@ -32,7 +32,7 @@ from zimzilla import team as team_mod  # noqa: E402
 from zimzilla.agent import Agent  # noqa: E402
 from zimzilla.config import Config  # noqa: E402
 from zimzilla.theme import get_palette  # noqa: E402
-from zimzilla.ui.app import ZimZillaApp  # noqa: E402
+from zimzilla.ui.app import ReconOverlay, ZimZillaApp  # noqa: E402
 from zimzilla.ui.widgets import ChatPane, ZimPane  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -641,6 +641,141 @@ def test_pane() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The recon window
+# ---------------------------------------------------------------------------
+
+async def test_recon_overlay(wd: Path) -> None:
+    """The window opens on recon, narrates live, and closes on its own."""
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+
+    from textual.widgets import Input as _Input
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        overlay = ReconOverlay("example.test", app.palette, app.cfg)
+        app.push_screen(overlay)
+        await pilot.pause()
+
+        check("overlay: it is the active screen", app.screen is overlay)
+        check("overlay: it does not steal the prompt",
+              overlay.can_focus is False)
+
+        overlay.note({"type": "hunt_recon_tool", "tool": "bash",
+                      "args": {"command": "nmap -sV example.test"}})
+        overlay.note({"type": "hunt_recon_tool", "tool": "web_fetch",
+                      "args": {"url": "https://example.test/robots.txt"}})
+        overlay.note({"type": "hunt_recon_text",
+                      "text": "nginx 1.24 on 443, a login form at /login"})
+        await pilot.pause()
+
+        check("overlay: tool calls are counted",
+              overlay.calls == 2, str(overlay.calls))
+        body = str(overlay.query_one("#recon-lines").render())
+        check("overlay: the command is shown",
+              "nmap -sV example.test" in body, body[:200])
+        check("overlay: the url is shown",
+              "robots.txt" in body, body[:200])
+        check("overlay: the model's prose is shown",
+              "login form at /login" in body, body[:200])
+        status = str(overlay.query_one("#recon-status").render())
+        check("overlay: the status line carries the call count",
+              "2 calls" in status, status)
+        check("overlay: the status line carries a clock",
+              ":" in status and "working" in status, status)
+
+        # A blocked call is marked, not dropped.
+        overlay.note({"type": "hunt_recon_tool", "tool": "bash",
+                      "args": {"command": "rm -rf /"}, "blocked": True})
+        await pilot.pause()
+        check("overlay: a blocked call still counts", overlay.calls == 3)
+        check("overlay: a blocked call is marked",
+              "✗" in str(overlay.query_one("#recon-lines").render()))
+
+        # The operator can still type while it is up — that is the whole reason
+        # can_focus is False.
+        inp = app.query_one("#input", _Input)
+        inp.focus()
+        await pilot.pause()
+        inp.value = "/stop-hunt"
+        await pilot.press("enter")
+        await pilot.pause()
+        check("overlay: a command still dispatches while recon is up",
+              app.screen is overlay,
+              "the overlay was dismissed by typing")
+
+        # And it comes down by itself, exactly once, without a pop_screen()
+        # aimed at whatever happens to be on top.
+        held = {"screen": overlay}
+        app._close_recon(held)
+        await pilot.pause()
+        check("overlay: closing returns to the shell", app.screen is not overlay)
+        check("overlay: closing is idempotent", held["screen"] is None)
+        app._close_recon(held)  # must not pop the shell or raise
+        await pilot.pause()
+        check("overlay: a second close does not pop anything else",
+              app.screen is not None)
+
+
+async def test_recon_reports_live(wd: Path) -> None:
+    """run_hunt must emit recon tool calls as they happen, not just at the end."""
+    seen: list[dict] = []
+
+    def factory(cfg, **kw):
+        agent = Agent(cfg, permission_handler=kw.get("permission_handler"),
+                      tool_hook=kw.get("tool_hook"))
+
+        async def fake_stream():
+            prompt = agent.messages[-1]["content"] if agent.messages else ""
+            prompt = prompt if isinstance(prompt, str) else ""
+            if _RECON_MARK in prompt:
+                yield ({"type": "text_delta", "text": "probing"}, None)
+                yield (None, _Msg([
+                    _Blk(type="text", text="probing"),
+                    _Blk(type="tool_use", id="r1", name="list_dir",
+                         input={"path": "."}),
+                ], _Usage(10, 5)))
+                return
+            if cfg.mode == "plan":
+                yield ({"type": "text_delta", "text": "no workers here"}, None)
+                yield (None, _Msg([_Blk(type="text", text="no workers here")]))
+                return
+            yield ({"type": "text_delta", "text": "nothing"}, None)
+            yield (None, _Msg([_Blk(type="text", text="nothing")]))
+
+        agent._stream_once = fake_stream
+        return agent
+
+    async def on_event(ev):
+        seen.append(ev)
+        if ev["type"] == "hunt_wave_end":
+            stop.set()
+
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    await hunt_mod.run_hunt(cfg, "x.test", on_event=on_event,
+                            agent_factory=factory, stop=stop,
+                            wave_size=1, concurrency=1)
+
+    kinds = [e["type"] for e in seen]
+    check("recon live: a tool call is reported while recon runs",
+          "hunt_recon_tool" in kinds, str(kinds[:8]))
+    check("recon live: the call lands before recon is done",
+          kinds.index("hunt_recon_tool") < kinds.index("hunt_recon_done"))
+    check("recon live: the tool name is carried",
+          any(e.get("tool") == "list_dir" for e in seen
+              if e["type"] == "hunt_recon_tool"))
+    check("recon live: prose is reported in blocks",
+          "hunt_recon_text" in kinds, str(kinds[:8]))
+    check("recon live: the final recon text is still returned whole",
+          any(e["type"] == "hunt_recon_done" and "probing" in (e.get("text") or "")
+              for e in seen))
+
+
+# ---------------------------------------------------------------------------
 # The busy gate
 # ---------------------------------------------------------------------------
 
@@ -743,6 +878,8 @@ async def main() -> int:
         await test_hunt_fallback_wave(wd)
         await test_hunt_stops_midwave(wd)
         await test_hunt_summary_flag(wd)
+        await test_recon_reports_live(wd)
+        await test_recon_overlay(wd)
         await test_busy_gate(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]

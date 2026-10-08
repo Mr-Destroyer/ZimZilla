@@ -743,6 +743,62 @@ async def _collect_text(agent: Agent, prompt: str) -> str:
     return "".join(parts)
 
 
+async def _collect_text_live(
+    agent: Agent,
+    prompt: str,
+    on_event: Callable[[dict], Awaitable[None]],
+) -> str:
+    """Run one turn, reporting what it is doing as it does it.
+
+    Recon is the one turn the operator watches directly: it can run for minutes
+    against a live target, and a frozen "mapping the target…" line for that long
+    is indistinguishable from a hang. So unlike ``_collect_text`` this forwards
+    each tool call and each flushed block of prose as ``recon_*`` events, and
+    returns the same text it would have returned silently.
+
+    Only the *tool call* is reported, not its output: a recon tool result is
+    arbitrary target text, and pushing it into a UI sink unescaped is how a
+    scan of a hostile page ends up painting the overlay. The model's own prose
+    is the interesting part and it is what gets shown.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+
+    async def flush() -> None:
+        text = "".join(buf).strip()
+        buf.clear()
+        if text:
+            await on_event({"type": "hunt_recon_text", "text": text})
+
+    async for ev in agent.run_turn(prompt):
+        etype = ev.get("type")
+        if etype == "text_delta":
+            chunk = ev.get("text", "")
+            parts.append(chunk)
+            buf.append(chunk)
+        elif etype == "tool_call":
+            # Flush first, so the reasoning lands above the call it explains.
+            await flush()
+            await on_event({
+                "type": "hunt_recon_tool",
+                "tool": ev.get("name", ""),
+                "args": ev.get("args") or {},
+                "blocked": False,
+            })
+        elif etype == "blocked":
+            await on_event({
+                "type": "hunt_recon_tool",
+                "tool": ev.get("name", ""),
+                "args": ev.get("args") or {},
+                "blocked": True,
+            })
+        elif etype == "error":
+            await on_event({"type": "hunt_recon_text",
+                            "text": f"(recon error: {ev.get('message', '')})"})
+    await flush()
+    return "".join(parts)
+
+
 async def run_hunt(
     cfg: Config,
     target: str,
@@ -775,8 +831,9 @@ async def run_hunt(
     await on_event({"type": "hunt_recon_start", "target": target,
                     "directory": str(run.directory)})
     recon_agent = agent_factory(dataclasses.replace(cfg))
-    run.recon = await _collect_text(
-        recon_agent, RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT)
+    run.recon = await _collect_text_live(
+        recon_agent, RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT),
+        on_event,
     )
     await on_event({"type": "hunt_recon_done", "text": run.recon})
 
