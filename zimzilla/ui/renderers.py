@@ -102,12 +102,21 @@ def _mono_theme(palette: Palette):
 # ---------------------------------------------------------------------------
 # Tool panels
 # ---------------------------------------------------------------------------
-def _header(name: str, args: dict, palette: Palette, status: str = "") -> Text:
+def _header(name: str, args: dict, palette: Palette, status: str = "",
+            max_len: int | None = 200, tag: str = "",
+            tag_color: str = "") -> Text:
+    """``[ TOOL ]  tag  detail  status``.
+
+    ``tag`` is the agent a hunt call belongs to; it sits directly after the tool
+    label so the attribution reads first and the command second.
+    """
     icon = TOOL_ICONS.get(name, "▸")
     label = name.upper().replace("_", " ")
     t = Text()
     t.append(f"[ {icon} {label} ]", style=f"bold {palette.primary}")
-    detail = _detail(name, args)
+    if tag:
+        t.append("  " + tag, style=f"bold {tag_color or palette.accent}")
+    detail = _detail(name, args, max_len=max_len)
     if detail:
         t.append("  " + detail, style=palette.accent)
     if status:
@@ -115,10 +124,22 @@ def _header(name: str, args: dict, palette: Palette, status: str = "") -> Text:
     return t
 
 
-def _detail(name: str, args: dict) -> str:
+def _detail(name: str, args: dict, max_len: int | None = 200) -> str:
+    """The one-line gist of a tool call.
+
+    ``max_len`` of None means no truncation at all — used by the hunt panels,
+    where a long pipeline has to be readable in full rather than cut off at the
+    point the interesting part starts.
+    """
     if name == "bash":
         cmd = args.get("command", "")
-        return "$ " + (cmd if len(cmd) <= 200 else cmd[:199] + "…")
+        if not cmd:
+            # No command to show — a bare "$" in a title is noise, and the hunt
+            # panels put the command in the body and pass empty args here.
+            return ""
+        if max_len is None or len(cmd) <= max_len:
+            return "$ " + cmd
+        return "$ " + cmd[: max_len - 1] + "…"
     if name in {"read_file", "write_file", "edit_file", "list_dir"}:
         return str(args.get("path", ""))
     if name == "glob":
@@ -146,6 +167,31 @@ def tool_call_panel(name: str, args: dict, palette: Palette) -> Panel:
     )
 
 
+def _tool_body(name: str, args: dict, output: str,
+               palette: Palette) -> RenderableType:
+    """The body of a finished tool call: bash gets shell highlighting, a read
+    gets its file's language, everything else gets the diff/error heuristic."""
+    if name == "bash":
+        lang = detect_lang_for_command(args.get("command", ""))
+        return hacker_syntax(output, lang, palette, line_numbers=False)
+    if name == "read_file":
+        lang = lang_for_path(args.get("path", ""))
+        return hacker_syntax(output, lang, palette, line_numbers=False)
+    return render_output_text(output, palette)
+
+
+def _exit_badge(meta: dict, palette: Palette) -> Text:
+    """The right-hand status chip on a bash panel."""
+    exit_code = meta.get("exit")
+    if meta.get("timeout"):
+        return Text(" TIMEOUT ", style=f"bold white on {palette.amber}")
+    if exit_code is None:
+        return Text(" EXEC ", style=f"bold white on {palette.dim}")
+    if exit_code == 0:
+        return Text(" EXIT 0 ", style=f"bold black on {palette.accent}")
+    return Text(f" EXIT {exit_code} ", style=f"bold white on {palette.red}")
+
+
 def tool_result_panel(
     name: str,
     args: dict,
@@ -157,39 +203,76 @@ def tool_result_panel(
     """Panel shown when a tool *finishes*, with syntax-highlighted output."""
     meta = meta or {}
     border = palette.red if is_error else palette.dim
+    body = _tool_body(name, args, output, palette)
 
     if name == "bash":
-        lang = detect_lang_for_command(args.get("command", ""))
-        code = output
-        body: RenderableType = hacker_syntax(code, lang, palette, line_numbers=False)
-        exit_code = meta.get("exit")
-        if meta.get("timeout"):
-            status = Text(" TIMEOUT ", style=f"bold white on {palette.amber}")
-        elif exit_code is None:
-            status = Text(" EXEC ", style=f"bold white on {palette.dim}")
-        elif exit_code == 0:
-            status = Text(f" EXIT 0 ", style=f"bold black on {palette.accent}")
-        else:
-            status = Text(f" EXIT {exit_code} ", style=f"bold white on {palette.red}")
         return Panel(
             body,
             title=_header(name, args, palette),
-            subtitle=status,
+            subtitle=_exit_badge(meta, palette),
             subtitle_align="right",
             title_align="left",
             border_style=border,
             padding=(0, 1),
         )
 
-    # diff-ish tools and reads: plain highlighted text
-    lang = lang_for_path(args.get("path", "")) if name == "read_file" else "text"
-    if name == "read_file":
-        body = hacker_syntax(output, lang, palette, line_numbers=False)
-    else:
-        body = render_output_text(output, palette)
     return Panel(
         body,
         title=_header(name, args, palette),
+        title_align="left",
+        border_style=border,
+        padding=(0, 1),
+    )
+
+
+def hunt_tool_panel(
+    name: str,
+    args: dict,
+    output: str,
+    palette: Palette,
+    agent: str = "",
+    color: str = "",
+    is_error: bool = False,
+    meta: dict | None = None,
+) -> Panel:
+    """One finished tool call from a hunt worker, rendered in full.
+
+    Same treatment a normal turn gives a call — the operator's real view of the
+    engagement — with two differences that matter when ten agents run at once:
+
+    * the command is **never truncated**. A recon or exploitation one-liner is
+      routinely 200+ characters and the part that says what is being tested is
+      at the end of it, not the beginning. It goes in the *body*, not the
+      title: a Rich panel title is one line and gets clipped at the border, so
+      a long command there is exactly the truncation this exists to remove.
+    * the agent's name is in the title. Interleaved, unattributed panels would
+      be unreadable, and attributing them is what lets the operator follow one
+      thread through the noise.
+    """
+    meta = meta or {}
+    border = palette.red if is_error else palette.dim
+
+    if name == "bash":
+        # The full command leads, then a blank line, then the output — so the
+        # two are never mistaken for each other. Group rather than one Text:
+        # the output half is a Syntax renderable, which cannot be appended to.
+        cmd = Text(_detail("bash", args, max_len=None), style=palette.primary)
+        body: RenderableType = Group(
+            cmd, Text(""), _tool_body(name, args, output, palette)
+        )
+        return Panel(
+            body,
+            title=_header(name, {}, palette, tag=agent, tag_color=color),
+            subtitle=_exit_badge(meta, palette),
+            subtitle_align="right",
+            title_align="left",
+            border_style=border,
+            padding=(0, 1),
+        )
+
+    return Panel(
+        _tool_body(name, args, output, palette),
+        title=_header(name, args, palette, tag=agent, tag_color=color),
         title_align="left",
         border_style=border,
         padding=(0, 1),

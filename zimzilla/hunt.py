@@ -142,6 +142,15 @@ Work with the tools you have. Establish, as far as you can:
   anything that takes input.
 - Hypotheses: the specific classes of bug this stack plausibly has, and which
   asset each would live on.
+- Tooling: which offensive tools are actually present on THIS host, and whether
+  a wordlist is available. Check for at least: nmap, ffuf, gobuster,
+  feroxbuster, nikto, sqlmap, nuclei, whatweb, wafw00f, testssl.sh, sslyze,
+  curl, dig, host, nslookup, openssl. Also check the usual wordlist roots
+  (/usr/share/wordlists, /usr/share/seclists/Discovery/Web-Content). One
+  `which` over the whole list, then `ls` on the wordlist roots — this is worth
+  a turn, because a brief that sends an agent after a binary that is not
+  installed wastes the agent entirely, and ten agents each re-checking for
+  themselves wastes the wave.
 
 Be concrete. A hypothesis that names a host and a parameter is worth ten that
 name a category. If the target does not answer at all, say so plainly and report
@@ -206,6 +215,16 @@ Reply with ONE JSON object and nothing else:
 
 {contract}
 """
+
+#: Appended to the planner prompt for one retry, after a reply that could not be
+#: parsed. Deliberately blunt: the failure mode is almost always a model that
+#: wrapped its JSON in prose or a fence, and saying so plainly fixes it.
+PLANNER_RETRY_NUDGE = """\
+Your previous reply could not be read as JSON. Reply with ONE JSON object and
+nothing else — no prose before it, no prose after it, no code fence around it.
+Start your reply with `{` and end it with `}`.
+"""
+
 
 SUMMARY_PROMPT = """\
 An engagement against a target has been running as a sequence of waves of
@@ -349,6 +368,45 @@ def fallback_roster(wave: int, wave_size: int = HUNT_WAVE_SIZE) -> team_mod.Rost
         summary=f"planner reply unreadable — falling back to the fixed vector "
                 f"matrix for wave {wave}",
         workers=workers,
+    )
+
+
+#: How much of the recon report is prepended to every worker brief. Generous,
+#: because the alternative is ten agents re-reading the same files to find it.
+BRIEF_CONTEXT_CHARS = 6000
+
+
+def brief_context(run: HuntRun, limit: int = BRIEF_CONTEXT_CHARS) -> str:
+    """The shared briefing prepended to every worker's brief.
+
+    A worker used to see only its own brief, so all ten would open with the same
+    ``pwd && ls -la`` and the same re-read of every recon file — a whole wave
+    spending its first turns rediscovering what recon already knew. This hands
+    each of them the same picture up front and says, plainly, not to go looking
+    for it again.
+
+    Trimmed from the *end*: a recon report leads with reachability and surface
+    and trails into hypotheses, so the head is the part that saves the most
+    work. The full text still reaches the planner and the closing summary, which
+    see ``run.recon`` directly.
+    """
+    recon = (run.recon or "").strip()
+    if not recon:
+        return ""
+    if len(recon) > limit:
+        recon = recon[:limit].rstrip() + "\n…(recon report truncated here)"
+    return (
+        "WHAT IS ALREADY KNOWN\n"
+        "---------------------\n"
+        "Recon has already mapped this target. The findings below are "
+        "established fact — do not spend a turn re-deriving any of it. In "
+        "particular, do not re-run `ls`, `pwd`, or re-read the same recon "
+        "files: that ground is covered, and the wave is timed.\n\n"
+        f"{recon}\n\n"
+        "If the recon report names the tooling available on this host, treat "
+        "that as the tooling you have. Do not probe for binaries it says are "
+        "absent.\n"
+        "---------------------"
     )
 
 
@@ -611,6 +669,7 @@ async def _run_agent(
     on_event: Callable[[dict], Awaitable[None]],
     agent_factory: Callable[..., Agent],
     tool_hook,
+    context: str = "",
 ) -> team_mod.WorkerResult:
     """Run one hunt agent to completion. Never raises except on cancellation.
 
@@ -618,6 +677,11 @@ async def _run_agent(
     ``team_*`` events, and a hunt agent's events carry a different payload (the
     wave, the pane slot). The shared machinery — the write lock, the digest, the
     touched-path extraction — is imported from team rather than duplicated.
+
+    ``context`` is the shared recon digest, prepended to the brief. Without it
+    every agent starts blind and spends its first turns re-deriving what recon
+    already established — ten agents running the same ``ls`` and reading the
+    same six files — which is most of a wave's budget spent on nothing.
     """
     result = team_mod.WorkerResult(spec=spec)
 
@@ -639,8 +703,10 @@ async def _run_agent(
         if text:
             await on_event({"type": "hunt_agent_text", "name": spec.name, "text": text})
 
+    prompt = f"{context}\n\n{spec.brief}" if context else spec.brief
+
     try:
-        async for ev in worker.run_turn(spec.brief):
+        async for ev in worker.run_turn(prompt):
             etype = ev.get("type")
             if etype == "text_delta":
                 buf.append(ev.get("text", ""))
@@ -658,11 +724,18 @@ async def _run_agent(
                     "type": "hunt_agent_result", "name": spec.name,
                     "tool": ev.get("name", ""), "ok": not ev.get("is_error"),
                     "output": ev.get("output", ""),
+                    # The command and the run metadata travel with the result so
+                    # the transcript can render a full panel rather than a
+                    # truncated one-liner. This is the operator's only view of
+                    # what the engagement is actually doing.
+                    "args": ev.get("args") or {},
+                    "meta": ev.get("meta") or {},
                 })
             elif etype == "blocked":
                 await on_event({"type": "hunt_agent_result", "name": spec.name,
                                 "tool": ev.get("name", ""), "ok": False,
-                                "output": ev.get("targets", "")})
+                                "output": ev.get("targets", ""),
+                                "args": {}, "meta": {}, "blocked": True})
             elif etype == "usage":
                 result.input_tokens += ev.get("input", 0) or 0
                 result.output_tokens += ev.get("output", 0) or 0
@@ -692,6 +765,7 @@ async def _run_wave(
     agent_factory: Callable[..., Agent],
     stop: asyncio.Event,
     concurrency: int = HUNT_CONCURRENCY,
+    context: str = "",
 ) -> list[team_mod.WorkerResult]:
     """Run one wave concurrently, racing the stop signal.
 
@@ -712,6 +786,7 @@ async def _run_wave(
             return await _run_agent(
                 spec, index, cfg,
                 on_event=on_event, agent_factory=agent_factory, tool_hook=hook,
+                context=context,
             )
 
     tasks = [asyncio.create_task(_one(i, s)) for i, s in enumerate(specs)]
@@ -809,6 +884,7 @@ async def run_hunt(
     wave_size: int = HUNT_WAVE_SIZE,
     concurrency: int = HUNT_CONCURRENCY,
     summary_flag: Callable[[], bool] | None = None,
+    run: HuntRun | None = None,
 ) -> HuntRun:
     """Recon, then waves until stopped. Returns the run for the closing report.
 
@@ -819,8 +895,14 @@ async def run_hunt(
     concurrently with the hunt (both stream through the same transcript), so it
     sets a flag and the summary is generated here, between waves, where nothing
     else is streaming.
+
+    ``run`` lets the caller supply the ``HuntRun`` it wants used. The UI passes
+    one it has already published, so ``/stop-hunt`` and ``/summary-hunt`` have
+    something to act on *while the campaign is running* — this function returns
+    only when the campaign is over, which is far too late to be told to stop.
     """
-    run = HuntRun(target=target, directory=case_dir(cfg, target))
+    if run is None:
+        run = HuntRun(target=target, directory=case_dir(cfg, target))
     if stop is not None:
         run.stop = stop
 
@@ -855,16 +937,28 @@ async def run_hunt(
         # Plan. Read-only, so the planner cannot start doing the work itself —
         # the same reason team.py forces its planner to plan mode.
         planner = agent_factory(dataclasses.replace(cfg, mode="plan"))
-        plan_text = await _collect_text(planner, WAVE_PLANNER_PROMPT.format(
+        plan_prompt = WAVE_PLANNER_PROMPT.format(
             target=target,
             wave_size=wave_size,
             recon=run.recon or "(recon produced nothing)",
             findings=run.digest(),
             waves=run.wave_digest(),
             contract=FINDING_CONTRACT,
-        ))
-
+        )
+        plan_text = await _collect_text(planner, plan_prompt)
         roster = team_mod.parse_roster(plan_text, max_agents=wave_size)
+
+        # One retry before giving up on the planner. A model that answered in
+        # prose or wrapped the object in a fence it malformed usually gets it
+        # right when told plainly what was wrong, and a real roster is worth
+        # far more than the fixed matrix.
+        if roster is None or not roster.workers:
+            retry_text = await _collect_text(
+                planner, plan_prompt + "\n\n" + PLANNER_RETRY_NUDGE)
+            if retry_text.strip():
+                plan_text = retry_text
+                roster = team_mod.parse_roster(retry_text, max_agents=wave_size)
+
         fell_back = roster is None or not roster.workers
         if fell_back:
             roster = fallback_roster(wave, wave_size)
@@ -873,6 +967,11 @@ async def run_hunt(
             "type": "hunt_plan", "wave": wave,
             "summary": roster.summary,
             "fell_back": fell_back,
+            # When the planner could not be read, hand the operator what it
+            # actually said. Silently swapping in the fixed matrix hides whether
+            # the fault is the prompt, the model, or a truncated turn — and that
+            # is not diagnosable from the outside.
+            "raw": plan_text if fell_back else "",
             "workers": [{"name": w.name, "brief": w.brief, "owns": w.owns}
                         for w in roster.workers],
         })
@@ -884,6 +983,7 @@ async def run_hunt(
             roster.workers, cfg,
             on_event=on_event, agent_factory=agent_factory,
             stop=run.stop, concurrency=concurrency,
+            context=brief_context(run),
         )
 
         # ---- harvest. Findings come off each agent's final text, so the loop

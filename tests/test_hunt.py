@@ -34,6 +34,7 @@ from zimzilla.config import Config  # noqa: E402
 from zimzilla.theme import get_palette  # noqa: E402
 from zimzilla.ui.app import ReconOverlay, ZimZillaApp  # noqa: E402
 from zimzilla.ui.widgets import ChatPane, ZimPane  # noqa: E402
+from rich.text import Text  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -249,7 +250,10 @@ def _hunt_factory(script):
     ``script["prompts"]`` collects every prompt the planner was handed, which is
     how the feedback edge is checked. ``script["recon_final"]`` is the recon
     agent's own report, kept separate from ``script["final"]`` so recon does not
-    silently contribute the workers' findings.
+    silently contribute the workers' findings. ``script["first_tool"]`` is the
+    ``(name, args)`` of the one tool call a worker makes, defaulting to an
+    ungated ``list_dir``; ``script["worker_prompts"]`` collects what each worker
+    was actually handed.
     """
     built: list[Agent] = []
 
@@ -281,13 +285,19 @@ def _hunt_factory(script):
                 return
 
             if state["n"] == 1:
-                # First worker turn: a harmless local tool call, so the
-                # tool-call path is exercised without touching the network.
+                # First worker turn: one tool call, so the tool-call path is
+                # exercised. Defaults to an ungated local listing — a bash stub
+                # here would really run — and a test that needs a longer or
+                # differently-shaped command overrides it through
+                # ``script["first_tool"]``.
+                script.setdefault("worker_prompts", []).append(prompt)
+                tool, tool_args = script.get("first_tool",
+                                             ("list_dir", {"path": "."}))
                 yield ({"type": "text_delta", "text": "probing"}, None)
                 yield (None, _Msg([
                     _Blk(type="text", text="probing"),
-                    _Blk(type="tool_use", id="t1", name="list_dir",
-                         input={"path": "."}),
+                    _Blk(type="tool_use", id="t1", name=tool,
+                         input=dict(tool_args)),
                 ], _Usage(100, 20)))
                 return
 
@@ -459,6 +469,167 @@ async def test_hunt_fallback_wave(wd: Path) -> None:
           any("fallback" in w for w in run.waves), str(run.waves))
     check("fallback: the campaign still ends cleanly",
           events[-1]["type"] == "hunt_end")
+
+
+async def test_brief_context(wd: Path) -> None:
+    """Every worker must be handed the recon digest, or the wave re-derives it.
+
+    Before this, a worker saw only its own brief, so all ten opened with the
+    same `ls` and the same re-read of every recon file.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "a", "brief": "test a", "owns": ["a"]},'
+              '{"name": "b", "brief": "test b", "owns": ["b"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "UNIQUE-RECON-MARKER nginx on 443, login at /login",
+        "final": "nothing found",
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    run = await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=2, concurrency=2,
+    )
+
+    # The stub records what each worker was handed the first time it is turned.
+    worker_prompts = script.get("worker_prompts", [])
+    check("context: the workers were prompted", len(worker_prompts) >= 2,
+          str(len(worker_prompts)))
+    check("context: the recon digest reaches every worker",
+          all("UNIQUE-RECON-MARKER" in p for p in worker_prompts),
+          str([p[:60] for p in worker_prompts]))
+    check("context: the brief is still carried alongside it",
+          all("test a" in p or "test b" in p for p in worker_prompts))
+    check("context: it says plainly not to re-derive",
+          all("do not spend a turn re-deriving" in p for p in worker_prompts))
+    check("context: run.recon is left whole for the planner and summary",
+          "UNIQUE-RECON-MARKER" in run.recon, run.recon[:60])
+
+    # A run with no recon at all must not prepend an empty header.
+    empty = hunt_mod.HuntRun(target="y.test", directory=wd / "y")
+    check("context: no recon means no context block",
+          hunt_mod.brief_context(empty) == "")
+
+
+def test_brief_context_truncation() -> None:
+    """A huge recon report is trimmed, and says so."""
+    from pathlib import Path as _P
+    run = hunt_mod.HuntRun(target="x.test", directory=_P("/tmp/x"))
+    run.recon = "A" * 20000
+    ctx = hunt_mod.brief_context(run, limit=100)
+    check("context: an oversized recon report is truncated",
+          len(ctx) < 1000, str(len(ctx)))
+    check("context: the truncation is admitted",
+          "truncated" in ctx, ctx[-80:])
+
+
+async def test_planner_retry(wd: Path) -> None:
+    """A garbage planner reply gets one retry before the matrix is used."""
+    roster = ('{"summary": "retried ok", "workers": ['
+              '{"name": "auth", "brief": "test auth", "owns": ["auth"]}]}')
+    # First reply is unparseable, the retry is a real roster.
+    script = {
+        "rosters": ["I am not sure what to test. Let me think about it.",
+                    roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "recon: a login form at /login",
+        "final": "nothing found",
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=2, concurrency=2,
+    )
+
+    plan = next(e for e in events if e["type"] == "hunt_plan")
+    check("retry: the planner was asked twice", script["planner_calls"] == 2,
+          str(script["planner_calls"]))
+    check("retry: the second reply is used", plan.get("fell_back") is False)
+    check("retry: the retried roster supplies the briefs",
+          [w["name"] for w in plan["workers"]] == ["auth"],
+          str([w["name"] for w in plan["workers"]]))
+    check("retry: the retry prompt says what was wrong",
+          any("could not be read as JSON" in p for p in script["prompts"]),
+          str([p[-120:] for p in script["prompts"]]))
+
+
+async def test_planner_fallback_shows_raw(wd: Path) -> None:
+    """When both attempts fail, the operator sees what the planner said."""
+    script = {
+        "rosters": ["nope", "still nope"],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "recon: nothing notable",
+        "final": "no findings",
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=2, concurrency=2,
+    )
+
+    plan = next(e for e in events if e["type"] == "hunt_plan")
+    check("fallback: it is still flagged", plan.get("fell_back") is True)
+    check("fallback: the raw reply is carried for the operator",
+          plan.get("raw", "").strip() == "still nope", repr(plan.get("raw")))
+    check("fallback: the fixed matrix still fills the wave",
+          len(plan["workers"]) == 2, str(len(plan["workers"])))
+
+
+async def test_hunt_result_event_carries_args(wd: Path) -> None:
+    """The result event must carry the command and meta, or the transcript
+    cannot render a full panel — it can only print a truncated label."""
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "a", "brief": "test a", "owns": ["a"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "recon: x",
+        "final": "nothing found",
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=1, concurrency=1,
+    )
+
+    results = [e for e in events if e["type"] == "hunt_agent_result"]
+    check("result: the tool result is reported", len(results) >= 1, str(len(results)))
+    if results:
+        r = results[0]
+        check("result: the command args ride along",
+              isinstance(r.get("args"), dict) and r["args"].get("path") == ".",
+              repr(r.get("args")))
+        check("result: the meta rides along", "meta" in r, repr(r.keys()))
+        check("result: the output is present", "output" in r)
 
 
 async def test_hunt_stops_midwave(wd: Path) -> None:
@@ -784,15 +955,253 @@ def _transcript_text(app) -> str:
 
     Read from the RainRichLog's own record of the renderables it was handed
     rather than from its rendered strips, which depend on a laid-out width.
+
+    A ``Text`` stringifies to itself, but a ``Panel`` or a ``Syntax`` does not —
+    ``str()`` on either is an object repr. Those are rendered through a
+    throwaway ``Console`` at a width wide enough that nothing wraps, so the
+    assertion is against what the operator would actually read. That matters
+    here: the tool result is a panel, and a helper that could not see inside it
+    would report every one of them as empty.
     """
+    import io
+
+    from rich.console import Console
+
     log = app.query_one(ChatPane).query_one("#transcript")
     parts: list[str] = []
     for item in getattr(log, "_blocks", []):
+        content = item[0]
         try:
-            parts.append(str(item[0]))
+            if isinstance(content, str) or isinstance(content, Text):
+                parts.append(str(content))
+                continue
+            buf = io.StringIO()
+            Console(file=buf, width=400, color_system=None,
+                    legacy_windows=False).print(content)
+            parts.append(buf.getvalue())
         except Exception:
             pass
     return "\n".join(parts)
+
+
+async def test_stop_hunt_reaches_the_loop(wd: Path) -> None:
+    """`/stop-hunt` must work *while* the hunt is running.
+
+    It could not: the app published ``self._hunt_run`` only after ``run_hunt``
+    returned, so for the entire campaign the command read ``None`` and quietly
+    refused — "no hunt is running" — while a hunt was very much running. The
+    only way out was Ctrl+C. The run is now published before the first wave.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "p", "brief": "b", "owns": ["p"]}]}')
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app._team_agent_factory = _hunt_factory(
+        {"rosters": [roster], "planner_calls": 0, "prompts": [],
+         "recon_final": "r", "final": "none"})
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        app._run_hunt("x.test")
+        await pilot.pause()
+        await pilot.pause()
+
+        # Mid-hunt: the run is live and the command can see it.
+        check("stop: the live run is published while the hunt runs",
+              app._hunt_run is not None)
+        check("stop: the run shares the app's stop flag",
+              app._hunt_run is not None
+              and app._hunt_run.stop is app._hunt_stop)
+        check("stop: the campaign is genuinely in flight", app.busy is True)
+
+        app._handle_command("/stop-hunt")
+        await pilot.pause()
+        check("stop: the command sets the flag",
+              app._hunt_stop.is_set() is True)
+
+        for _ in range(60):
+            await pilot.pause()
+            if not app.busy:
+                break
+        await pilot.pause()
+        check("stop: the loop noticed and ended", app.busy is False)
+        check("stop: the run is unpublished when it is over",
+              app._hunt_run is None)
+
+
+async def test_recon_overlay_fast_target(wd: Path) -> None:
+    """A recon that finishes in the same tick it was pushed must not crash.
+
+    The window is pushed on ``hunt_recon_start`` and popped on
+    ``hunt_recon_done``. Against a target that answers instantly both land in
+    one tick, so the pop tore the widget tree down before the queued Mount
+    message arrived and ``on_mount`` raised out of a message handler — which
+    Textual treats as an app crash. This drives that exact sequence.
+    """
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        from zimzilla.ui.app import ReconOverlay as _RO
+
+        overlay = _RO("x.test", app.palette, app.cfg)
+        app.push_screen(overlay)
+        # No pause: this is the fast target — recon is already done.
+        app._close_recon({"screen": overlay})
+        for _ in range(10):
+            await pilot.pause()
+
+        check("overlay fast: it did not strand itself on screen",
+              app.screen is not overlay, str(app.screen))
+        check("overlay fast: the shell is still alive", app.screen is not None)
+        check("overlay fast: closing twice is still safe",
+              app._close_recon({"screen": None}) is None)
+
+
+def test_hunt_tool_panel_renders_bash() -> None:
+    """The bash panel: whole command, whole response, attributed.
+
+    Rendered straight, without an app and without running anything — the point
+    is what the panel does with a real-shaped command, and a command long
+    enough that the old 70-character label would have cut the payload off the
+    end, which is where a real probe keeps it.
+    """
+    import io
+
+    from rich.console import Console
+
+    from zimzilla.ui import renderers as R
+
+    p = get_palette("zim")
+    command = ("for p in /admin /login /api/v1/users /debug /backup; do "
+               "curl -sk -o /dev/null -w \"%{http_code} $p\\n\" "
+               "\"https://x.test$p\"; done")
+    output = ("403 /admin\n200 /login\n401 /api/v1/users\n"
+              "500 /debug\n404 /backup")
+
+    buf = io.StringIO()
+    Console(file=buf, width=200, color_system=None,
+            legacy_windows=False).print(
+        R.hunt_tool_panel("bash", {"command": command}, output, p,
+                          agent="paths", color=p.accent, meta={"exit": 0}))
+    text = buf.getvalue()
+
+    check("panel: the whole command is rendered", command in text, text[:300])
+    check("panel: the tail of the command survives",
+          'https://x.test$p"; done' in text)
+    check("panel: nothing is ellipsised", "…" not in text)
+    check("panel: the response is rendered", "401 /api/v1/users" in text)
+    check("panel: the exit status is rendered", "EXIT 0" in text)
+    check("panel: the agent is named", "paths" in text, text[:200])
+    # The command must lead the body, above the output, so the two are never
+    # mistaken for each other.
+    check("panel: the command sits above its output",
+          text.index("for p in /admin") < text.index("403 /admin"))
+
+    # A failed call is bordered in red and badged with the code, not hidden.
+    buf = io.StringIO()
+    Console(file=buf, width=200, color_system=None,
+            legacy_windows=False).print(
+        R.hunt_tool_panel("bash", {"command": "nmap -sV x.test"},
+                          "no route to host", p, is_error=True,
+                          meta={"exit": 2}))
+    failed = buf.getvalue()
+    check("panel: a failure is badged with its exit code", "EXIT 2" in failed)
+    check("panel: a failure still shows the command", "nmap -sV x.test" in failed)
+
+
+async def test_transcript_shows_full_command(wd: Path) -> None:
+    """The whole point: the operator sees the real call and the real response.
+
+    Before this, a hunt call rendered as one line truncated at 70 characters and
+    the tool's response was dropped on the floor entirely — ``hunt_agent_result``
+    had no consumer at all. This drives a real campaign through the app and
+    reads back the renderables it handed the transcript.
+
+    The stub's one tool call is a ``read_file`` of a file this test writes: the
+    suite's standing rule is that a stub agent never runs ``bash``, and the
+    panel shape a bash call produces is covered directly by
+    ``test_hunt_tool_panel_renders_bash``.
+    """
+    (wd / "surface.txt").write_text(
+        "alpha /admin 403\nbeta /login 200\ngamma /api/v1/users 401\n")
+
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "paths", "brief": "test paths", "owns": ["paths"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "recon: a login form, nginx, 443 open",
+        "first_tool": ("read_file", {"path": "surface.txt"}),
+        "final": "nothing confirmed",
+    }
+    factory = _hunt_factory(script)
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app._team_agent_factory = factory
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        # Stop the campaign from inside the event stream, exactly the way the
+        # operator does — `/stop-hunt` sets the run's stop flag and the loop
+        # notices it at the next wave boundary. Driving it from the test loop
+        # instead would race: the stub agent completes a whole wave per
+        # scheduler slice, so dozens can pass between two `pilot.pause()`es and
+        # the command lands after the campaign has already ended on its own.
+        #
+        # The stop is issued at the start of the *second* turn, which is after
+        # the tool call and its result have been through the transcript — that
+        # ordering is the whole point of this test.
+        real_factory = app._team_agent_factory
+
+        def stopping_factory(cfg, **kw):
+            agent = real_factory(cfg, **kw)
+            stream = agent._stream_once
+            calls = {"n": 0}
+
+            async def stopping_stream():
+                calls["n"] += 1
+                if calls["n"] == 2 and app._hunt_run is not None:
+                    app._handle_command("/stop-hunt")
+                async for ev in stream():
+                    yield ev
+
+            agent._stream_once = stopping_stream
+            return agent
+
+        app._team_agent_factory = stopping_factory
+        app._run_hunt("x.test")
+        for _ in range(80):
+            await pilot.pause()
+            if not app.busy:
+                break
+        await pilot.pause()
+
+        check("transcript: the hunt stopped on command", app.busy is False)
+        check("transcript: /stop-hunt actually reached the loop",
+              app._hunt_run is None, str(app._hunt_run))
+
+        text = _transcript_text(app)
+        # The response, which used to be discarded outright.
+        check("transcript: the tool's output is rendered",
+              "gamma /api/v1/users 401" in text, text[-600:])
+        # The call, and the file it named.
+        check("transcript: the call is rendered", "surface.txt" in text)
+        # And it is attributed, so ten interleaved agents stay followable.
+        check("transcript: the panel names the agent", "paths" in text)
+
+        # The result must be a panel, not a bare line of text.
+        log = app.query_one(ChatPane).query_one("#transcript")
+        panels = [b for b in getattr(log, "_blocks", [])
+                  if type(b[0]).__name__ == "Panel"]
+        check("transcript: the result is a panel", len(panels) >= 1,
+              str(len(panels)))
 
 
 async def test_busy_gate(wd: Path) -> None:
@@ -868,6 +1277,8 @@ async def main() -> int:
     test_parse_findings()
     test_fallback()
     test_planner_fallback_path()
+    test_brief_context_truncation()
+    test_hunt_tool_panel_renders_bash()
     test_pane()
 
     with tempfile.TemporaryDirectory() as td:
@@ -876,10 +1287,17 @@ async def main() -> int:
         await test_hunt_loop(wd)
         await test_hunt_replans_from_findings(wd)
         await test_hunt_fallback_wave(wd)
+        await test_brief_context(wd)
+        await test_planner_retry(wd)
+        await test_planner_fallback_shows_raw(wd)
+        await test_hunt_result_event_carries_args(wd)
         await test_hunt_stops_midwave(wd)
         await test_hunt_summary_flag(wd)
         await test_recon_reports_live(wd)
         await test_recon_overlay(wd)
+        await test_stop_hunt_reaches_the_loop(wd)
+        await test_recon_overlay_fast_target(wd)
+        await test_transcript_shows_full_command(wd)
         await test_busy_gate(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]

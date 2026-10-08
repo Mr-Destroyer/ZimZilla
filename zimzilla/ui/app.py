@@ -14,6 +14,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import MouseUp, TextSelected
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
@@ -156,13 +157,24 @@ class ReconOverlay(ModalScreen[None]):
                 yield Static(id="recon-lines")
 
     def on_mount(self) -> None:
+        # A recon that finishes before this screen has mounted is not
+        # hypothetical: a target that answers instantly runs recon to its
+        # conclusion in the same tick it was pushed from, and `run_hunt` pops
+        # the window as soon as recon is done. The pop tears the widget tree
+        # down before the queued Mount message lands, so the children are
+        # already gone by the time this runs — `query_one` then raises out of a
+        # message handler, which Textual treats as an app crash. An overlay
+        # that is on its way off screen has nothing to paint.
         p = self.palette
         t = Text()
         t.append("  ⟩ RECON  ", style=f"bold {p.bg} on {p.accent}")
         t.append("  mapping ", style=p.dim)
         t.append(self.target, style=f"bold {p.primary}")
-        self.query_one("#recon-title", Static).update(t)
-        self._paint_status()
+        try:
+            self.query_one("#recon-title", Static).update(t)
+            self._paint_status()
+        except NoMatches:
+            return
 
     def note(self, event: dict) -> None:
         """Apply one recon event and repaint."""
@@ -193,12 +205,14 @@ class ReconOverlay(ModalScreen[None]):
         self.lines.append(line)
         if len(self.lines) > 200:
             self.lines = self.lines[-200:]
-        self.query_one("#recon-lines", Static).update(
-            Text("\n").join(self.lines[-40:])
-        )
         try:
+            self.query_one("#recon-lines", Static).update(
+                Text("\n").join(self.lines[-40:])
+            )
             self.query_one("#recon-log", VerticalScroll).scroll_end(animate=False)
-        except Exception:
+        except NoMatches:
+            # Torn down before it could mount — see on_mount. The lines are
+            # still kept, so nothing is lost if it does come up.
             pass
 
     def _paint_status(self) -> None:
@@ -211,7 +225,10 @@ class ReconOverlay(ModalScreen[None]):
         t.append(f"{elapsed // 60}:{elapsed % 60:02d}", style=p.primary)
         t.append("   ·   ", style=p.dim)
         t.append("working", style=f"bold {p.accent}")
-        self.query_one("#recon-status", Static).update(t)
+        try:
+            self.query_one("#recon-status", Static).update(t)
+        except NoMatches:
+            pass
 
 
 class ZimZillaApp(App):
@@ -2222,8 +2239,21 @@ class ZimZillaApp(App):
         self._hunt_stop = asyncio.Event()
         self._hunt_summary_queued = False
         self._hunt_tokens = (0, 0, 0.0)
+        # Publish the run *before* the loop starts, not after it returns. This
+        # is what `/stop-hunt` and `/summary-hunt` read, and the loop does not
+        # return until the campaign is over — so publishing it at the end, as
+        # this once did, left both commands looking at None for the entire hunt
+        # and quietly refusing to do anything. The run object is handed to
+        # run_hunt rather than built there so there is exactly one of it.
+        self._hunt_run = hunt_mod.HuntRun(
+            target=target, directory=hunt_mod.case_dir(self.cfg, target))
 
         counter = {"running": 0, "total": 0, "wave": 0}
+        #: name -> colour, so a tool line, its prose and its result panel all
+        #: agree on which agent they belong to. Ten interleaved agents are
+        #: unreadable without that. Keyed by name because the result event
+        #: carries the name and not the index.
+        colors: dict[str, str] = {}
         #: The live recon window, while recon is running. Held here so the
         #: worker can pop exactly the screen it pushed, and so a stop mid-recon
         #: can take it down from the `finally`.
@@ -2282,6 +2312,15 @@ class ZimZillaApp(App):
                     self._sys_line(
                         "planner reply unreadable — using the fixed vector matrix",
                         warn=True)
+                    # Show what it actually said. Without this the operator
+                    # cannot tell a prose-wrapped reply from an empty turn from
+                    # a prompt that needs rewriting.
+                    raw = (ev.get("raw") or "").strip()
+                    if raw:
+                        head = raw[:400] + ("…" if len(raw) > 400 else "")
+                        chat.write_block(R.agent_line("planner", head, p.amber, p))
+                    else:
+                        self._sys_line("  (the planner returned nothing)", warn=True)
                 if ev.get("summary"):
                     self._sys_line(ev["summary"])
                 names = ", ".join(w["name"] for w in ev.get("workers") or [])
@@ -2290,20 +2329,45 @@ class ZimZillaApp(App):
 
             elif etype == "hunt_agent_start":
                 counter["running"] += 1
+                color = agent_color(ev.get("index", 0), p)
+                colors[ev.get("name", "")] = color
                 brief = ev.get("brief", "")
                 if len(brief) > 96:
                     brief = brief[:95] + "…"
                 chat.write_block(R.agent_event_line(
-                    ev["name"], agent_color(ev.get("index", 0), p), "▸", brief, p))
+                    ev["name"], color, "▸", brief, p))
                 bar.set_activity(
                     f"hunt w{counter['wave']} {counter['running']}/{counter['total']}",
                     busy=True)
 
             elif etype == "hunt_agent_tool":
                 chat.write_block(R.agent_event_line(
-                    ev["name"], p.dim, ev.get("tool", "?"),
+                    ev["name"], colors.get(ev.get("name", ""), p.dim),
+                    ev.get("tool", "?"),
                     tools_mod.summarise_call(
                         ev.get("tool", ""), ev.get("args") or {}, self.cfg), p))
+
+            elif etype == "hunt_agent_text":
+                # The worker's own reasoning. Dropped before, which meant the
+                # transcript showed commands with no explanation of why they
+                # were run.
+                chat.write_block(R.agent_line(
+                    ev["name"], ev.get("text", ""), p.dim, p))
+
+            elif etype == "hunt_agent_result":
+                # The other half of the call above: what the command actually
+                # returned. Rendered as the same panel a normal turn uses, so
+                # the operator sees the real command and the real response.
+                if ev.get("blocked"):
+                    chat.write_block(R.blocked_block(ev.get("output", ""), p))
+                else:
+                    chat.write_block(R.hunt_tool_panel(
+                        ev.get("tool", "?"), ev.get("args") or {},
+                        ev.get("output", ""), p,
+                        agent=ev.get("name", ""),
+                        color=colors.get(ev.get("name", ""), ""),
+                        is_error=not ev.get("ok"),
+                        meta=ev.get("meta") or {}))
 
             elif etype == "hunt_agent_done":
                 counter["running"] = max(0, counter["running"] - 1)
@@ -2346,14 +2410,14 @@ class ZimZillaApp(App):
         spinner = asyncio.create_task(self._verb_spinner())
 
         try:
-            run = await hunt_mod.run_hunt(
+            await hunt_mod.run_hunt(
                 self.cfg, target,
                 on_event=on_event,
                 agent_factory=self._team_agent_factory,
                 stop=self._hunt_stop,
                 summary_flag=lambda: self._hunt_summary_queued,
+                run=self._hunt_run,
             )
-            self._hunt_run = run
             # A summary asked for but never delivered — the hunt was stopped
             # between the request and a wave boundary. Offer it now rather than
             # silently dropping it.
@@ -2394,11 +2458,28 @@ class ZimZillaApp(App):
         permission modal, and a blind pop would dismiss *that* instead — leaving
         the recon window stranded over the shell. Idempotent, because both the
         recon-done event and the worker's ``finally`` call it.
+
+        The pop is deferred a tick when the screen has not mounted yet. A fast
+        target finishes recon before its window is on screen, and popping in the
+        same tick it was pushed tears the tree down ahead of the queued Mount
+        message — the overlay then raises on a child that is already gone. One
+        tick lets it come up and go down cleanly, and the operator never sees it
+        because nothing paints in between.
         """
         screen = overlay.get("screen")
         overlay["screen"] = None
         if screen is None:
             return
+        try:
+            if not screen.is_mounted:
+                self.call_after_refresh(self._close_recon_screen, screen)
+            elif self.screen is screen:
+                self.pop_screen()
+        except Exception:
+            pass
+
+    def _close_recon_screen(self, screen) -> None:
+        """The deferred half of ``_close_recon`` — pop it if it is still up."""
         try:
             if self.screen is screen:
                 self.pop_screen()
