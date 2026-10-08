@@ -437,16 +437,23 @@ class StatusBar(Static):
 
 
 class ZimPane(Static):
-    """Live campaign rail: hits, credentials, local + public URLs.
+    """Live campaign rail: two views, one pane.
 
-    Hidden until `/phish` starts a campaign. The engine pushes events onto
-    a thread-safe queue; the app drains that queue on the 0.25s rail tick
-    and calls ``note()``, so the HTTP thread never touches Textual.
+    **phish** (default) — hits, credentials, local + public URLs. Hidden until
+    `/phish` starts a campaign. The engine pushes events onto a thread-safe
+    queue; the app drains that queue on the 0.25s rail tick and calls
+    ``note()``, so the HTTP thread never touches Textual.
+
+    **hunt** — what `/bug-hunt`'s agents are doing right now. Ten agents run
+    concurrently but only ``HUNT_SLOTS`` of them fit legibly in 36 columns, so
+    the pane shows the most recently active ones with their current activity;
+    the status bar carries the aggregate for all ten. ``show_hunt`` switches
+    the pane into this view.
 
     The chrome is mouse-driven: ``[–]`` minimizes to a stub, ``[×]`` hides
     the pane (the campaign keeps running), and dragging the left gutter
-    resizes the width. ``show_campaign`` restores a closed or minimized
-    pane so a new ``/phish`` is never invisible.
+    resizes the width. ``show_campaign`` and ``show_hunt`` restore a closed or
+    minimized pane so a new run is never invisible.
     """
 
     DEFAULT_CSS = """
@@ -473,6 +480,10 @@ class ZimPane(Static):
 
     MAX_HITS = 8
     MAX_CREDS = 6
+    #: Hunt agents shown at once. Ten run concurrently, but ten live activity
+    #: lines do not fit a 36-column pane — the most recently active five do,
+    #: and the status bar carries the count for the rest.
+    HUNT_SLOTS = 5
     MIN_WIDTH = 18
     MAX_WIDTH = 80
     DEFAULT_WIDTH = 36
@@ -483,6 +494,10 @@ class ZimPane(Static):
     def __init__(self, palette: Palette, **kwargs) -> None:
         super().__init__(**kwargs)
         self.palette = palette
+        #: Which campaign the pane is showing: "phish" or "hunt". The two views
+        #: share the chrome (minimize, close, resize) and nothing else, so a
+        #: hunt never renders phish labels or vice versa.
+        self.view = "phish"
         self.host = ""
         self.local_url = ""
         self.public_url = ""
@@ -492,6 +507,17 @@ class ZimPane(Static):
         self.alive = False
         self.hits: list[dict] = []
         self.creds: list[dict] = []
+        # ---- hunt view state
+        self.hunt_target = ""
+        self.hunt_wave = 0
+        self.hunt_size = 0
+        self.hunt_done = 0
+        self.hunt_running = False
+        #: name -> {activity, status, index}. Ordered by first appearance; the
+        #: pane renders the tail, so the most recently active agents are the
+        #: ones on screen.
+        self.hunt_agents: dict[str, dict] = {}
+        self.hunt_severity: dict[str, int] = {}
         self.minimized = False
         self._width = self.DEFAULT_WIDTH
         self._dragging = False
@@ -499,6 +525,7 @@ class ZimPane(Static):
         self._drag_origin_width = self.DEFAULT_WIDTH
 
     def show_campaign(self, host: str) -> None:
+        self.view = "phish"
         self.host = host
         self.local_url = ""
         self.public_url = ""
@@ -514,8 +541,118 @@ class ZimPane(Static):
         self._apply_width(self._width or self.DEFAULT_WIDTH)
         self.render_pane()
 
+    def show_hunt(self, target: str, size: int = 0) -> None:
+        """Switch the pane into the hunt view and make it visible."""
+        self.view = "hunt"
+        self.hunt_target = target
+        self.hunt_wave = 0
+        self.hunt_size = size
+        self.hunt_done = 0
+        self.hunt_running = True
+        self.hunt_agents.clear()
+        self.hunt_severity.clear()
+        self.minimized = False
+        self.remove_class("minimized")
+        self.add_class("visible")
+        self._apply_width(self._width or self.DEFAULT_WIDTH)
+        self.render_pane()
+
+    def note_hunt(self, event: dict) -> None:
+        """Apply one hunt event and repaint.
+
+        Called on the UI thread from the app's hunt worker, so unlike phish's
+        ``note`` there is no queue in front of it.
+        """
+        kind = event.get("type")
+
+        if kind == "hunt_wave_start":
+            self.hunt_wave = event.get("wave", self.hunt_wave)
+            self.hunt_size = event.get("size", self.hunt_size) or self.hunt_size
+            self.hunt_done = 0
+            self.hunt_running = True
+            # A new wave re-briefs the roster, so the previous wave's activity
+            # lines are stale. Keep the map but mark everything as queued; the
+            # agents that actually start will overwrite their own entry.
+            for state in self.hunt_agents.values():
+                if state.get("status") == "running":
+                    state["status"] = "queued"
+                    state["activity"] = "waiting"
+
+        elif kind == "hunt_agent_start":
+            name = event.get("name", "?")
+            state = self.hunt_agents.setdefault(
+                name, {"activity": "", "status": "running", "index": event.get("index", 0)}
+            )
+            state["status"] = "running"
+            state["activity"] = "starting"
+            # Re-insert so the dict's order reflects activity, not first sight:
+            # the pane shows the tail, and the agent that just moved is the one
+            # the operator wants to see.
+            self.hunt_agents.pop(name, None)
+            self.hunt_agents[name] = state
+
+        elif kind == "hunt_agent_tool":
+            state = self._hunt_state(event.get("name"))
+            if state is not None:
+                tool = event.get("tool", "?")
+                state["activity"] = f"{tool} {self._brief_hint(event.get('args'))}".strip()
+                self._touch(event.get("name"))
+
+        elif kind == "hunt_agent_text":
+            state = self._hunt_state(event.get("name"))
+            if state is not None:
+                line = (event.get("text") or "").strip().splitlines()
+                if line:
+                    state["activity"] = line[-1][:40]
+                self._touch(event.get("name"))
+
+        elif kind == "hunt_agent_done":
+            state = self._hunt_state(event.get("name"))
+            if state is not None:
+                state["status"] = "done" if event.get("ok") else "failed"
+                state["activity"] = "done" if event.get("ok") else "failed"
+                self._touch(event.get("name"))
+            self.hunt_done = min(self.hunt_done + 1, self.hunt_size or self.hunt_done + 1)
+
+        elif kind == "hunt_finding":
+            f = event.get("finding") or {}
+            sev = str(f.get("severity") or "info").lower()
+            self.hunt_severity[sev] = self.hunt_severity.get(sev, 0) + 1
+
+        elif kind == "hunt_end":
+            self.hunt_running = False
+            self.alive = False
+
+        self.render_pane()
+
+    def _hunt_state(self, name) -> dict | None:
+        if not name:
+            return None
+        return self.hunt_agents.get(str(name))
+
+    def _touch(self, name) -> None:
+        """Move *name* to the end of the activity order."""
+        if not name:
+            return
+        state = self.hunt_agents.pop(str(name), None)
+        if state is not None:
+            self.hunt_agents[str(name)] = state
+
+    @staticmethod
+    def _brief_hint(args) -> str:
+        """A one-glance hint of what a tool call is aimed at."""
+        if not isinstance(args, dict):
+            return ""
+        for key in ("command", "path", "url", "query", "pattern"):
+            value = args.get(key)
+            if value:
+                text = str(value).strip().splitlines()[0]
+                return text[:24]
+        return ""
+
     def hide(self) -> None:
         self.alive = False
+        self.hunt_running = False
         self.minimized = False
         self.remove_class("visible")
         self.remove_class("minimized")
@@ -596,15 +733,24 @@ class ZimPane(Static):
         if self.minimized:
             t.append(" ZIM\n", style=f"bold {p.accent}")
             t.append(" [+][×]\n", style=p.dim)
-            if self.host:
+            label = self.hunt_target if self.view == "hunt" else self.host
+            if label:
                 t.append(" ", style=p.dim)
-                t.append((self.host[:10] + "…") if len(self.host) > 10
-                         else self.host, style=p.primary)
+                t.append((label[:10] + "…") if len(label) > 10 else label,
+                         style=p.primary)
                 t.append("\n")
-            t.append(" LIVE\n" if self.alive else " ---\n",
-                     style=f"bold {p.accent}" if self.alive else p.dim)
-            t.append(f" {len(self.creds)} cred\n", style=p.primary)
+            live = self.hunt_running if self.view == "hunt" else self.alive
+            t.append(" LIVE\n" if live else " ---\n",
+                     style=f"bold {p.accent}" if live else p.dim)
+            if self.view == "hunt":
+                t.append(f" {sum(self.hunt_severity.values())} find\n", style=p.primary)
+            else:
+                t.append(f" {len(self.creds)} cred\n", style=p.primary)
             self.update(t)
+            return
+
+        if self.view == "hunt":
+            self._render_hunt(t)
             return
 
         t.append("ZIM-PANE", style=f"bold {p.accent}")
@@ -679,6 +825,77 @@ class ZimPane(Static):
         t.append("\n")
         t.append("drag left edge to resize\n", style=p.dim)
         t.append("/phish stop  to tear down\n", style=p.dim)
+        self.update(t)
+
+    # ---- hunt view --------------------------------------------------------
+    def _render_hunt(self, t: Text) -> None:
+        """The `/bug-hunt` view: what each agent is doing, right now."""
+        p = self.palette
+        t.append("ZIM-PANE", style=f"bold {p.accent}")
+        t.append("  [–][×]\n", style=p.dim)
+
+        t.append("hunt   ", style=p.dim)
+        t.append(self.hunt_target or "?", style=f"bold {p.primary}")
+        t.append("\n")
+
+        state = "LIVE" if self.hunt_running else "stopped"
+        t.append("state  ", style=p.dim)
+        t.append(state + "\n", style=f"bold {p.accent}" if self.hunt_running else p.amber)
+
+        if self.hunt_wave:
+            total = self.hunt_size or len(self.hunt_agents) or 0
+            t.append("wave   ", style=p.dim)
+            t.append(f"{self.hunt_wave}  ", style=f"bold {p.primary}")
+            t.append(f"{self.hunt_done}/{total} done\n", style=p.dim)
+
+        # Findings, worst first — the whole point of the pane during a hunt.
+        found = sum(self.hunt_severity.values())
+        t.append("\n")
+        t.append("FINDINGS", style=f"bold {p.accent}")
+        t.append(f"  {found}\n", style=p.dim)
+        if not found:
+            t.append("  (none yet)\n", style=p.dim)
+        else:
+            for sev in ("critical", "high", "medium", "low", "info"):
+                n = self.hunt_severity.get(sev, 0)
+                if not n:
+                    continue
+                style = {
+                    "critical": f"bold {p.red}",
+                    "high": p.amber,
+                    "medium": p.primary,
+                }.get(sev, p.dim)
+                t.append(f"  {sev:<9}", style=style)
+                t.append(f"{n}\n", style=p.dim)
+
+        # The agents, most recently active last. Ten run at once but only
+        # HUNT_SLOTS fit; the tail is what is moving.
+        t.append("\n")
+        t.append("AGENTS", style=f"bold {p.accent}")
+        t.append(f"  {len(self.hunt_agents)}\n", style=p.dim)
+        if not self.hunt_agents:
+            t.append("  (waiting)\n", style=p.dim)
+        else:
+            for name, st in list(self.hunt_agents.items())[-self.HUNT_SLOTS:]:
+                status = st.get("status", "running")
+                mark, style = {
+                    "running": ("▸", f"bold {p.accent}"),
+                    "queued": ("·", p.dim),
+                    "done": ("✔", p.primary),
+                    "failed": ("✘", p.amber),
+                }.get(status, ("·", p.dim))
+                t.append(f"  {mark} ", style=style)
+                t.append(name[:14] + "\n", style=f"bold {p.primary}"
+                         if status == "running" else p.dim)
+                activity = st.get("activity") or ""
+                if activity and status == "running":
+                    if len(activity) > 30:
+                        activity = activity[:29] + "…"
+                    t.append(f"    {activity}\n", style=p.dim)
+
+        t.append("\n")
+        t.append("drag left edge to resize\n", style=p.dim)
+        t.append("/stop-hunt  to end the hunt\n", style=p.dim)
         self.update(t)
 
     # ---- mouse chrome -----------------------------------------------------

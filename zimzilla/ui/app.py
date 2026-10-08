@@ -17,6 +17,7 @@ from textual.events import MouseUp, TextSelected
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from .. import hunt as hunt_mod
 from .. import osint as osint_mod
 from .. import phish as phish_mod
 from .. import session as session_mod
@@ -268,6 +269,17 @@ class ZimZillaApp(App):
         # without this the synthesis turn would overwrite the bar and drop the
         # workers' tokens and cost — the team's spend would vanish from view.
         self._team_tokens: tuple[int, int, float] = (0, 0, 0.0)
+        # ---- /bug-hunt campaign state.
+        # The stop flag is created once and reused, so /stop-hunt can set it
+        # from the prompt while the hunt worker is mid-wave. _hunt_run is the
+        # live campaign (None when idle); _hunt_summary_queued is what
+        # /summary-hunt sets when it is asked for mid-run — the summary runs at
+        # the next wave boundary, because two turns streaming through the same
+        # transcript at once corrupts it.
+        self._hunt_stop = asyncio.Event()
+        self._hunt_run = None
+        self._hunt_summary_queued = False
+        self._hunt_tokens: tuple[int, int, float] = (0, 0, 0.0)
         # `/phish` events arrive on the HTTP thread. The queue is the only
         # crossing: the 0.25s rail tick drains it onto ZimPane on the UI
         # thread. A lock is enough — these are tiny dicts, not renderables.
@@ -638,13 +650,19 @@ class ZimZillaApp(App):
         self._completer().remove_class("visible")
         if not text:
             return
+        # A slash command is dispatched *before* the busy check, because some
+        # commands have to work while a run is in flight — `/stop-hunt` and
+        # `/summary-hunt` are useless otherwise, and a hunt that cannot be
+        # stopped from the prompt is a hunt you can only kill with Ctrl+C.
+        # _handle_command decides which commands those are; everything else
+        # still refuses when busy.
+        if text.startswith("/"):
+            self._handle_command(text)
+            return
         if self.busy:
             self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
             return
-        if text.startswith("/"):
-            self._handle_command(text)
-        else:
-            self._run_turn(self._expand_at_refs(text))
+        self._run_turn(self._expand_at_refs(text))
 
     # ---- turn worker ------------------------------------------------------
     @work(exclusive=True)
@@ -945,6 +963,16 @@ class ZimZillaApp(App):
         self.query_one(ChatPane).write_block(t)
 
     # ---- slash commands ---------------------------------------------------
+    #: Commands that answer even while the harness is busy. These are the ones
+    #: that either report state, control a running campaign, or shut the session
+    #: down — none of them starts a turn on `self.agent`, which is what makes
+    #: running them mid-flight safe. Everything else is a launcher and would
+    #: interleave a second turn into the transcript of the first.
+    BUSY_OK = frozenset({
+        "help", "cost", "scope", "mode", "model",
+        "stop-hunt", "summary-hunt", "exit", "quit",
+    })
+
     def _handle_command(self, text: str) -> None:
         parts = text[1:].split()
         cmd = parts[0].lower() if parts else "help"
@@ -964,6 +992,9 @@ class ZimZillaApp(App):
             "team": lambda a: self._cmd_team(a),
             "osint": lambda a: self._cmd_osint(a),
             "phish": lambda a: self._cmd_phish(a),
+            "bug-hunt": lambda a: self._cmd_bug_hunt(a),
+            "stop-hunt": lambda a: self._cmd_stop_hunt(a),
+            "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-source": lambda a: self._cmd_zim_source(None),
@@ -973,6 +1004,11 @@ class ZimZillaApp(App):
         fn = dispatch.get(cmd)
         if fn is None:
             self._sys_line(f"unknown command: /{cmd}  — try /help", warn=True)
+            return
+        # The gate lives here rather than in _on_submit so a busy-permitted
+        # command can still be dispatched while a run is cooking. See BUSY_OK.
+        if self.busy and cmd not in self.BUSY_OK:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
             return
         fn(args)
 
@@ -996,6 +1032,9 @@ class ZimZillaApp(App):
             ("/team <task>", "fan the task out across parallel agents"),
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
+            ("/bug-hunt <target>", "recon, then waves of 10 agents until stopped"),
+            ("/stop-hunt", "end a running hunt       (works while busy)"),
+            ("/summary-hunt", "write the hunt report    (works while busy)"),
             ("/exit", "leave the harness        (Ctrl+D also works)"),
         ]
         t = Text()
@@ -1892,6 +1931,310 @@ class ZimZillaApp(App):
         except Exception:
             return None
 
+    # ---- /bug-hunt --------------------------------------------------------
+    def _cmd_bug_hunt(self, args) -> None:
+        """/bug-hunt <target> — recon, then waves of 10 agents until stopped.
+
+        The campaign is a loop, not a turn: recon maps the target, a read-only
+        planner writes ten briefs, all ten run at once, their findings feed the
+        next planner, and it repeats until /stop-hunt. See zimzilla/hunt.py.
+        """
+        if not args:
+            self._hunt_usage()
+            return
+
+        target = " ".join(args).strip()
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        # Warn but proceed. AGENTS.md treats any target the operator declares as
+        # authorised, so an unarmed session is a notice, not a refusal — but the
+        # out-of-scope guard still hard-blocks mid-hunt, and an operator who
+        # does not know the session is unarmed would read that as a failure.
+        allowed, reason = self.agent.scope.allows(target)
+        p = self.palette
+        if not allowed:
+            self._sys_line(f"⚠ not in allow.yaml — {reason}", warn=True)
+            self._sys_line("hunting anyway; out-of-scope hosts stay hard-blocked")
+
+        directory = hunt_mod.case_dir(self.cfg, target)
+
+        t = Text()
+        t.append("  ◈ HUNT      ", style=f"bold {p.accent}")
+        t.append(f"{target}\n", style=f"bold {p.primary}")
+        t.append("  ◈ WAVE      ", style=f"bold {p.accent}")
+        t.append(f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent\n", style=p.primary)
+        t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
+        t.append(str(directory) + "\n", style=p.dim)
+        t.append("  ◈ NOTICE    ", style=f"bold {p.amber}")
+        t.append(
+            "authorised use only — your own asset, a consented audit, "
+            "or a declared engagement\n",
+            style=p.dim,
+        )
+        t.append("  · ", style=p.dim)
+        t.append("/stop-hunt", style=p.primary)
+        t.append(" ends the campaign   ·   ", style=p.dim)
+        t.append("/summary-hunt", style=p.primary)
+        t.append(" writes the report\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+        pane = self._zim_pane()
+        if pane is not None:
+            pane.show_hunt(target, hunt_mod.HUNT_WAVE_SIZE)
+
+        self._run_hunt(target)
+
+    def _hunt_usage(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  BUG HUNT\n\n", style=f"bold {p.accent}")
+        t.append("  /bug-hunt <target>   ", style=f"bold {p.primary}")
+        t.append("recon, then waves of 10 agents until you stop it\n", style=p.dim)
+        t.append("  /stop-hunt           ", style=f"bold {p.primary}")
+        t.append("end the campaign and print what it found\n", style=p.dim)
+        t.append("  /summary-hunt        ", style=f"bold {p.primary}")
+        t.append("write the closing report (works mid-hunt)\n", style=p.dim)
+        t.append("\n  Each wave: the planner reads what every earlier wave found and\n",
+                 style=p.dim)
+        t.append("  aims the next ten somewhere new. Run it under ", style=p.dim)
+        t.append("/mode zim", style=p.primary)
+        t.append(" so the\n  agents follow your AGENTS.md doctrine.\n", style=p.dim)
+        t.append("\n  evidence lands in ", style=p.dim)
+        t.append(f"{Path(self.cfg.state_dir) / 'hunts'}/<target>-<stamp>/\n",
+                 style=p.primary)
+        self.query_one(ChatPane).write_block(t)
+
+    def _cmd_stop_hunt(self, args) -> None:
+        """/stop-hunt — end the campaign. Works while the harness is busy."""
+        run = self._hunt_run
+        if run is None:
+            self._sys_line("no hunt is running", warn=True)
+            return
+        self._hunt_stop.set()
+        self._sys_line("stop requested — cancelling the wave…", warn=True)
+
+    def _cmd_summary_hunt(self, args) -> None:
+        """/summary-hunt — the closing report.
+
+        Mid-hunt this only *queues* the summary: it runs at the next wave
+        boundary, because a second turn streaming into the same transcript
+        would corrupt the one already running. With no hunt live, it writes the
+        report straight from the archived findings of the most recent campaign.
+        """
+        if self._hunt_run is not None:
+            self._hunt_summary_queued = True
+            self._sys_line(
+                f"summary queued — it runs at the end of wave "
+                f"{self._hunt_run.wave}", ok=True,
+            )
+            return
+
+        latest = self._latest_hunt_dir()
+        if latest is None:
+            self._sys_line("no hunt has run in this session yet", warn=True)
+            return
+        run = hunt_mod.load_run(latest)
+        if run is None:
+            self._sys_line(f"no findings archived in {latest}", warn=True)
+            return
+        self._run_summary(run)
+
+    def _latest_hunt_dir(self) -> Path | None:
+        """The most recent campaign directory, or None."""
+        root = Path(self.cfg.state_dir) / "hunts"
+        if not root.is_dir():
+            return None
+        dirs = [d for d in root.iterdir() if d.is_dir()]
+        if not dirs:
+            return None
+        return max(dirs, key=lambda d: d.stat().st_mtime)
+
+    @work(exclusive=True)
+    async def _run_summary(self, run) -> None:
+        """Write a closing report for a finished campaign, off the UI thread."""
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        bar = self.query_one(StatusBar)
+        self.busy = True
+        bar.set_activity("writing the hunt report", busy=True)
+        chat.write_block(R.turn_marker(self.agent.turn_count + 1, p))
+        chat.write_block(R.user_prompt_block("⚑ /summary-hunt", p))
+        try:
+            text = ""
+            async for ev in self.agent.run_turn(hunt_mod.summary_prompt(run)):
+                if ev.get("type") == "text_delta":
+                    text += ev.get("text", "")
+                await self._handle_event(ev)
+            path = hunt_mod.write_summary(self.cfg, run, text)
+            self._sys_line(f"report archived: {path}", ok=True)
+        except Exception as e:  # noqa: BLE001
+            chat.write_block(R.error_block(
+                f"summary failed: {type(e).__name__}: {e}", p))
+        finally:
+            self.busy = False
+            bar.set_activity("idle", busy=False)
+            bar.render_bar()
+            self._sync_rails()
+            self.query_one("#input", Input).focus()
+
+    @work(exclusive=True)
+    async def _run_hunt(self, target: str) -> None:
+        """The campaign worker: recon, then waves until /stop-hunt.
+
+        Shaped like _run_team — busy flag, an on_event sink, a spinner, and a
+        finally that restores idle state — but the loop inside lives in
+        zimzilla/hunt.py so it can be tested without a terminal.
+        """
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        bar = self.query_one(StatusBar)
+        pane = self._zim_pane()
+
+        self.busy = True
+        self._cancelled = False
+        self._set_rain(False)
+        self._hunt_stop = asyncio.Event()
+        self._hunt_summary_queued = False
+        self._hunt_tokens = (0, 0, 0.0)
+
+        counter = {"running": 0, "total": 0, "wave": 0}
+
+        async def on_event(ev: dict) -> None:
+            if self._cancelled:
+                return
+            etype = ev.get("type")
+
+            if pane is not None:
+                pane.note_hunt(ev)
+
+            if etype == "hunt_recon_start":
+                self._sys_line("recon — mapping the target…")
+                bar.set_activity("hunt: recon", busy=True)
+
+            elif etype == "hunt_recon_done":
+                text = (ev.get("text") or "").strip()
+                if text:
+                    chat.write_block(R.agent_line("recon", text, p.accent, p))
+                self._sys_line("recon done — planning wave 1", ok=True)
+
+            elif etype == "hunt_wave_start":
+                counter["wave"] = ev.get("wave", 0)
+                counter["total"] = ev.get("size", 0)
+                counter["running"] = 0
+                chat.write_block(R.turn_marker(
+                    self.agent.turn_count + counter["wave"], p))
+                chat.write_block(R.user_prompt_block(
+                    f"⚑ wave {counter['wave']} · {counter['total']} agents", p))
+
+            elif etype == "hunt_plan":
+                if ev.get("fell_back"):
+                    self._sys_line(
+                        "planner reply unreadable — using the fixed vector matrix",
+                        warn=True)
+                if ev.get("summary"):
+                    self._sys_line(ev["summary"])
+                names = ", ".join(w["name"] for w in ev.get("workers") or [])
+                if names:
+                    self._sys_line(f"launching {len(ev['workers'])} — {names}", ok=True)
+
+            elif etype == "hunt_agent_start":
+                counter["running"] += 1
+                brief = ev.get("brief", "")
+                if len(brief) > 96:
+                    brief = brief[:95] + "…"
+                chat.write_block(R.agent_event_line(
+                    ev["name"], agent_color(ev.get("index", 0), p), "▸", brief, p))
+                bar.set_activity(
+                    f"hunt w{counter['wave']} {counter['running']}/{counter['total']}",
+                    busy=True)
+
+            elif etype == "hunt_agent_tool":
+                chat.write_block(R.agent_event_line(
+                    ev["name"], p.dim, ev.get("tool", "?"),
+                    tools_mod.summarise_call(
+                        ev.get("tool", ""), ev.get("args") or {}, self.cfg), p))
+
+            elif etype == "hunt_agent_done":
+                counter["running"] = max(0, counter["running"] - 1)
+                if not ev.get("ok"):
+                    self._sys_line(
+                        f"  {ev['name']} failed — {ev.get('error', 'unknown')}",
+                        warn=True)
+
+            elif etype == "hunt_finding":
+                f = ev.get("finding") or {}
+                sev = str(f.get("severity") or "info").upper()
+                chat.write_block(R.agent_event_line(
+                    f.get("agent", "?"), p.accent,
+                    "◆" if ev.get("saved") else "·",
+                    f"[{sev}] {f.get('title', '')}"
+                    + (f"  ·  saved" if ev.get("saved") else ""),
+                    p, ok=bool(ev.get("saved"))))
+
+            elif etype == "hunt_wave_end":
+                self._hunt_tokens = (
+                    self._hunt_tokens[0] + (ev.get("input") or 0),
+                    self._hunt_tokens[1] + (ev.get("output") or 0),
+                    self._hunt_tokens[2] + (ev.get("cost") or 0.0),
+                )
+                self._sys_line(
+                    f"wave {ev['wave']} done — {ev['ok']}/{ev['agents']} ok, "
+                    f"{ev['found']} finding(s)  ·  ${ev['cost']:.4f}",
+                    ok=True)
+
+            elif etype == "hunt_summary_done":
+                chat.write_block(R.agent_line("summary", ev.get("text", ""), p.accent, p))
+                self._sys_line(f"report archived: {ev.get('path')}", ok=True)
+
+            elif etype == "hunt_end":
+                self._sys_line(
+                    f"hunt ended — {ev['wave']} wave(s), {ev['findings']} finding(s), "
+                    f"{ev['saved']} report(s) in {ev['directory']}",
+                    ok=True)
+
+        spinner = asyncio.create_task(self._verb_spinner())
+
+        try:
+            run = await hunt_mod.run_hunt(
+                self.cfg, target,
+                on_event=on_event,
+                agent_factory=self._team_agent_factory,
+                stop=self._hunt_stop,
+                summary_flag=lambda: self._hunt_summary_queued,
+            )
+            self._hunt_run = run
+            # A summary asked for but never delivered — the hunt was stopped
+            # between the request and a wave boundary. Offer it now rather than
+            # silently dropping it.
+            if self._hunt_summary_queued:
+                self._hunt_summary_queued = False
+                self._sys_line("summary was queued but never ran — use /summary-hunt")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            chat.write_block(R.error_block(
+                f"hunt failed: {type(e).__name__}: {e}", p))
+        finally:
+            spinner.cancel()
+            self.busy = False
+            self._hunt_run = None
+            chat.clear_stream()
+            chat.card_finish()
+            self._stream_buf = ""
+            bar.set_activity("idle", busy=False)
+            bar.input_tokens = self.agent.session_input_tokens + self._hunt_tokens[0]
+            bar.output_tokens = self.agent.session_output_tokens + self._hunt_tokens[1]
+            bar.cost = self.agent.session_cost + self._hunt_tokens[2]
+            bar.turns = self.agent.turn_count
+            bar.model = self.cfg.model
+            bar.render_bar()
+            self._sync_rails()
+            self._set_rain(self.rain_on)
+            self.query_one("#input", Input).focus()
+
     def _team_agent_factory(self, cfg: Config, **kw) -> Agent:
         """Build a team Agent. The seam tests replace to stub the model.
 
@@ -1930,6 +2273,9 @@ class ZimZillaApp(App):
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
             ("/phish", "clone a login page and harvest creds", "phish"),
+            ("/bug-hunt", "recon, then waves of 10 agents until stopped", "bug-hunt"),
+            ("/stop-hunt", "end a running hunt", "stop-hunt"),
+            ("/summary-hunt", "write the hunt report", "summary-hunt"),
             ("/clear", "wipe transcript and history", "clear"),
             ("/exit", "leave the harness", "exit"),
         ]

@@ -40,6 +40,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/team", "fan the task out across parallel agents"),
     ("/osint", "open-source recon on a target"),
     ("/phish", "clone a login page and harvest creds"),
+    ("/bug-hunt", "recon, then waves of 10 agents until stopped"),
+    ("/stop-hunt", "end a running hunt"),
+    ("/summary-hunt", "write the hunt report"),
     ("/clear", "wipe transcript and history"),
     ("/exit", "leave the harness"),
 ]
