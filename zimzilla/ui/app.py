@@ -2248,12 +2248,21 @@ class ZimZillaApp(App):
         self._hunt_run = hunt_mod.HuntRun(
             target=target, directory=hunt_mod.case_dir(self.cfg, target))
 
-        counter = {"running": 0, "total": 0, "wave": 0}
+        counter = {"running": 0, "total": 0, "wave": 0, "done": 0}
         #: name -> colour, so a tool line, its prose and its result panel all
         #: agree on which agent they belong to. Ten interleaved agents are
         #: unreadable without that. Keyed by name because the result event
         #: carries the name and not the index.
         colors: dict[str, str] = {}
+
+        # Light the loop rail's HACK node for the whole campaign. A hunt is not
+        # a turn, so nothing else sets a stage for it — without this the rail
+        # sat on IDLE from recon to the closing report, which reads as an idle
+        # harness while ten agents are attacking the target.
+        loop = self._loop_rail()
+        if loop is not None:
+            loop.set_hunt(wave=0)
+            loop.set_stage("hacking")
         #: The live recon window, while recon is running. Held here so the
         #: worker can pop exactly the screen it pushed, and so a stop mid-recon
         #: can take it down from the `finally`.
@@ -2300,8 +2309,15 @@ class ZimZillaApp(App):
 
             elif etype == "hunt_wave_start":
                 counter["wave"] = ev.get("wave", 0)
+                # `size` is the concurrency cap the planner was *asked* for, not
+                # the roster it returned, so it is the bar's denominator but not
+                # the agent count — that only arrives with the plan, below.
                 counter["total"] = ev.get("size", 0)
                 counter["running"] = 0
+                counter["done"] = 0
+                counter["agents"] = 0
+                if loop is not None:
+                    loop.set_hunt(wave=counter["wave"], agents=0, done=0)
                 chat.write_block(R.turn_marker(
                     self.agent.turn_count + counter["wave"], p))
                 chat.write_block(R.user_prompt_block(
@@ -2323,6 +2339,11 @@ class ZimZillaApp(App):
                         self._sys_line("  (the planner returned nothing)", warn=True)
                 if ev.get("summary"):
                     self._sys_line(ev["summary"])
+                # The roster is the only place the real agent count appears.
+                counter["agents"] = len(ev.get("workers") or [])
+                if loop is not None:
+                    loop.set_hunt(wave=counter["wave"],
+                                  agents=counter["agents"], done=0)
                 names = ", ".join(w["name"] for w in ev.get("workers") or [])
                 if names:
                     self._sys_line(f"launching {len(ev['workers'])} — {names}", ok=True)
@@ -2331,6 +2352,10 @@ class ZimZillaApp(App):
                 counter["running"] += 1
                 color = agent_color(ev.get("index", 0), p)
                 colors[ev.get("name", "")] = color
+                if loop is not None:
+                    loop.set_hunt(wave=counter["wave"],
+                                  agents=counter["agents"],
+                                  done=counter["done"])
                 brief = ev.get("brief", "")
                 if len(brief) > 96:
                     brief = brief[:95] + "…"
@@ -2371,6 +2396,11 @@ class ZimZillaApp(App):
 
             elif etype == "hunt_agent_done":
                 counter["running"] = max(0, counter["running"] - 1)
+                counter["done"] += 1
+                if loop is not None:
+                    loop.set_hunt(wave=counter["wave"],
+                                  agents=counter["agents"],
+                                  done=counter["done"])
                 if not ev.get("ok"):
                     self._sys_line(
                         f"  {ev['name']} failed — {ev.get('error', 'unknown')}",
@@ -2387,6 +2417,13 @@ class ZimZillaApp(App):
                     p, ok=bool(ev.get("saved"))))
 
             elif etype == "hunt_wave_end":
+                # Every agent has reported, so `done` is already the roster
+                # size. Leave it — forcing it to the concurrency cap would show
+                # a wave that planned three agents as 10/10.
+                if loop is not None:
+                    loop.set_hunt(wave=counter["wave"],
+                                  agents=counter["agents"],
+                                  done=counter["done"])
                 self._hunt_tokens = (
                     self._hunt_tokens[0] + (ev.get("input") or 0),
                     self._hunt_tokens[1] + (ev.get("output") or 0),
@@ -2446,6 +2483,15 @@ class ZimZillaApp(App):
             bar.turns = self.agent.turn_count
             bar.model = self.cfg.model
             bar.render_bar()
+            # Hand the rail back to the main agent. Three separate calls
+            # because each owns one thing: set_hunt drops the campaign
+            # counters, set_stage clears HACK, and _sync_rails pushes the
+            # session totals back in. Nothing else does the second one — the
+            # stage is set by the turn runner, and the hunt is not a turn, so
+            # without it the rail stayed lit on HACK after the campaign ended.
+            if loop is not None:
+                loop.set_hunt(None)
+                loop.set_stage("idle")
             self._sync_rails()
             self._set_rain(self.rain_on)
             self.query_one("#input", Input).focus()

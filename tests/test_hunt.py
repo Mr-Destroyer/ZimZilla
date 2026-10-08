@@ -1204,6 +1204,175 @@ async def test_transcript_shows_full_command(wd: Path) -> None:
               str(len(panels)))
 
 
+async def test_loop_rail_shows_hack_during_hunt(wd: Path) -> None:
+    """The rail must read HACK — not IDLE — for the length of a campaign.
+
+    A hunt is not a turn, so nothing in the turn runner sets a stage for it:
+    the rail sat on IDLE from recon to the closing report, which reads as an
+    idle harness while ten agents are attacking the target.
+
+    The samples are taken from inside ``on_event``. ``run_hunt`` awaits every
+    event it emits, so a reading taken there is deterministic — driving it from
+    the test loop instead would race, because the stub agent finishes a whole
+    wave per scheduler slice and the campaign can end between two pauses.
+    """
+    from zimzilla.ui.rails import LoopRail
+
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "paths", "brief": "test paths", "owns": ["paths"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "recon: nginx, 443 open",
+        "final": "nothing confirmed",
+    }
+    factory = _hunt_factory(script)
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app._team_agent_factory = factory
+
+    #: (event, stage, hunt-counters) captured while the campaign runs.
+    seen: list[tuple[str, str, dict | None]] = []
+    #: The rail once the campaign is over. Read after ``_run_hunt`` returns,
+    #: not from the event stream: the reset lives in that worker's `finally`,
+    #: which has not run yet while the last event is being delivered.
+    after: dict = {}
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        check("rail: starts idle", app.query_one(LoopRail).stage == "idle")
+
+        real_factory = app._team_agent_factory
+        real_run_hunt = hunt_mod.run_hunt
+
+        def observing_factory(cfg, **kw):
+            agent = real_factory(cfg, **kw)
+            stream = agent._stream_once
+            calls = {"n": 0}
+
+            async def stopping_stream():
+                calls["n"] += 1
+                if calls["n"] == 2 and app._hunt_run is not None:
+                    app._handle_command("/stop-hunt")
+                async for ev in stream():
+                    yield ev
+
+            agent._stream_once = stopping_stream
+            return agent
+
+        async def observing_run_hunt(cfg, target, **kw):
+            inner = kw.pop("on_event")
+
+            async def wrapped(ev):
+                await inner(ev)
+                loop = app.query_one(LoopRail)
+                seen.append((ev.get("type", ""), loop.stage,
+                             dict(loop.hunt) if loop.hunt else None))
+
+            return await real_run_hunt(cfg, target, on_event=wrapped, **kw)
+
+        app._team_agent_factory = observing_factory
+        hunt_mod.run_hunt = observing_run_hunt
+        try:
+            app._run_hunt("x.test")
+            for _ in range(80):
+                await pilot.pause()
+                if not app.busy:
+                    break
+            await pilot.pause()
+        finally:
+            hunt_mod.run_hunt = real_run_hunt
+        rail = app.query_one(LoopRail)
+        after["stage"] = rail.stage
+        after["hunt"] = dict(rail.hunt) if rail.hunt else None
+
+        check("rail: the campaign ran", bool(seen), str(len(seen)))
+        stages = {stage for _, stage, _ in seen}
+        check("rail: HACK is lit while the campaign runs", "hacking" in stages,
+              str(sorted(stages)))
+        check("rail: never IDLE mid-campaign",
+              not [e for e, s, _ in seen if s == "idle" and e != "hunt_end"],
+              str([e for e, s, _ in seen if s == "idle"]))
+        # It must be lit *before* the first agent starts, not only once one is
+        # running — recon is part of the campaign.
+        check("rail: HACK is lit from the first event",
+              seen[0][1] == "hacking", f"{seen[0][0]} -> {seen[0][1]}")
+
+        # The counters must describe the campaign, not the main agent's turn.
+        during = [h for _, s, h in seen if s == "hacking" and h]
+        check("rail: campaign counters replace turn/iter", bool(during),
+              str(during[:3]))
+        check("rail: counters name the wave",
+              all("wave" in h for h in during) and any(h["wave"] >= 1
+                                                       for h in during),
+              str(during[:3]))
+        # The roster has one worker, and the rail must say one — not the ten
+        # the planner was *asked* for, which is what `hunt_wave_start`'s `size`
+        # carries and what the rail showed before this. And `done` must reach
+        # exactly that, so a double-count shows up as 2/1.
+        check("rail: agents counted from the roster, not the cap",
+              all(h["agents"] <= 1 for h in during),
+              str([(h["done"], h["agents"]) for h in during]))
+        check("rail: agents counted once each",
+              any(h["done"] == h["agents"] == 1 for h in during),
+              str([(h["done"], h["agents"]) for h in during]))
+
+        # And it hands the rail back when the campaign is over.
+        check("rail: reset to idle after the campaign",
+              after.get("stage") == "idle", str(after))
+        check("rail: campaign counters cleared after the campaign",
+              after.get("hunt") is None, str(after))
+        check("rail: still idle once the app settles",
+              app.query_one(LoopRail).stage == "idle")
+
+
+async def test_loop_rail_hunt_render() -> None:
+    """The rail's own render: the HACK node lights, and only it.
+
+    Pure — no app — because this is about the glyph and the label, which is
+    where an added stage goes wrong: ``render_rail`` lights the node whose key
+    equals ``self.stage``, so a mistyped key silently lights nothing.
+    """
+    import io
+
+    from rich.console import Console
+
+    from zimzilla.ui.rails import STAGES, STAGE_LABEL, LoopRail
+
+    def draw(rail: LoopRail) -> str:
+        buf = io.StringIO()
+        Console(file=buf, width=60, color_system=None,
+                legacy_windows=False).print(rail.rail_text())
+        return buf.getvalue()
+
+    check("rail: HACK is a stage", "hacking" in STAGES, str(STAGES))
+    check("rail: HACK is labelled", STAGE_LABEL.get("hacking") == "HACK",
+          str(STAGE_LABEL.get("hacking")))
+    check("rail: idle is still last", STAGES[-1] == "idle", str(STAGES))
+
+    # Set the fields directly rather than through the setters: those call
+    # ``update()``, which needs a running app. The app-level test above drives
+    # the real setters, so what is under test here is only the layout.
+    rail = LoopRail(get_palette("zim"))
+    rail.stage = "hacking"
+    rail.hunt = {"wave": 2, "agents": 10, "done": 4}
+    body = draw(rail)
+    check("rail: HACK renders", "HACK" in body, body)
+    check("rail: wave counter renders", "wave" in body and "2" in body, body)
+    check("rail: agent counter renders", "4/10" in body, body)
+    check("rail: turn/iter hidden during a hunt",
+          "turn" not in body and "iter" not in body, body)
+
+    rail.hunt = None
+    rail.stage = "idle"
+    body = draw(rail)
+    check("rail: turn/iter restored after a hunt",
+          "turn" in body and "iter" in body, body)
+    check("rail: wave counter gone after a hunt", "wave" not in body, body)
+
+
 async def test_busy_gate(wd: Path) -> None:
     """Some commands must answer mid-run; the launchers must not."""
     app = ZimZillaApp(_cfg(wd, boot_rain=False))
@@ -1279,6 +1448,7 @@ async def main() -> int:
     test_planner_fallback_path()
     test_brief_context_truncation()
     test_hunt_tool_panel_renders_bash()
+    await test_loop_rail_hunt_render()
     test_pane()
 
     with tempfile.TemporaryDirectory() as td:
@@ -1298,6 +1468,7 @@ async def main() -> int:
         await test_stop_hunt_reaches_the_loop(wd)
         await test_recon_overlay_fast_target(wd)
         await test_transcript_shows_full_command(wd)
+        await test_loop_rail_shows_hack_during_hunt(wd)
         await test_busy_gate(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]

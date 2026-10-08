@@ -27,11 +27,21 @@ from textual.widgets import Static
 from ..theme import Palette
 
 # The cycle, in order. `idle` is the resting state between turns.
-STAGES: tuple[str, ...] = ("thinking", "calling", "observing", "idle")
+#
+# `hacking` is the one stage that is not part of a turn. A `/bug-hunt` campaign
+# is not a turn — it is a run of its own that outlives any single one, and it
+# drives its workers itself rather than streaming them through the main agent.
+# Without a stage of its own the rail had nothing to show for it and sat on
+# IDLE for the whole engagement, which reads as "nothing is happening" while
+# ten agents are in fact attacking the target. While it is lit, the per-call
+# nodes below are dark — and that is the honest reading: the main agent's cycle
+# is genuinely not the thing running.
+STAGES: tuple[str, ...] = ("thinking", "calling", "observing", "hacking", "idle")
 STAGE_LABEL = {
     "thinking": "THINK",
     "calling": "CALL",
     "observing": "OBSERVE",
+    "hacking": "HACK",
     "idle": "IDLE",
 }
 
@@ -143,6 +153,9 @@ class LoopRail(RailResizeMixin, Static):
         self.turn = 0
         self.iteration = 0
         self.pulse = False
+        #: Live campaign progress, while one is running. ``None`` when no hunt
+        #: is up, which is what makes the counter block fall back to turn/iter.
+        self.hunt: dict | None = None
         #: Last few stages, newest last — a short breadcrumb of the cycle.
         self.trail: deque[str] = deque(maxlen=6)
         self._init_resize()
@@ -160,12 +173,36 @@ class LoopRail(RailResizeMixin, Static):
         self.iteration = iteration
         self.render_rail()
 
+    def set_hunt(self, wave: int | None = 0, agents: int = 0,
+                 done: int = 0) -> None:
+        """Show live campaign progress, or clear it by passing ``wave=None``.
+
+        A hunt has no turn and no iteration to report — those belong to the main
+        agent, which is not the thing running. What the operator wants from the
+        rail mid-campaign is how far in it is and how many agents are working.
+        """
+        if wave is None:
+            self.hunt = None
+        else:
+            self.hunt = {"wave": wave, "agents": agents, "done": done}
+        self.render_rail()
+
     def tick_pulse(self) -> None:
         """Called on a timer; makes the active node breathe."""
         self.pulse = not self.pulse
         self.render_rail()
 
     def render_rail(self) -> None:
+        self.update(self.rail_text())
+
+    def rail_text(self) -> Text:
+        """Build the rail's content, without touching the widget.
+
+        Split out of :meth:`render_rail` so the layout can be asserted without
+        a running app: ``update()`` reaches for ``self.app.console``, which
+        raises ``NoActiveAppError`` outside one, and the stage list is exactly
+        the thing worth testing.
+        """
         p = self.palette
         t = Text()
         t.append("LOOP\n\n", style=f"bold {p.accent}")
@@ -190,17 +227,29 @@ class LoopRail(RailResizeMixin, Static):
                 t.append("  │\n", style=p.accent if below else p.dim)
 
         t.append("\n")
-        t.append("turn ", style=p.dim)
-        t.append(f"{self.turn}\n", style=p.primary)
-        t.append("iter ", style=p.dim)
-        t.append(f"{self.iteration}\n", style=p.primary)
+        if self.hunt is None:
+            t.append("turn ", style=p.dim)
+            t.append(f"{self.turn}\n", style=p.primary)
+            t.append("iter ", style=p.dim)
+            t.append(f"{self.iteration}\n", style=p.primary)
+        else:
+            # A campaign has no turn or iteration to report, so showing the
+            # main agent's would be a lie about what is running. Wave and agent
+            # count are what is actually moving.
+            wave = self.hunt.get("wave") or 0
+            agents = self.hunt.get("agents") or 0
+            done = self.hunt.get("done") or 0
+            t.append("wave ", style=p.dim)
+            t.append(f"{wave}\n", style=f"bold {p.accent}")
+            t.append("agent ", style=p.dim)
+            t.append(f"{done}/{agents}\n" if agents else "-\n", style=p.primary)
 
         if self.trail:
             t.append("\n")
             t.append("│", style=p.dim)
             t.append("".join(_glyph_for(s) for s in self.trail), style=p.dim)
 
-        self.update(t)
+        return t
 
     def apply_palette(self, palette: Palette) -> None:
         self.palette = palette
@@ -211,7 +260,8 @@ class LoopRail(RailResizeMixin, Static):
 
 
 def _glyph_for(stage: str) -> str:
-    return {"thinking": "▪", "calling": "▸", "observing": "▪", "idle": "·"}.get(stage, "·")
+    return {"thinking": "▪", "calling": "▸", "observing": "▪",
+            "hacking": "◈", "idle": "·"}.get(stage, "·")
 
 
 class Waveform(Static):
