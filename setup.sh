@@ -134,15 +134,16 @@ mkdir -p "$LOG_DIR"
     printf '# Treat this file as a credential. Never commit it.\n\n'
     printf 'export ANTHROPIC_BASE_URL="http://localhost:%s"\n' "$PORT"
     printf 'export ANTHROPIC_AUTH_TOKEN="%s"\n' "$KEY"
-    printf 'export ANTHROPIC_MODEL="grok-4.6"\n\n'
+    printf 'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n\n'
     printf '# Load-bearing: an empty string keeps ANTHROPIC_AUTH_TOKEN authoritative\n'
     printf '# and clears any real API key inherited from the shell.\n'
     printf 'export ANTHROPIC_API_KEY=""\n\n'
     printf '# Model aliases — see litellm-config.yaml for the full list.\n'
-    printf 'export MODEL_DEFAULT="grok-4.6"\n'
+    printf 'export MODEL_DEFAULT="deepseek-v4.1-flash"\n'
     printf 'export MODEL_OPUS="claude-opus-4.6"\n'
     printf 'export MODEL_SONNET="claude-sonnet-4.6"\n'
     printf 'export MODEL_DEEPSEEK="deepseek-v3.2"\n'
+    printf 'export MODEL_DEEPSEEK_FLASH="deepseek-v4.1-flash"\n'
     printf 'export MODEL_KIMI="kimi-k2.5"\n'
     printf 'export MODEL_KIMI_THINKING="kimi-k2-thinking"\n'
     printf 'export MODEL_GLM="glm-5"\n'
@@ -321,7 +322,7 @@ fi
 # A live round-trip through the proxy proves the key actually works. The
 # upstream reports "temporarily unavailable" under load, so give it one retry
 # before calling the key bad.
-BODY='{"model":"grok-4.6","max_tokens":8,"messages":[{"role":"user","content":"say ok"}]}'
+BODY='{"model":"deepseek-v4.1-flash","max_tokens":8,"messages":[{"role":"user","content":"say ok"}]}'
 probe() {
   curl -s -o /tmp/zim-setup-probe.json -w '%{http_code}' \
     -X POST "http://127.0.0.1:$PORT/v1/messages" \

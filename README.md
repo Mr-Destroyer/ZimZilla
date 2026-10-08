@@ -155,8 +155,8 @@ reuses it instead of building the proxy venv.
 profile `./setup.sh` wrote before the harness starts, so a normal launch needs
 nothing exported by hand.
 
-Out of the box it runs **`grok-4.6`** against Logfare. Switch any time with
-`/model`, or override before launch:
+Out of the box it runs **`deepseek-v4.1-flash`** against Logfare. Switch any
+time with `/model`, or override before launch:
 
 ```bash
 zimzilla -m claude-opus-4.6        # this run only

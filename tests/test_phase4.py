@@ -1242,15 +1242,15 @@ async def test_team_ui(wd: Path) -> None:
 
 
 # ---- default model --------------------------------------------------------
-# The shipped default moved to grok-4.6. These pin the parts of that which
-# can silently drift apart: the constant, the registry it must belong to, the
-# price it must have, and the environment override that outranks it.
+# The shipped default moved to deepseek-v4.1-flash. These pin the parts of that
+# which can silently drift apart: the constant, the registry it must belong to,
+# the price it must have, and the environment override that outranks it.
 
 def test_default_model(wd: Path) -> None:
     from zimzilla.config import DEFAULT_MODEL
 
-    check("default model: the shipped default is grok-4.6",
-          DEFAULT_MODEL == "grok-4.6", DEFAULT_MODEL)
+    check("default model: the shipped default is deepseek-v4.1-flash",
+          DEFAULT_MODEL == "deepseek-v4.1-flash", DEFAULT_MODEL)
 
     from zimzilla.config import KNOWN_MODELS
 

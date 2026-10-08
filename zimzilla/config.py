@@ -11,13 +11,13 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # The harness talks the Anthropic Messages protocol to whatever endpoint
 # ANTHROPIC_BASE_URL points at. By default that is the local LiteLLM proxy
-# (:4001) fronting Logfare, whose default model is grok-4.6.
+# (:4001) fronting Logfare, whose default model is deepseek-v4.1-flash.
 #
 # Prices are USD per million tokens and are *estimates* for CLI accounting —
 # they are not billing-accurate. Unknown models fall back to DEFAULT_PRICE.
 
 DEFAULT_BASE_URL = "http://localhost:4001"
-DEFAULT_MODEL = "grok-4.6"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 # The harness dotdir. setup.sh installs the proxy files, the doctrine file and
 # the session state here; ZIMZILLA_HOME moves the whole lot.
