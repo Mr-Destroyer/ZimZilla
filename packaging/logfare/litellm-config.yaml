@@ -40,6 +40,12 @@ model_list:
       api_base: https://logfare.ai/v1
       api_key: os.environ/ANTHROPIC_AUTH_TOKEN
 
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://logfare.ai/v1
+      api_key: os.environ/ANTHROPIC_AUTH_TOKEN
+
   - model_name: glm-5
     litellm_params:
       model: openai/glm-5

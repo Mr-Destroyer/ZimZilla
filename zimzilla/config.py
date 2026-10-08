@@ -162,6 +162,7 @@ KNOWN_MODELS: list[str] = [
     "claude-opus-4.6",
     "claude-sonnet-4.6",
     "deepseek-v3.2",
+    "deepseek-v4.1-flash",
     "gemma-4-26b",
     "gemma-4-31b",
     "glm-5",
