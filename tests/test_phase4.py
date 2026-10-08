@@ -1331,6 +1331,64 @@ async def test_copy_on_select(wd: Path) -> None:
               copied == ["steal this"], str(copied))
 
 
+async def test_prompt_paste_full(wd: Path) -> None:
+    """A paste lands in the prompt in full — Textual's Input keeps only line 1.
+
+    Stock ``Input._on_paste`` does ``event.text.splitlines()[0]``, so a prompt
+    copied with any line break in it arrived truncated. ``PromptInput`` keeps
+    the whole paste; line breaks survive in the value (the model should see the
+    text as written) and are drawn as a one-cell glyph so the one-row field
+    does not push the rows below it off-screen.
+    """
+    from textual import events
+
+    from zimzilla.ui.widgets import NEWLINE_GLYPH, PromptInput
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        inp = app.query_one("#input", PromptInput)
+        inp.focus()
+
+        # A long, multi-line paste — the exact shape that used to truncate.
+        pasted = "first instruction line\nsecond line here\nthird and last line"
+        inp.post_message(events.Paste(pasted))
+        await pilot.pause()
+
+        check("paste: the whole multi-line paste is kept",
+              inp.value == pasted, repr(inp.value))
+        check("paste: nothing after the first newline is dropped",
+              "third and last line" in inp.value, repr(inp.value))
+
+        # The one-row field must not leak a raw newline into its strip: that
+        # would shift every row beneath it down the screen.
+        strip = inp.render_line(0).text
+        check("paste: the strip carries no raw newline", "\n" not in strip, repr(strip))
+        check("paste: newlines are drawn as the glyph",
+              NEWLINE_GLYPH in strip, repr(strip))
+
+        # Ctrl+V goes through action_paste -> replace(), bypassing _on_paste.
+        # CRLF from the clipboard must still be normalised, never left as \r.
+        inp.value = ""
+        inp.replace("crlf one\r\ncrlf two", 0, 0)
+        await pilot.pause()
+        check("paste: Ctrl+V CRLF is normalised to \\n",
+              inp.value == "crlf one\ncrlf two", repr(inp.value))
+        check("paste: no carriage return survives into the strip",
+              "\r" not in inp.render_line(0).text, repr(inp.render_line(0).text))
+
+        # Submit must deliver the whole thing, not the first line.
+        sent: list[str] = []
+        app._run_turn = lambda text, *a, **k: sent.append(text)  # type: ignore[method-assign]
+        inp.value = "alpha\nbeta"
+        inp.post_message(inp.Submitted(inp, inp.value))
+        await pilot.pause()
+        check("paste: submit delivers the full text",
+              sent == ["alpha\nbeta"], str(sent))
+
+
 async def test_harness_copy_resize_mouse(wd: Path) -> None:
     """The transcript copies, survives a resize round-trip, and the rails drag."""
     from textual.events import MouseMove
@@ -1577,6 +1635,7 @@ async def main() -> int:
         await test_team_tool_hook(wd)
         await test_team_ui(wd)
         await test_copy_on_select(wd)
+        await test_prompt_paste_full(wd)
         await test_harness_copy_resize_mouse(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]

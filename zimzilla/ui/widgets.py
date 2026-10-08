@@ -4,14 +4,93 @@ from __future__ import annotations
 
 import time
 
+from rich.cells import cell_len, get_character_cell_size
 from rich.text import Text
+from textual import events
 from textual.containers import Vertical
 from textual.events import Click, MouseDown, MouseMove, MouseUp
-from textual.geometry import Offset
-from textual.widgets import Static
+from textual.expand_tabs import expand_tabs_inline
+from textual.geometry import Offset, clamp
+from textual.widgets import Input, Static
 
 from ..theme import Palette
 from .rain import RainRichLog
+
+#: A pasted line break is drawn as this glyph. The field is one row tall, so a
+#: real ``\n`` in the strip would push the rows below it down the screen; the
+#: glyph is one cell wide and keeps the value's character indices 1:1 with the
+#: cells they paint into, which is what the cursor and selection math assume.
+NEWLINE_GLYPH = "↵"
+
+
+class PromptInput(Input):
+    """The prompt field — a one-row :class:`~textual.widgets.Input` that keeps a
+    whole paste.
+
+    Textual's stock ``Input._on_paste`` does ``event.text.splitlines()[0]``: it
+    keeps only the *first line* of a paste and silently discards the rest. Any
+    prompt copied with a line break in it — a multi-line instruction, a stack
+    trace, pasted docs — therefore arrived truncated to its first line.
+
+    This subclass keeps the entire paste. Line endings are normalised to
+    ``\\n`` (some terminals bracket-paste CRLF) and stored as real newlines so
+    the model receives the text as written; only the *display* folds them to
+    :data:`NEWLINE_GLYPH`, because a raw newline inside a one-row field would
+    corrupt every row beneath it.
+    """
+
+    def _on_paste(self, event: events.Paste) -> None:
+        """Insert the full pasted text, not just its first line.
+
+        ``prevent_default`` is what suppresses the base handler — Textual
+        dispatches *every* matching handler along the MRO, so stopping the
+        event alone would still let ``Input._on_paste`` truncate it after us.
+        """
+        if event.text:
+            selection = self.selection
+            if selection.is_empty:
+                self.insert_text_at_cursor(event.text)
+            else:
+                self.replace(event.text, *selection)
+        event.prevent_default()
+        event.stop()
+
+    def replace(self, text: str, start: int, end: int) -> None:
+        """Normalise line endings before the value is written.
+
+        Every path into the value funnels through here — typing, ``insert``,
+        and the Ctrl+V ``action_paste`` (which calls ``replace`` directly and
+        so never sees ``_on_paste``). Normalising once here means no stray
+        ``\\r`` can reach the strip from any of them.
+        """
+        super().replace(text.replace("\r\n", "\n").replace("\r", "\n"), start, end)
+
+    @property
+    def _value(self) -> Text:
+        """The value as rendered — newlines shown as a one-cell glyph."""
+        if self.password:
+            return Text("•" * len(self.value), no_wrap=True, overflow="ignore", end="")
+        text = Text(self.value.replace("\n", NEWLINE_GLYPH), no_wrap=True,
+                    overflow="ignore", end="")
+        if self.highlighter is not None:
+            text = self.highlighter(text)
+        return text
+
+    def _position_to_cell(self, position: int) -> int:
+        """Index → cell offset, counting a newline as the glyph's one cell."""
+        return cell_len(expand_tabs_inline(self.value[:position].replace("\n", " "), 4))
+
+    def _cell_offset_to_index(self, offset: int) -> int:
+        """Cell offset → index, the inverse of :meth:`_position_to_cell`."""
+        cell_offset = 0
+        scroll_x, _ = self.scroll_offset
+        offset += scroll_x
+        for index, char in enumerate(self.value):
+            width = 1 if char == "\n" else get_character_cell_size(char)
+            if cell_offset <= offset < (cell_offset + width):
+                return index
+            cell_offset += width
+        return clamp(offset, 0, len(self.value))
 
 
 class HeaderBar(Static):

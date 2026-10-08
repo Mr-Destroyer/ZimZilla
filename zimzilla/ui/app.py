@@ -31,7 +31,7 @@ from .boot import BootScreen
 from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
-from .widgets import ChatPane, HeaderBar, StatusBar, ZimPane
+from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
 
 
 def _dedupe(items) -> list[str]:
@@ -290,8 +290,8 @@ class ZimZillaApp(App):
         with Vertical(id="bottom-dock"):
             yield CompletionPopup(self.palette, id="complete")
             yield StatusBar(self.palette)
-            yield Input(placeholder="❯ message ZimZilla…   ( / commands · @ files · ^K palette )",
-                        id="input")
+            yield PromptInput(placeholder="❯ message ZimZilla…   ( / commands · @ files · ^K palette )",
+                              id="input")
 
     def on_mount(self) -> None:
         self.title = "ZIMZILLA"
