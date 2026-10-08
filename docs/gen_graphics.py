@@ -204,7 +204,7 @@ def terminal() -> str:
     <line x1="0" y1="46" x2="{W}" y2="46" stroke="{DIM}" stroke-opacity="0.6"/>
 
     <text x="{pad}" y="76" fill="{DIM}" style="font:13px ui-monospace,Menlo,monospace;letter-spacing:1.4px">
-      ◆ ZIMZILLA   ◆ AUTO   ◆ grok-4.6   ▸ /home/zim   ◈ scope off   ⛨ sandbox on
+      ◆ ZIMZILLA   ◆ AUTO   ◆ deepseek-v4.1-flash   ▸ /home/zim   ◈ scope off   ⛨ sandbox on
     </text>
 
       {body}
@@ -213,7 +213,7 @@ def terminal() -> str:
 
     <line x1="0" y1="{H-42}" x2="{W}" y2="{H-42}" stroke="{DIM}" stroke-opacity="0.6"/>
     <text x="{pad}" y="{H-17}" fill="{DIM}" style="font:13px ui-monospace,Menlo,monospace">
-      ● grok-4.6   |   tok ↑18.4k ↓612   |   $ 0.0142   |   turn 3   |   ● idle
+      ● deepseek-v4.1-flash   |   tok ↑18.4k ↓612   |   $ 0.0142   |   turn 3   |   ● idle
     </text>
     <rect x="0.5" y="0.5" width="{W-1}" height="{H-1}" rx="12" fill="none" stroke="{DIM}" stroke-opacity="0.55"/>
   </g>
