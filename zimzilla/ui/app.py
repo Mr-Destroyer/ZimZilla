@@ -37,17 +37,6 @@ from .rails import LoopRail, TelemetryRail
 from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
 
 
-#: The hosted gateways, by source key: their display name and the command that
-#: refetches their catalog. Both are remote, both are fetched rather than
-#: declared, and both carry a free tier — so /model treats them identically and
-#: only the two names differ. The local proxies are absent on purpose: they have
-#: declared catalogs and no free flag, so nothing here applies to them.
-HOSTED_SOURCES: dict[str, tuple[str, str]] = {
-    "tokenharbour": ("TokenHarbour", "/tokenharbour-models"),
-    "opencode": ("OpenCode Zen", "/opencode"),
-}
-
-
 def _dedupe(items) -> list[str]:
     """Order-preserving de-dupe.
 
@@ -1451,31 +1440,33 @@ class ZimZillaApp(App):
             # Free first, then the rest. A hosted gateway's list is long and
             # changes; the operator almost always wants the free ones, so they
             # lead — with the model in use never hidden, whatever it costs.
-            order = self._model_display_order(models, th_catalog)
+            order = self._model_display_order(models, live_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
                 t.append(f"  {mark} {m:<26}", style=style)
-                note = self._model_note(m, th_catalog)
+                note = self._model_note(m, live_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
-            if active == "tokenharbour":
-                t.append("  the catalog is live — /tokenharbour-models refetches it\n",
+            if hosted:
+                t.append(f"  the catalog is live — {hosted[1]} refetches it\n",
                          style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
-        # TokenHarbour's list is fetched, so an un-warmed cache would leave
+        # A hosted gateway's list is fetched, so an un-warmed cache would leave
         # `models` as the Logfare fallback and reject a model the gateway does
         # serve. Fetch it here instead — this is an explicit switch, so one
         # network round-trip is the right price for a correct answer.
-        if active == "tokenharbour" and th_catalog is None:
-            creds = th_mod.load_credentials()
-            if creds is not None:
-                fetched, _ = th_mod.fetch_models(creds[0])
-                if fetched is not None:
-                    th_catalog = fetched
-                    models = tuple(m.id for m in fetched)
+        if hosted and live_catalog is None:
+            creds = (th_mod.load_credentials() if active == "tokenharbour"
+                     else oc_mod.load_credentials())
+            token = creds[0] if creds else ""
+            fetched, _ = (th_mod.fetch_models(token) if active == "tokenharbour"
+                          else oc_mod.fetch_models(token))
+            if fetched is not None:
+                live_catalog = fetched
+                models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
         # old behaviour — accept anything — is right there.
@@ -1516,16 +1507,25 @@ class ZimZillaApp(App):
     def _model_note(self, name: str, catalog) -> str:
         """The price/context note beside a model in /model.
 
-        TokenHarbour's catalog is authoritative for its own models — it is the
-        gateway's own price, not this harness's estimate — so it wins when
-        present. Everywhere else the local estimate table answers, as before.
+        A hosted gateway's catalog is authoritative for its own models, so it
+        answers first. The two gateways differ in what they carry: TokenHarbour
+        prices each entry (so a zero price and a ``free`` flag agree), while
+        OpenCode Zen lists no prices at all and marks a free model only by its
+        ``-free`` id. So the free flag is read from the model itself, and a model
+        the catalog prices is shown with that price. A model the catalog knows
+        but does not price is called "paid" rather than dressed up with this
+        harness's own estimate, which would be a guess about another party's
+        bill. Only a model absent from the catalog falls through to the local
+        estimate table, as every source did before.
         """
-        live = th_mod.price_for(name, catalog)
-        if live is not None:
-            pin, pout = live
-            if pin == 0.0 and pout == 0.0:
-                return "free"
-            return f"${pin:g}/${pout:g} per Mtok"
+        if catalog:
+            m = next((x for x in catalog if x.id == name), None)
+            if m is not None:
+                if m.free:
+                    return "free"
+                if m.price_in or m.price_out:
+                    return f"${m.price_in:g}/${m.price_out:g} per Mtok"
+                return "paid"
         pin, pout = price_for(name)
         return f"${pin:.2f}/${pout:.2f} per Mtok"
 
