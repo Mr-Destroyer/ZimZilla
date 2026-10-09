@@ -19,7 +19,6 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import hunt as hunt_mod
-from .. import opencode as oc_mod
 from .. import osint as osint_mod
 from .. import phish as phish_mod
 from .. import session as session_mod
@@ -36,17 +35,6 @@ from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
 from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
-
-
-#: The hosted gateways, by source key: their display name and the command that
-#: refetches their catalog. Both are remote, both are fetched rather than
-#: declared, and both carry a free tier — so /model treats them identically and
-#: only the two names differ. The local proxies are absent on purpose: they have
-#: declared catalogs and no free flag, so nothing here applies to them.
-HOSTED_SOURCES: dict[str, tuple[str, str]] = {
-    "tokenharbour": ("TokenHarbour", "/tokenharbour-models"),
-    "opencode": ("OpenCode Zen", "/opencode"),
-}
 
 
 def _dedupe(items) -> list[str]:
@@ -1248,7 +1236,6 @@ class ZimZillaApp(App):
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
-        "opencode-api-setup", "opencode",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1280,8 +1267,6 @@ class ZimZillaApp(App):
             "zim-source": lambda a: self._cmd_zim_source(None),
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
-            "opencode": lambda a: self._cmd_opencode(a),
-            "opencode-api-setup": lambda a: self._cmd_opencode_key(a),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
         }
@@ -1313,8 +1298,6 @@ class ZimZillaApp(App):
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
-            ("/opencode", "switch to OpenCode Zen; fetch the free models"),
-            ("/opencode-api-setup <key>", "store your OpenCode Zen API key"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
@@ -1433,15 +1416,10 @@ class ZimZillaApp(App):
         # does not know is a 404 at request time, not a switch.
         active = sources_mod.active_key(self.cfg.base_url)
         models = sources_mod.models_for(self.cfg.base_url) or tuple(KNOWN_MODELS)
-        # A hosted gateway's catalog is fetched, so it also carries a free flag
-        # the other sources have no equivalent of. Read once, here. Both gateways
-        # expose cached_models(), so the live catalog is chosen by source key.
-        hosted = HOSTED_SOURCES.get(active or "")
-        live_catalog = None
-        if active == "tokenharbour":
-            live_catalog = th_mod.cached_models()
-        elif active == "opencode":
-            live_catalog = oc_mod.cached_models()
+        # TokenHarbour's catalog is fetched, so it also carries prices and a
+        # free flag the other sources have no equivalent of. Read once, here.
+        th_catalog = (th_mod.cached_models()
+                      if active == "tokenharbour" else None)
 
         if not args:
             t = Text()
@@ -1449,7 +1427,8 @@ class ZimZillaApp(App):
             t.append(self.cfg.model + "\n", style=f"bold {p.accent}")
             if active:
                 src = sources_mod.discover().get(active)
-                label = src.label if src else (hosted[0] if hosted else active)
+                label = src.label if src else ("TokenHarbour" if active == "tokenharbour"
+                                               else active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
                 t.append(f"   ·   {self.cfg.base_url}\n", style=p.dim)
@@ -1457,33 +1436,31 @@ class ZimZillaApp(App):
             # Free first, then the rest. A hosted gateway's list is long and
             # changes; the operator almost always wants the free ones, so they
             # lead — with the model in use never hidden, whatever it costs.
-            order = self._model_display_order(models, live_catalog)
+            order = self._model_display_order(models, th_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
                 t.append(f"  {mark} {m:<26}", style=style)
-                note = self._model_note(m, live_catalog)
+                note = self._model_note(m, th_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
-            if hosted:
-                t.append(f"  the catalog is live — {hosted[1]} refetches it\n",
+            if active == "tokenharbour":
+                t.append("  the catalog is live — /tokenharbour-models refetches it\n",
                          style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
-        # A hosted gateway's list is fetched, so an un-warmed cache would leave
+        # TokenHarbour's list is fetched, so an un-warmed cache would leave
         # `models` as the Logfare fallback and reject a model the gateway does
         # serve. Fetch it here instead — this is an explicit switch, so one
         # network round-trip is the right price for a correct answer.
-        if hosted and live_catalog is None:
-            creds = (th_mod.load_credentials() if active == "tokenharbour"
-                     else oc_mod.load_credentials())
-            token = creds[0] if creds else ""
-            fetched, _ = (th_mod.fetch_models(token) if active == "tokenharbour"
-                          else oc_mod.fetch_models(token))
-            if fetched is not None:
-                live_catalog = fetched
-                models = tuple(m.id for m in fetched)
+        if active == "tokenharbour" and th_catalog is None:
+            creds = th_mod.load_credentials()
+            if creds is not None:
+                fetched, _ = th_mod.fetch_models(creds[0])
+                if fetched is not None:
+                    th_catalog = fetched
+                    models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
         # old behaviour — accept anything — is right there.
@@ -1524,25 +1501,16 @@ class ZimZillaApp(App):
     def _model_note(self, name: str, catalog) -> str:
         """The price/context note beside a model in /model.
 
-        A hosted gateway's catalog is authoritative for its own models, so it
-        answers first. The two gateways differ in what they carry: TokenHarbour
-        prices each entry (so a zero price and a ``free`` flag agree), while
-        OpenCode Zen lists no prices at all and marks a free model only by its
-        ``-free`` id. So the free flag is read from the model itself, and a model
-        the catalog prices is shown with that price. A model the catalog knows
-        but does not price is called "paid" rather than dressed up with this
-        harness's own estimate, which would be a guess about another party's
-        bill. Only a model absent from the catalog falls through to the local
-        estimate table, as every source did before.
+        TokenHarbour's catalog is authoritative for its own models — it is the
+        gateway's own price, not this harness's estimate — so it wins when
+        present. Everywhere else the local estimate table answers, as before.
         """
-        if catalog:
-            m = next((x for x in catalog if x.id == name), None)
-            if m is not None:
-                if m.free:
-                    return "free"
-                if m.price_in or m.price_out:
-                    return f"${m.price_in:g}/${m.price_out:g} per Mtok"
-                return "paid"
+        live = th_mod.price_for(name, catalog)
+        if live is not None:
+            pin, pout = live
+            if pin == 0.0 and pout == 0.0:
+                return "free"
+            return f"${pin:g}/${pout:g} per Mtok"
         pin, pout = price_for(name)
         return f"${pin:.2f}/${pout:.2f} per Mtok"
 
@@ -1665,22 +1633,20 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {k:<12}", style=style)
                 t.append(f":{src.port}  {src.label:<12} ", style=p.primary)
                 t.append(f"{state}\n", style=p.accent if up else p.amber)
-            # The hosted gateways have no port and no local proxy, so they are
-            # listed from their credential rather than from discover() — "proxy
-            # up" is not a question you can ask a remote host.
-            for key, (label, _cmd) in HOSTED_SOURCES.items():
-                creds = (th_mod.load_credentials() if key == "tokenharbour"
-                         else oc_mod.load_credentials())
-                mark = "◉" if active == key else "○"
-                style = f"bold {p.accent}" if active == key else p.primary
-                t.append(f"  {mark} {key:<12}", style=style)
-                t.append(f"hosted  {label:<12} ", style=p.primary)
-                if creds is None:
-                    t.append(f"no key — /{key}-api-setup\n", style=p.amber)
-                else:
-                    t.append(f"key from {creds[2]}\n", style=p.accent)
-            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice,  "
-                     "/zim-tokenharbour  or  /opencode\n", style=p.dim)
+            # TokenHarbour has no port and no local proxy, so it is listed from
+            # its credential rather than from discover() — "proxy up" is not a
+            # question you can ask a hosted gateway.
+            th = th_mod.load_credentials()
+            mark = "◉" if active == "tokenharbour" else "○"
+            style = f"bold {p.accent}" if active == "tokenharbour" else p.primary
+            t.append(f"  {mark} {'tokenharbour':<12}", style=style)
+            t.append("hosted  TokenHarbour ", style=p.primary)
+            if th is None:
+                t.append("no key — /tokenharbour-api-setup\n", style=p.amber)
+            else:
+                t.append(f"key from {th[2]}\n", style=p.accent)
+            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice  or  "
+                     "/zim-tokenharbour\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
 
@@ -1879,136 +1845,6 @@ class ZimZillaApp(App):
         if not model:
             self._sys_line("fetching the free model list…")
             self._fetch_tokenharbour_models(token)
-
-    # ---- OpenCode Zen ----------------------------------------------------
-    # The second hosted Anthropic-protocol gateway, and TokenHarbour's twin: the
-    # key is set by the operator (/opencode-api-setup) rather than discovered in
-    # a shipped profile, and the catalog is fetched live rather than declared.
-    # It differs in one way that matters to the code below — its catalog endpoint
-    # is public, so the free list can be shown before a key is set.
-    def _cmd_opencode_key(self, args) -> None:
-        """/opencode-api-setup {key} — store the OpenCode Zen API key.
-
-        Written to ~/.zimzilla/opencode/source, mode 600, in the same profile
-        format every other source uses. The key is never echoed back — the
-        confirmation names the file and the last four characters, which is
-        enough to tell two keys apart and not enough to leak one.
-        """
-        p = self.palette
-        if not args:
-            creds = oc_mod.load_credentials()
-            t = Text()
-            t.append("  OPENCODE ZEN API KEY\n\n", style=f"bold {p.accent}")
-            if creds is None:
-                t.append("  no key set.\n\n", style=p.amber)
-            else:
-                _, _, origin = creds
-                t.append("  source: ", style=p.dim)
-                t.append(origin + "\n\n", style=p.primary)
-            t.append("  set it with  ", style=p.dim)
-            t.append("/opencode-api-setup <key>\n", style=f"bold {p.primary}")
-            t.append("  get a key at  ", style=p.dim)
-            t.append("https://opencode.ai/zen\n", style=p.primary)
-            t.append(f"  stored in     {oc_mod.PROFILE}\n", style=p.dim)
-            self.query_one(ChatPane).write_block(t)
-            return
-
-        key = args[0].strip()
-        if not oc_mod.looks_like_key(key):
-            self._sys_line(
-                "that does not look like an API key — paste just the key, "
-                "not the whole `export` line", warn=True)
-            return
-
-        # Keep whatever model is current, so setting a key does not silently
-        # reset the model the operator was on.
-        current = self.cfg.model if oc_mod.is_opencode(self.cfg.base_url) else ""
-        path = oc_mod.save_key(key, current)
-        oc_mod.clear_cache()          # a new key invalidates the old catalog
-        tail = key[-4:]
-        self._sys_line(f"OpenCode Zen key saved (…{tail}) to {path}", ok=True)
-        self._sys_line("switch to it with /opencode")
-
-    def _cmd_opencode(self, args) -> None:
-        """/opencode — repoint the session at OpenCode Zen, then show what is free.
-
-        One command does both, because the catalog is public: the free list is
-        worth showing whether or not a key is set, so this switches when it can
-        and lists the free models either way. Unlike TokenHarbour there is no
-        separate fetch command — the fetch is this command's second half.
-        """
-        creds = oc_mod.load_credentials()
-        if creds is None:
-            # No key: still worth showing the free list, since the endpoint that
-            # serves it needs no credential. Say why nothing was switched.
-            self._sys_line(
-                "no OpenCode Zen key found. Set one with /opencode-api-setup "
-                "<key>, or source a profile first — showing the free list anyway")
-            self._fetch_opencode_models("")
-            return
-
-        token, model, origin = creds
-        if sources_mod.active_key(self.cfg.base_url) == "opencode":
-            # Already pointed here — most often because a profile was sourced
-            # before launch. Record it anyway: the environment does not survive
-            # the next launch, and the whole point of the selection file is that
-            # the choice does.
-            oc_mod.set_current("opencode")
-            self._sys_line(f"already on OpenCode Zen ({origin})", ok=True)
-            self._fetch_opencode_models(token)
-            return
-
-        applied = oc_mod.apply_to(self.cfg)
-        if applied is None:            # unreachable: creds was just checked
-            self._sys_line("no OpenCode Zen key found", warn=True)
-            return
-        origin, model = applied
-        self.agent._client = None      # rebuild against the new host
-        oc_mod.set_current("opencode")
-        self._refresh_after_source_change("OpenCode Zen", f"key from {origin}")
-
-        # Always fetch, not only when no model is named: the free list is the
-        # point of this command, and it warms the cache /model reads from.
-        self._fetch_opencode_models(token)
-
-    @work(exclusive=True, thread=True)
-    def _fetch_opencode_models(self, token: str) -> None:
-        """The blocking fetch, off the UI thread, then a call back on it."""
-        models, err = oc_mod.fetch_models(token)
-        self.call_from_thread(self._show_opencode_models, models, err)
-
-    def _show_opencode_models(self, models, err: str) -> None:
-        p = self.palette
-        if models is None:
-            self._sys_line(f"OpenCode Zen: {err}", warn=True)
-            return
-        free = [m for m in models if m.free]
-        t = Text()
-        t.append("  OPENCODE ZEN — FREE MODELS\n\n", style=f"bold {p.accent}")
-        if not free:
-            t.append("  nothing is free right now.\n", style=p.amber)
-            t.append(f"  {len(models)} models are served, none marked free.\n",
-                     style=p.dim)
-        else:
-            for m in free:
-                mark = "◉" if m.id == self.cfg.model else "○"
-                style = f"bold {p.accent}" if m.id == self.cfg.model else p.primary
-                # Pad to a minimum, not a fixed width: several of these ids are
-                # longer than any sane column, and ``:<30`` pads nothing when the
-                # id already exceeds it — so the note runs straight into the id
-                # ("…contributor-freefree"). The max(1, …) keeps one space
-                # whatever the id's length.
-                t.append(f"  {mark} {m.id}"
-                         f"{' ' * max(1, 30 - len(m.id))}", style=style)
-                t.append(m.blurb + "\n", style=p.dim)
-            t.append("\n  pick one with  ", style=p.dim)
-            t.append("/model <name>\n", style=f"bold {p.primary}")
-        t.append(f"  {len(models)} models served in total · "
-                 "see them all with /model\n", style=p.dim)
-        self.query_one(ChatPane).write_block(t)
-        # The transcript is not a picker: offer these as the live list /model
-        # reads, so the two commands agree.
-        self._refresh_model_choices()
 
     def _refresh_model_choices(self) -> None:
         """Re-render the completion popup against the live catalog.
@@ -3186,10 +3022,6 @@ class ZimZillaApp(App):
              "tokenharbour-api-setup"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free",
              "tokenharbour-models"),
-            ("/opencode", "switch to OpenCode Zen; fetch the free models",
-             "opencode"),
-            ("/opencode-api-setup", "store your OpenCode Zen API key",
-             "opencode-api-setup"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),

@@ -37,8 +37,6 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
-    ("/opencode", "switch to OpenCode Zen; fetch the free models"),
-    ("/opencode-api-setup", "store your OpenCode Zen API key"),
     ("/save", "write the session to disk"),
     ("/load", "restore a saved session"),
     ("/compact", "summarise history to free context"),
