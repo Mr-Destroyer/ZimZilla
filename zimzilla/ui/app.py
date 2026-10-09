@@ -24,6 +24,7 @@ from .. import phish as phish_mod
 from .. import session as session_mod
 from .. import sources as sources_mod
 from .. import team as team_mod
+from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
 from ..agent import Agent
 from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
@@ -559,7 +560,9 @@ class ZimZillaApp(App):
             yield ZimPane(self.palette)
             yield TelemetryRail(self.palette, total_context=self.cfg.context_window)
         with Vertical(id="bottom-dock"):
-            yield CompletionPopup(self.palette, id="complete")
+            popup = CompletionPopup(self.palette, id="complete")
+            popup.base_url = self.cfg.base_url
+            yield popup
             yield StatusBar(self.palette)
             yield PromptInput(placeholder="❯ message ZimZilla…   ( / commands · @ files · ^K palette )",
                               id="input")
@@ -1230,6 +1233,9 @@ class ZimZillaApp(App):
     BUSY_OK = frozenset({
         "help", "cost", "scope", "mode", "model",
         "stop-hunt", "summary-hunt", "findings", "exit", "quit",
+        # Setting a key or reading a catalog does not touch the running turn, so
+        # both stay typeable mid-answer — the same reason /mode and /model do.
+        "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1257,7 +1263,10 @@ class ZimZillaApp(App):
             "findings": lambda a: self._cmd_findings(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
+            "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
             "zim-source": lambda a: self._cmd_zim_source(None),
+            "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
+            "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
         }
@@ -1285,7 +1294,10 @@ class ZimZillaApp(App):
             ("/theme green|amber|cyan", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
+            ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-source", "show upstream sources and their status"),
+            ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
+            ("/tokenharbour-models", "fetch the live catalog; show what is free"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
@@ -1404,6 +1416,10 @@ class ZimZillaApp(App):
         # does not know is a 404 at request time, not a switch.
         active = sources_mod.active_key(self.cfg.base_url)
         models = sources_mod.models_for(self.cfg.base_url) or tuple(KNOWN_MODELS)
+        # TokenHarbour's catalog is fetched, so it also carries prices and a
+        # free flag the other sources have no equivalent of. Read once, here.
+        th_catalog = (th_mod.cached_models()
+                      if active == "tokenharbour" else None)
 
         if not args:
             t = Text()
@@ -1411,20 +1427,40 @@ class ZimZillaApp(App):
             t.append(self.cfg.model + "\n", style=f"bold {p.accent}")
             if active:
                 src = sources_mod.discover().get(active)
+                label = src.label if src else ("TokenHarbour" if active == "tokenharbour"
+                                               else active)
                 t.append("  source: ", style=p.dim)
-                t.append(f"{src.label if src else active}", style=p.dim)
+                t.append(label, style=p.dim)
                 t.append(f"   ·   {self.cfg.base_url}\n", style=p.dim)
             t.append("\n", style=p.dim)
-            for m in models:
+            # Free first, then the rest. A hosted gateway's list is long and
+            # changes; the operator almost always wants the free ones, so they
+            # lead — with the model in use never hidden, whatever it costs.
+            order = self._model_display_order(models, th_catalog)
+            for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
-                pin, pout = price_for(m)
-                t.append(f"  {mark} {m:<22}", style=style)
-                t.append(f"${pin:.2f}/${pout:.2f} per Mtok\n", style=p.dim)
+                t.append(f"  {mark} {m:<26}", style=style)
+                note = self._model_note(m, th_catalog)
+                t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
+            if active == "tokenharbour":
+                t.append("  the catalog is live — /tokenharbour-models refetches it\n",
+                         style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
+        # TokenHarbour's list is fetched, so an un-warmed cache would leave
+        # `models` as the Logfare fallback and reject a model the gateway does
+        # serve. Fetch it here instead — this is an explicit switch, so one
+        # network round-trip is the right price for a correct answer.
+        if active == "tokenharbour" and th_catalog is None:
+            creds = th_mod.load_credentials()
+            if creds is not None:
+                fetched, _ = th_mod.fetch_models(creds[0])
+                if fetched is not None:
+                    th_catalog = fetched
+                    models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
         # old behaviour — accept anything — is right there.
@@ -1440,6 +1476,43 @@ class ZimZillaApp(App):
         self.query_one(StatusBar).model = name
         self.query_one(StatusBar).render_bar()
         self._sys_line(f"model switched to {name}", ok=True)
+
+    def _model_display_order(self, models, catalog) -> list[str]:
+        """The /model list, free models first.
+
+        Only TokenHarbour has a free tier, and only its catalog can tell free
+        from paid. For every other source the catalog is None and this is the
+        declared order unchanged — so the sort never reorders a list it has no
+        prices for, which would look like a bug in Logfare's catalog.
+        """
+        ids = list(models)
+        if not catalog:
+            return ids
+        free = {m.id for m in catalog if m.free}
+        if not free:
+            return ids
+        # Stable: free models keep catalog order, then the rest keep theirs.
+        # The current model is pinned to the top so it is never scrolled off.
+        head = [m for m in ids if m == self.cfg.model]
+        frees = [m for m in ids if m in free and m != self.cfg.model]
+        rest = [m for m in ids if m not in free and m != self.cfg.model]
+        return head + frees + rest
+
+    def _model_note(self, name: str, catalog) -> str:
+        """The price/context note beside a model in /model.
+
+        TokenHarbour's catalog is authoritative for its own models — it is the
+        gateway's own price, not this harness's estimate — so it wins when
+        present. Everywhere else the local estimate table answers, as before.
+        """
+        live = th_mod.price_for(name, catalog)
+        if live is not None:
+            pin, pout = live
+            if pin == 0.0 and pout == 0.0:
+                return "free"
+            return f"${pin:g}/${pout:g} per Mtok"
+        pin, pout = price_for(name)
+        return f"${pin:.2f}/${pout:.2f} per Mtok"
 
     def _cmd_cost(self, args=None) -> None:
         p = self.palette
@@ -1560,7 +1633,20 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {k:<12}", style=style)
                 t.append(f":{src.port}  {src.label:<12} ", style=p.primary)
                 t.append(f"{state}\n", style=p.accent if up else p.amber)
-            t.append("\n  switch with  /zim-logfare  or  /zim-tokenjuice\n", style=p.dim)
+            # TokenHarbour has no port and no local proxy, so it is listed from
+            # its credential rather than from discover() — "proxy up" is not a
+            # question you can ask a hosted gateway.
+            th = th_mod.load_credentials()
+            mark = "◉" if active == "tokenharbour" else "○"
+            style = f"bold {p.accent}" if active == "tokenharbour" else p.primary
+            t.append(f"  {mark} {'tokenharbour':<12}", style=style)
+            t.append("hosted  TokenHarbour ", style=p.primary)
+            if th is None:
+                t.append("no key — /tokenharbour-api-setup\n", style=p.amber)
+            else:
+                t.append(f"key from {th[2]}\n", style=p.accent)
+            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice  or  "
+                     "/zim-tokenharbour\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
 
@@ -1620,15 +1706,183 @@ class ZimZillaApp(App):
         self.agent._client = None
 
         sources_mod.set_current(src.key)
-        self._refresh_after_source_change(src, detail)
+        self._refresh_after_source_change(src.label, f":{src.port}, {detail}")
 
-    def _refresh_after_source_change(self, src, detail: str) -> None:
+    # ---- TokenHarbour ----------------------------------------------------
+    # A hosted Anthropic-protocol gateway, not a local proxy: the key is set by
+    # the operator (/tokenharbour-api-setup) rather than discovered in a shipped
+    # profile, and the catalog is fetched live rather than declared in a table.
+    def _cmd_tokenharbour_key(self, args) -> None:
+        """/tokenharbour-api-setup {key} — store the TokenHarbour API key.
+
+        Written to ~/.zimzilla/tokenharbour/source, mode 600, in the same
+        profile format every other source uses. The key is never echoed back —
+        the confirmation names the file and the last four characters, which is
+        enough to tell two keys apart and not enough to leak one.
+        """
+        p = self.palette
+        if not args:
+            creds = th_mod.load_credentials()
+            t = Text()
+            t.append("  TOKENHARBOUR API KEY\n\n", style=f"bold {p.accent}")
+            if creds is None:
+                t.append("  no key set.\n\n", style=p.amber)
+            else:
+                _, _, origin = creds
+                t.append("  source: ", style=p.dim)
+                t.append(origin + "\n\n", style=p.primary)
+            t.append("  set it with  ", style=p.dim)
+            t.append("/tokenharbour-api-setup <key>\n", style=f"bold {p.primary}")
+            t.append("  get a key at  ", style=p.dim)
+            t.append("https://tokenharbor.ai\n", style=p.primary)
+            t.append(f"  stored in     {th_mod.PROFILE}\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        key = args[0].strip()
+        if not th_mod.looks_like_key(key):
+            self._sys_line(
+                "that does not look like an API key — paste just the key, "
+                "not the whole `export` line", warn=True)
+            return
+
+        # Keep whatever model is current, so setting a key does not silently
+        # reset the model the operator was on.
+        current = self.cfg.model if th_mod.is_tokenharbour(self.cfg.base_url) else ""
+        path = th_mod.save_key(key, current)
+        th_mod.clear_cache()          # a new key invalidates the old catalog
+        tail = key[-4:]
+        self._sys_line(f"TokenHarbour key saved (…{tail}) to {path}", ok=True)
+        self._sys_line("switch to it with /zim-tokenharbour", )
+
+    def _cmd_tokenharbour_models(self, args) -> None:
+        """/tokenharbour-models — fetch the catalog and show what is free, now.
+
+        Runs the fetch off the UI thread so a slow gateway cannot freeze the
+        session, then warms the cache /model reads from.
+        """
+        creds = th_mod.load_credentials()
+        if creds is None:
+            self._sys_line(
+                "no TokenHarbour key — set one with /tokenharbour-api-setup <key>",
+                warn=True)
+            return
+        token, _, origin = creds
+        self._sys_line(f"fetching the TokenHarbour catalog ({origin})…")
+        self._fetch_tokenharbour_models(token)
+
+    @work(exclusive=True, thread=True)
+    def _fetch_tokenharbour_models(self, token: str) -> None:
+        """The blocking fetch, off the UI thread, then a call back on it."""
+        models, err = th_mod.fetch_models(token)
+        self.call_from_thread(self._show_tokenharbour_models, models, err)
+
+    def _show_tokenharbour_models(self, models, err: str) -> None:
+        p = self.palette
+        if models is None:
+            self._sys_line(f"TokenHarbour: {err}", warn=True)
+            return
+        free = [m for m in models if m.free]
+        t = Text()
+        t.append("  TOKENHARBOUR — FREE MODELS\n\n", style=f"bold {p.accent}")
+        if not free:
+            t.append("  nothing is free right now.\n", style=p.amber)
+            t.append(f"  {len(models)} models are served, none at zero cost.\n",
+                     style=p.dim)
+        else:
+            for m in free:
+                mark = "◉" if m.id == self.cfg.model else "○"
+                style = f"bold {p.accent}" if m.id == self.cfg.model else p.primary
+                t.append(f"  {mark} {m.id:<26}", style=style)
+                t.append(m.blurb + "\n", style=p.dim)
+            t.append("\n  pick one with  ", style=p.dim)
+            t.append("/model <name>\n", style=f"bold {p.primary}")
+        t.append(f"  {len(models)} models served in total · "
+                 "see them all with /model\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        # The transcript is not a picker: offer the free ones as the live list
+        # /model reads, so the two commands agree.
+        self._refresh_model_choices()
+
+    def _cmd_zim_tokenharbour(self, args) -> None:
+        """/zim-tokenharbour — repoint the session at the hosted gateway.
+
+        Unlike /zim-logfare and /zim-tokenjuice there is no local proxy to start
+        and no shipped profile: the key comes from wherever the operator put it
+        — the environment (a sourced ~/claude-source profile), ZimZilla's own
+        profile, or a ~/claude-source file — and the model defaults to a free
+        one so a fresh switch costs nothing.
+        """
+        creds = th_mod.load_credentials()
+        if creds is None:
+            self._sys_line(
+                "no TokenHarbour key found. Set one with "
+                "/tokenharbour-api-setup <key>, or source a profile first "
+                "(source ~/claude-source/haiku-5.5)", warn=True)
+            return
+
+        token, model, origin = creds
+        if sources_mod.active_key(self.cfg.base_url) == "tokenharbour":
+            # Already pointed here — most often because a profile was sourced
+            # before launch. Record it anyway: the environment does not survive
+            # the next launch, and the whole point of the selection file is that
+            # the choice does.
+            th_mod.set_current("tokenharbour")
+            self._sys_line(f"already on TokenHarbour ({origin})", ok=True)
+            return
+
+        applied = th_mod.apply_to(self.cfg)
+        if applied is None:            # unreachable: creds was just checked
+            self._sys_line("no TokenHarbour key found", warn=True)
+            return
+        origin, model = applied
+        self.agent._client = None      # rebuild against the new host
+        th_mod.set_current("tokenharbour")
+        self._refresh_after_source_change("TokenHarbour", f"key from {origin}")
+
+        # A first switch with no model chosen lands on whatever the profile
+        # named; with none, offer the free list rather than guessing a paid one.
+        if not model:
+            self._sys_line("fetching the free model list…")
+            self._fetch_tokenharbour_models(token)
+
+    def _refresh_model_choices(self) -> None:
+        """Re-render the completion popup against the live catalog.
+
+        `/model <TAB>` offers whatever ``sources_mod.models_for`` reports, which
+        for TokenHarbour is the fetched list. Nothing is cached in the popup, so
+        there is nothing to invalidate — but the popup may be open with the old
+        list showing, and this repaints it so the two agree.
+        """
+        try:
+            popup = self._completer()
+        except NoMatches:
+            return
+        try:
+            inp = self.query_one("#input", Input)
+            popup.refresh_for(inp.value, self.cfg.workdir)
+        except Exception:
+            pass
+
+    def _refresh_after_source_change(self, label: str, detail: str) -> None:
+        """Repaint everything that names the model or the endpoint.
+
+        Takes a label and a detail string rather than a Source: the local
+        proxies have a port and a dataclass to describe them, TokenHarbour is a
+        remote host with neither, and this only ever needed the two words.
+        """
         p = self.palette
         # Same refresh _cmd_model does — HeaderBar + StatusBar carry the model.
         self.query_one(HeaderBar).set_model(self.cfg.model)
         self.query_one(StatusBar).model = self.cfg.model
         self.query_one(StatusBar).render_bar()
-        self._sys_line(f"source switched to {src.label} (:{src.port}, {detail})", ok=True)
+        # The popup offers this endpoint's catalog on `/model <TAB>`, so it has
+        # to learn the new host at the same moment the client does.
+        try:
+            self._completer().base_url = self.cfg.base_url
+        except NoMatches:
+            pass
+        self._sys_line(f"source switched to {label} ({detail})", ok=True)
         t = Text()
         t.append("  ↳ ", style=p.dim)
         t.append(f"model {self.cfg.model}", style=p.primary)
@@ -2763,6 +3017,11 @@ class ZimZillaApp(App):
             ("/rain", "toggle the matrix rain", "rain"),
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
+            ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
+            ("/tokenharbour-api-setup", "store your TokenHarbour API key",
+             "tokenharbour-api-setup"),
+            ("/tokenharbour-models", "fetch the live catalog; show what is free",
+             "tokenharbour-models"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),

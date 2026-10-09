@@ -298,6 +298,57 @@ or a colour diff of the change, and three keys:
 
 ---
 
+## Upstreams
+
+ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
+points at, so it can run against a local LiteLLM proxy or a hosted gateway
+without any code caring which. Three sources are wired up:
+
+| Source | Endpoint | How it starts |
+|---|---|---|
+| **Logfare** | `:4001` | the bundled proxy — the default |
+| **Token Juice** | `:4000` | its own local proxy |
+| **TokenHarbour** | `tokenharbor.ai` | hosted — nothing to start |
+
+Switch with `/zim-logfare`, `/zim-tokenjuice` or `/zim-tokenharbour`; the choice
+is remembered, so the next launch comes back to the one that was working.
+
+### TokenHarbour
+
+TokenHarbour is remote and needs a key of your own. Set it once:
+
+```
+/tokenharbour-api-setup thk_live_yourkeyhere
+```
+
+That writes `~/.zimzilla/tokenharbour/source` (mode 600) — the same profile
+format as every other source, so it is shell-sourceable too.
+
+If you already keep per-provider profiles for Claude Code, **you do not need
+that command**. A profile that is already sourced is honoured:
+
+```sh
+source ~/claude-source/haiku-5.5 && zimzilla
+```
+
+ZimZilla picks up the base URL, the key and the model from it, and anything
+under `~/claude-source` that points at TokenHarbour is found automatically even
+when nothing was sourced. An endpoint you set deliberately is never overridden
+by a remembered choice.
+
+TokenHarbour's catalog is **live** — it changes, and some models are free:
+
+```
+/tokenharbour-models      # fetch it now, and list what is free
+/model                    # free models first, with prices
+/model mimo-v2.5:free     # switch to one
+```
+
+`/model` reads the fetched catalog, so free models sort to the top and the
+prices shown are the gateway's own rather than a local estimate.
+
+---
+
 ## Scope
 
 Two files, one job each. Both are picked up automatically from the working
@@ -373,6 +424,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
+| `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
+| `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
+| `/tokenharbour-models` | fetch the live catalog; show what is free |
 | `/bug-hunt <target>` | recon, then waves of 10 agents until stopped |
 | `/stop-hunt` | end a running hunt |
 | `/summary-hunt` | write the hunt report |

@@ -62,6 +62,39 @@ if [[ -r "$ZIMZILLA_HOME/current-source" ]]; then
   _current_source="$(tr -d '[:space:]' < "$ZIMZILLA_HOME/current-source" 2>/dev/null || true)"
 fi
 
+# An endpoint already in the environment wins over everything below.
+#
+# `source ~/claude-source/haiku-5.5 && zimzilla` is how the operator points a
+# session at a hosted provider, and it has to mean the same thing here as it
+# does for Claude Code. The launcher would otherwise source $LITELLM_ENV_FILE,
+# whose own ANTHROPIC_BASE_URL would clobber the inherited one — leaving a
+# session on the wrong provider with no indication, which is exactly what the
+# fail-closed check further down exists to prevent. A *local* inherited URL is
+# left on the normal path: that is the ordinary proxy case and still needs the
+# profile and the health check.
+_inherited_base_url="${ANTHROPIC_BASE_URL:-}"
+_skip_profile=0
+if [[ -n "$_inherited_base_url" \
+      && "$_inherited_base_url" != *"localhost:"* \
+      && "$_inherited_base_url" != *"127.0.0.1:"* ]]; then
+  _skip_profile=1
+  ZIMZILLA_NO_PROXY=1
+fi
+
+if [[ "$_current_source" == "tokenharbour" && "$_skip_profile" != "1" ]]; then
+  # TokenHarbour is remote: there is no proxy to start. ZimZilla's own profile
+  # (written by /tokenharbour-api-setup) is sourced when it exists, which sets
+  # ANTHROPIC_BASE_URL to the hosted endpoint; the case below then skips the
+  # proxy on its own. When it does not exist the key lives in the environment
+  # or in ~/claude-source, and the harness resolves it from there — so nothing
+  # is sourced and nothing is required, but the fail-closed check must still be
+  # told there is no proxy to insist on.
+  if [[ -r "$ZIMZILLA_HOME/tokenharbour/source" ]]; then
+    LITELLM_ENV_FILE="${_env_override:-$ZIMZILLA_HOME/tokenharbour/source}"
+  fi
+  ZIMZILLA_NO_PROXY=1
+fi
+
 if [[ "$_current_source" == "tokenjuice" ]]; then
   # Prefer the installed route, which setup.sh populates; fall back to the
   # standalone deepseek-claude layout for a machine that had one before
@@ -173,7 +206,7 @@ fi
 # --- load the profile --------------------------------------------------------
 
 _prev_base_url="${ANTHROPIC_BASE_URL:-}"
-if [[ -r "$LITELLM_ENV_FILE" ]]; then
+if [[ "$_skip_profile" != "1" && -r "$LITELLM_ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   . "$LITELLM_ENV_FILE"

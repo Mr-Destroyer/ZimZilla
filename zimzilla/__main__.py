@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from . import sources as sources_mod
+from . import tokenharbour as th_mod
 from . import update as update_mod
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL, find_agents_file
 from .scope import find_legacy_scope
@@ -132,6 +134,20 @@ def main(argv: list[str] | None = None) -> int:
         rain=True if args.rain else None,
         boot_rain=False if args.no_rain else None,
     )
+
+    # A remembered TokenHarbour choice has to be re-applied here, not in the
+    # launcher: the key can live in ZimZilla's own profile, in ~/claude-source,
+    # or only in the environment, and only the harness knows how to find all
+    # three. The launcher deliberately does not source a TokenHarbour profile it
+    # cannot find, so without this a session would come back up on the default
+    # Logfare endpoint with the wrong credential.
+    #
+    # Guarded by applies_to_default_endpoint: an endpoint the operator pointed
+    # somewhere deliberate — the gateway itself, or any other host — is left
+    # exactly as they set it, so a stale selection file cannot hijack it.
+    if sources_mod.current_key() == "tokenharbour" \
+            and th_mod.applies_to_default_endpoint(cfg.base_url):
+        th_mod.apply_to(cfg)
 
     # The split is not silent. A stale scope.yaml would otherwise leave the
     # operator believing the guard is armed when nothing is loaded at all —

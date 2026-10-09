@@ -92,10 +92,18 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
 
     None means "not a known source" — the caller should fall back to the
     default registry rather than showing an empty list.
+
+    TokenHarbour's list is fetched, not declared, so it comes from the catalog
+    cache rather than MODELS_BY_KEY. A cold cache yields None, and the caller
+    falls back — which is why /tokenharbour-models exists to warm it.
     """
     key = active_key(base_url)
     if key is None:
         return None
+    if key == "tokenharbour":
+        from . import tokenharbour as th_mod
+        cached = th_mod.cached_ids()
+        return tuple(cached) if cached else None
     return MODELS_BY_KEY.get(key) or None
 
 
@@ -183,12 +191,25 @@ def _state_file() -> Path:
     return ZIMZILLA_HOME / "current-source"
 
 
+#: Sources that are always selectable, whether or not `discover()` finds them
+#: on this machine. TokenHarbour is remote: it has no local profile, service or
+#: config to discover, so gating it on discover() would silently discard the
+#: selection and drop a session back onto Logfare at the next launch.
+BUILTIN_KEYS = frozenset({"tokenharbour"})
+
+
 def current_key() -> str | None:
-    """The source the user last selected, if it is still a valid one."""
+    """The source the user last selected, if it is still a valid one.
+
+    A discovered source is valid while its files are present. A built-in one is
+    valid always — there is nothing on disk that could go missing.
+    """
     try:
         key = _state_file().read_text(encoding="utf-8").strip()
     except OSError:
         return None
+    if key in BUILTIN_KEYS:
+        return key
     return key if key in discover() else None
 
 
@@ -202,7 +223,17 @@ def set_current(key: str) -> None:
 
 
 def active_key(base_url: str) -> str | None:
-    """Best guess at which source the running session is pointed at."""
+    """Best guess at which source the running session is pointed at.
+
+    The local proxies are identified by their port. TokenHarbour is remote, so
+    it is identified by its host instead — and checked first, because a hosted
+    URL has no port to match on and would otherwise fall through to ``None``.
+    """
+    # Imported locally: sources is imported by tokenharbour's callers, and a
+    # module-level import would make the two modules import each other.
+    from . import tokenharbour as th_mod
+    if th_mod.is_tokenharbour(base_url):
+        return "tokenharbour"
     m = re.search(r":(\d{2,5})(?:/|$)", base_url or "")
     if not m:
         return None

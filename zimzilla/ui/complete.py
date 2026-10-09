@@ -34,6 +34,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-logfare", "switch upstream to Logfare (:4001)"),
     ("/zim-tokenjuice", "switch upstream to Token Juice (:4000)"),
     ("/zim-source", "show upstream sources and status"),
+    ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
+    ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
+    ("/tokenharbour-models", "fetch the live catalog; show what is free"),
     ("/save", "write the session to disk"),
     ("/load", "restore a saved session"),
     ("/compact", "summarise history to free context"),
@@ -122,6 +125,9 @@ class CompletionPopup(VerticalScroll):
         self.items: list[tuple[str, str]] = []  # (value, description)
         self.index = 0
         self.kind = ""  # "slash" | "file"
+        #: The live endpoint, so `/model <TAB>` can offer that upstream's
+        #: catalog. Set by the app whenever the source changes.
+        self.base_url = ""
         self._body = Static(id="complete-body")
         self._files: list[str] | None = None
 
@@ -154,6 +160,12 @@ class CompletionPopup(VerticalScroll):
                     "osint": OSINT_KIND_ORDER,
                     "phish": ["stop", "status"],
                 }.get(parts[0].lower(), [])
+                if parts[0].lower() == "model":
+                    # Offer whatever the active upstream actually serves, so
+                    # TokenHarbour's fetched catalog shows up here too. Imported
+                    # locally to keep this module free of a package-level cycle.
+                    from .. import sources as sources_mod
+                    pool = list(sources_mod.models_for(self.base_url) or [])
                 items = [(a, "") for a in pool if a.startswith(arg) and a != arg]
             else:
                 items = [(c, d) for c, d in SLASH_COMMANDS if c.startswith(query)]
