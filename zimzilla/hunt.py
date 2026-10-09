@@ -96,8 +96,23 @@ _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 FINDING_CONTRACT = """\
 REPORTING
 ---------
-If you confirm a vulnerability, end your final message with ONE JSON object on
-its own lines, wrapped in a ```json fence:
+Report each confirmed vulnerability TWICE, and the first time is the one that
+matters:
+
+1. THE MOMENT YOU CONFIRM IT — call the ``report_finding`` tool. Do this as soon
+   as you have the evidence in hand, in the same turn you got it, before you go
+   on to the next thing. This is a live engagement: the operator is watching a
+   tracker that fills in as you work, and a finding reported here appears on it
+   within a second. A finding you sit on until the end of your turn is a finding
+   the operator spends that whole time not knowing about.
+
+   Report a bug you confirm even if you have not finished exploiting it — an
+   error that proves injection, a response that proves missing access control, a
+   banner that proves an old vulnerable version. Evidence of the weakness is
+   what counts, not a finished exploit.
+
+2. AGAIN IN YOUR FINAL MESSAGE — end it with ONE JSON object on its own lines,
+   wrapped in a ```json fence:
 
 ```json
 {"findings": [{"title": "short name for the bug",
@@ -108,21 +123,18 @@ its own lines, wrapped in a ```json fence:
                "remediation": "how to fix it"}]}
 ```
 
-Rules for this block:
-- This block is REQUIRED. It is how your work reaches the operator and the next
-  wave — a vulnerability you confirmed but did not report in this shape is a
-  vulnerability the engagement never learns about.
-- One entry per distinct bug. If you found nothing, omit the block entirely or
-  send `{"findings": []}` — do not invent a finding to fill it.
+Rules for both:
+- One entry per distinct bug, and the same bug is the same bug in both places.
+  The two are reconciled by title and asset, so repeating yourself costs
+  nothing; reporting the same bug under two different names inflates the count.
+- If you found nothing, call no tool and omit the block entirely (or send
+  `{"findings": []}`) — do not invent a finding to fill either one.
 - `severity` must be one of the five words above. Judge it honestly: a
   theoretical weakness with no demonstrated impact is `low`, not `critical`.
 - `evidence` must be something you actually observed, not something you expect.
-  A finding with no evidence is a guess and will be discarded.
-- Report a confirmed weakness even if you did not carry the exploitation all the
-  way through — an error that proves injection, a response that proves missing
-  access control, a banner that proves an old vulnerable version. Evidence of
-  the weakness is what counts, not a finished exploit.
-- Put nothing after the block. Anything you want to say, say before it.
+  A finding with no evidence is a guess and will be discarded. ``report_finding``
+  refuses a report with no evidence, which is deliberate.
+- Put nothing after the final JSON block. Anything you want to say, say before it.
 """
 
 
@@ -703,6 +715,49 @@ def write_summary(cfg: Config, run: HuntRun, text: str) -> Path:
 # Running
 # ---------------------------------------------------------------------------
 
+def _finding_from_tool(meta: dict, *, wave: int, agent: str) -> Finding | None:
+    """A finding an agent reported through ``report_finding``, as a Finding.
+
+    The tool hands its payload back on the result's ``meta`` rather than
+    writing anything itself (see ``tools._tool_report_finding``), so this is
+    where a tool call becomes a first-class finding. Shaped to match what
+    ``parse_findings`` produces, so the two paths are indistinguishable once
+    the finding is in the run — which is what lets dedupe reconcile them.
+    """
+    data = (meta or {}).get("finding")
+    if not isinstance(data, dict):
+        return None
+    title = str(data.get("title", "") or "").strip()
+    if not title:
+        return None
+    return Finding(
+        wave=wave,
+        agent=agent,
+        title=title[:200],
+        severity=normalise_severity(data.get("severity")),
+        asset=str(data.get("asset", "") or "").strip()[:300],
+        summary=str(data.get("summary", "") or "").strip(),
+        evidence=str(data.get("evidence", "") or "").strip(),
+        remediation=str(data.get("remediation", "") or "").strip(),
+    )
+
+
+async def _report_live(run: HuntRun, f: Finding,
+                       on_event: Callable[[dict], Awaitable[None]]) -> None:
+    """Record and announce a finding the instant an agent reports it.
+
+    This is the whole point of the tool: the operator's tracker updates while
+    the wave is still running, instead of at the end of it. Deduplicated
+    through ``run.add_finding``, so the mid-turn report and the same bug
+    restated in the agent's final text are one finding — the harvest after the
+    wave then has nothing new to add for anything already published here.
+    """
+    if not run.add_finding(f):
+        return
+    await on_event({"type": "hunt_finding", "finding": _finding_dict(f),
+                    "saved": _save(run, f)})
+
+
 async def _run_agent(
     spec: team_mod.WorkerSpec,
     index: int,
@@ -713,6 +768,8 @@ async def _run_agent(
     tool_hook,
     context: str = "",
     contract: str = "",
+    wave: int = 0,
+    run: HuntRun | None = None,
 ) -> team_mod.WorkerResult:
     """Run one hunt agent to completion. Never raises except on cancellation.
 
@@ -739,8 +796,11 @@ async def _run_agent(
     # cfg._scope — see team.py's module docstring for why sharing one clobbers
     # the scope guard. The mode is inherited: under /mode zim these agents run
     # the operator's AGENTS.md doctrine with every tool armed.
+    #
+    # can_report arms report_finding for this agent. It is a hunt agent, so it
+    # has a tracker to report into; nothing outside a hunt does.
     agent_cfg = dataclasses.replace(cfg)
-    worker = agent_factory(agent_cfg, tool_hook=tool_hook)
+    worker = agent_factory(agent_cfg, tool_hook=tool_hook, can_report=True)
 
     await on_event({"type": "hunt_agent_start", "name": spec.name, "index": index,
                     "brief": spec.brief})
@@ -786,6 +846,17 @@ async def _run_agent(
                     "args": ev.get("args") or {},
                     "meta": ev.get("meta") or {},
                 })
+                # The live edge. A report_finding call publishes here, mid-turn,
+                # rather than waiting for the wave to end — this is what makes
+                # the operator's tracker fill in as the agents work. The event
+                # above still goes out first, so the transcript shows the call
+                # before it shows what it found.
+                if run is not None and ev.get("name") == "report_finding" \
+                        and not ev.get("is_error"):
+                    live = _finding_from_tool(ev.get("meta") or {},
+                                              wave=wave, agent=spec.name)
+                    if live is not None:
+                        await _report_live(run, live, on_event)
             elif etype == "blocked":
                 await on_event({"type": "hunt_agent_result", "name": spec.name,
                                 "tool": ev.get("name", ""), "ok": False,
@@ -822,6 +893,8 @@ async def _run_wave(
     concurrency: int = HUNT_CONCURRENCY,
     context: str = "",
     contract: str = "",
+    wave: int = 0,
+    run: HuntRun | None = None,
 ) -> list[team_mod.WorkerResult]:
     """Run one wave concurrently, racing the stop signal.
 
@@ -842,7 +915,7 @@ async def _run_wave(
             return await _run_agent(
                 spec, index, cfg,
                 on_event=on_event, agent_factory=agent_factory, tool_hook=hook,
-                context=context, contract=contract,
+                context=context, contract=contract, wave=wave, run=run,
             )
 
     tasks = [asyncio.create_task(_one(i, s)) for i, s in enumerate(specs)]
@@ -878,6 +951,7 @@ async def _collect_text_live(
     agent: Agent,
     prompt: str,
     on_event: Callable[[dict], Awaitable[None]],
+    run: HuntRun | None = None,
 ) -> str:
     """Run one turn, reporting what it is doing as it does it.
 
@@ -891,6 +965,12 @@ async def _collect_text_live(
     arbitrary target text, and pushing it into a UI sink unescaped is how a
     scan of a hostile page ends up painting the overlay. The model's own prose
     is the interesting part and it is what gets shown.
+
+    ``run`` is passed so a recon agent's ``report_finding`` call publishes the
+    same way a wave agent's does. Recon is the first thing to touch the target,
+    and it is where an exposed debug endpoint or a stack trace in an error page
+    turns up — a finding confirmed here should reach the tracker now, not at the
+    first wave boundary.
     """
     parts: list[str] = []
     buf: list[str] = []
@@ -916,6 +996,13 @@ async def _collect_text_live(
                 "args": ev.get("args") or {},
                 "blocked": False,
             })
+        elif etype == "tool_result":
+            if run is not None and ev.get("name") == "report_finding" \
+                    and not ev.get("is_error"):
+                live = _finding_from_tool(ev.get("meta") or {},
+                                          wave=0, agent="recon")
+                if live is not None:
+                    await _report_live(run, live, on_event)
         elif etype == "blocked":
             await on_event({
                 "type": "hunt_recon_tool",
@@ -968,20 +1055,22 @@ async def run_hunt(
     # not the mode.
     await on_event({"type": "hunt_recon_start", "target": target,
                     "directory": str(run.directory)})
-    recon_agent = agent_factory(dataclasses.replace(cfg))
+    # can_report, so recon's report_finding calls publish live like a wave
+    # agent's. The final-text harvest below still runs: it catches a recon that
+    # reported in its closing JSON but never called the tool.
+    recon_agent = agent_factory(dataclasses.replace(cfg), can_report=True)
     run.recon = await _collect_text_live(
         recon_agent, RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT),
-        on_event,
+        on_event, run=run,
     )
     await on_event({"type": "hunt_recon_done", "text": run.recon})
 
     # A recon run can itself turn up something — an exposed debug endpoint, a
     # stack trace in an error page. Harvest it before the first wave, or the
-    # planner starts out blind to what recon already knew.
+    # planner starts out blind to what recon already knew. Anything recon
+    # already published through the tool is deduplicated away here.
     for f in parse_findings(run.recon, wave=0, agent="recon"):
-        if run.add_finding(f):
-            await on_event({"type": "hunt_finding", "finding": _finding_dict(f),
-                            "saved": _save(run, f)})
+        await _report_live(run, f, on_event)
 
     # ---- waves, until the operator stops it.
     while not run.stop.is_set():
@@ -1035,16 +1124,26 @@ async def run_hunt(
         if run.stop.is_set():
             break
 
+        # Taken before the wave so the wave's own count can be measured as a
+        # delta: a finding reported live through report_finding is already in
+        # the tracker by the time the wave ends, so counting only the harvest
+        # below would report a wave that published a critical as "0 finding(s)".
+        before = len(run.findings)
+
         results = await _run_wave(
             roster.workers, cfg,
             on_event=on_event, agent_factory=agent_factory,
             stop=run.stop, concurrency=concurrency,
             context=brief_context(run),
             contract=FINDING_CONTRACT,
+            wave=wave, run=run,
         )
 
-        # ---- harvest. Findings come off each agent's final text, so the loop
-        # can re-plan from them even though the agents never spoke to each other.
+        # ---- harvest. Most findings already reached the tracker through
+        # report_finding while the wave was running — that is the live path, and
+        # add_finding has seen them. This sweep is the backstop for an agent
+        # that reported only in its closing JSON, and it is what keeps the
+        # planner's digest complete even when the tool was not called.
         found: list[Finding] = []
         for r in results:
             for f in parse_findings(r.digest, wave=wave, agent=r.spec.name):
@@ -1060,21 +1159,30 @@ async def run_hunt(
         # `found` is every finding reported this wave; `fresh` is the ones the
         # tracker had not already seen. Only the fresh ones are announced, and
         # the wave counter uses `fresh` too, so a bug three agents each
-        # rediscovered reads as one finding rather than three.
+        # rediscovered reads as one finding rather than three — and a bug an
+        # agent already published live through report_finding is not announced
+        # a second time here.
         fresh: list[Finding] = [f for f in found if run.add_finding(f)]
         for f in fresh:
             await on_event({"type": "hunt_finding", "finding": _finding_dict(f),
                             "saved": _save(run, f)})
 
+        # The wave's count is the tracker's growth, not the harvest's size: a
+        # finding that arrived live was counted the moment it was published, so
+        # the two paths have to be reconciled here or the wave reads as finding
+        # nothing. The dedupe in add_finding already guarantees no finding is
+        # counted on both paths, so the delta is exact.
+        this_wave = len(run.findings) - before
+
         ok = sum(1 for r in results if r.ok)
         run.waves.append(
             f"wave {wave}: {len(roster.workers)} agents, {ok} ok, "
-            f"{len(fresh)} finding(s)"
+            f"{this_wave} finding(s)"
             + (" (fixed vector fallback)" if fell_back else "")
         )
         await on_event({
             "type": "hunt_wave_end", "wave": wave,
-            "agents": len(roster.workers), "ok": ok, "found": len(fresh),
+            "agents": len(roster.workers), "ok": ok, "found": this_wave,
             "cost": sum(r.cost for r in results),
             "input": sum(r.input_tokens for r in results),
             "output": sum(r.output_tokens for r in results),

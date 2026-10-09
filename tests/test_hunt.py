@@ -258,8 +258,13 @@ def _hunt_factory(script):
     built: list[Agent] = []
 
     def factory(cfg, **kw):
+        # can_report is forwarded, not dropped: run_hunt arms it on every hunt
+        # agent so report_finding is advertised, and a stub that silently lost
+        # it would make a live-reporting agent look like one that never calls
+        # the tool — hiding the very path these tests exist to cover.
         agent = Agent(cfg, permission_handler=kw.get("permission_handler"),
-                      tool_hook=kw.get("tool_hook"))
+                      tool_hook=kw.get("tool_hook"),
+                      can_report=kw.get("can_report", False))
         state = {"n": 0}
 
         async def fake_stream():
@@ -1420,7 +1425,8 @@ async def test_busy_gate(wd: Path) -> None:
         "save", "load", "compact", "team", "osint", "phish", "bug-hunt",
         "stop-hunt", "summary-hunt", "findings", "zim-logfare",
         "zim-tokenjuice", "zim-source", "zim-tokenharbour",
-        "tokenharbour-api-setup", "tokenharbour-models", "exit", "quit",
+        "tokenharbour-api-setup", "tokenharbour-models", "logfare-models",
+        "exit", "quit",
     }
     check("gate: every busy-permitted command is dispatchable",
           app.BUSY_OK <= dispatch_names,
@@ -1532,6 +1538,238 @@ async def test_contract_in_worker_prompts(wd: Path) -> None:
           "One entry per distinct bug" in prompts[0], prompts[0][-200:])
     check("contract: the contract comes after the brief",
           prompts[0].index("probe auth") < prompts[0].index("One entry per"))
+
+
+def test_report_finding_tool() -> None:
+    """The tool the live tracker is fed by, and the gate around it.
+
+    This is the seam the whole real-time feature hangs off: without a tool that
+    returns the finding on ``meta``, the tracker can only ever be filled in
+    after a wave ends, which is exactly the behaviour the operator asked to
+    change.
+    """
+    from zimzilla import tools as tools_mod
+
+    schema = next((t for t in tools_mod.TOOL_SCHEMAS
+                   if t["name"] == "report_finding"), None)
+    check("tool: report_finding is advertised in the schema list",
+          schema is not None)
+    if schema is not None:
+        props = schema["input_schema"]["properties"]
+        check("tool: it takes a title, severity and evidence",
+              {"title", "severity", "evidence"} <= set(props), str(sorted(props)))
+        # The severity enum is a literal in the schema rather than an import of
+        # hunt.VALID_SEVERITIES, because hunt imports agent which imports tools
+        # — reaching back would close the cycle. A literal that drifts from the
+        # real set would let the model emit a severity the tracker cannot place,
+        # so the two are pinned together here.
+        check("tool: the severity enum matches the tracker's severities",
+              tuple(props["severity"]["enum"]) == hunt_mod.VALID_SEVERITIES,
+              str(props["severity"].get("enum")))
+
+    # It writes nothing, so it must not need permission — a prompt in the middle
+    # of a wave would stall ten agents behind one operator keystroke.
+    check("tool: report_finding is not gated",
+          tools_mod.needs_permission("report_finding") is False)
+
+    # A valid call returns the finding on meta, normalised.
+    res = tools_mod.execute("report_finding", {
+        "title": "SQL injection in ?id", "severity": "CRITICAL",
+        "asset": "api.x.test", "evidence": "curl -d \"'\" returned 500",
+    }, _cfg(Path(tempfile.mkdtemp())))
+    check("tool: a valid report succeeds", res.is_error is False, res.output)
+    meta = res.meta or {}
+    check("tool: the finding rides out on meta", "finding" in meta, str(meta))
+    f = meta.get("finding") or {}
+    check("tool: the title is carried", f.get("title") == "SQL injection in ?id")
+    check("tool: the severity is normalised", f.get("severity") == "critical",
+          str(f.get("severity")))
+    check("tool: the evidence is carried",
+          "500" in str(f.get("evidence", "")))
+
+    # Missing pieces are refused, not silently recorded — a finding with no
+    # evidence is worse than no finding.
+    bad = tools_mod.execute("report_finding", {"title": "x", "severity": "high"},
+                            _cfg(Path(tempfile.mkdtemp())))
+    check("tool: a report with no evidence is an error", bad.is_error is True,
+          bad.output)
+    check("tool: the rejected report still carries no finding",
+          "finding" not in (bad.meta or {}))
+    empty = tools_mod.execute("report_finding", {"severity": "high",
+                                                 "evidence": "x"},
+                              _cfg(Path(tempfile.mkdtemp())))
+    check("tool: a report with no title is an error", empty.is_error is True)
+
+    # The summariser the transcript uses, so the call reads as a one-liner.
+    line = tools_mod.summarise_call(
+        "report_finding", {"title": "SQLi", "severity": "critical"},
+        _cfg(Path(tempfile.mkdtemp())))
+    check("tool: the transcript summarises the call", "SQLi" in line, line)
+
+    # And the gate: only a hunt agent is advertised it.
+    plain = Agent(_cfg(Path(tempfile.mkdtemp())))
+    armed = Agent(_cfg(Path(tempfile.mkdtemp())), can_report=True)
+    plain_tools = {t["name"] for t in plain.tool_schemas()}
+    armed_tools = {t["name"] for t in armed.tool_schemas()}
+    check("tool: an ordinary session is not offered report_finding",
+          "report_finding" not in plain_tools)
+    check("tool: a hunt agent is offered report_finding",
+          "report_finding" in armed_tools)
+    denied = plain._denied("report_finding")
+    check("tool: an ordinary session calling it is denied with a reason",
+          denied is not None and "hunt" in denied, str(denied))
+
+
+def test_finding_from_tool() -> None:
+    """A tool's meta dict becomes a Finding, normalised, or nothing at all."""
+    make = hunt_mod._finding_from_tool
+    f = make({"finding": {"title": "  IDOR /api/users ", "severity": "SEVERE",
+                          "asset": " api.x.test ", "evidence": "e"}},
+             wave=3, agent="agent-7")
+    check("live: a well-formed meta becomes a finding", f is not None)
+    if f is None:
+        return
+    check("live: the title is trimmed", f.title == "IDOR /api/users", f.title)
+    check("live: the severity is normalised", f.severity == "critical", f.severity)
+    check("live: the asset is trimmed", f.asset == "api.x.test", f.asset)
+    check("live: the wave is the one it was reported in", f.wave == 3)
+    check("live: the agent is the one that reported it", f.agent == "agent-7")
+
+    # Anything that is not a finding must yield None rather than a blank
+    # Finding, which would land in the tracker as an untitled entry.
+    check("live: a missing finding key yields nothing",
+          make({}, wave=1, agent="a") is None)
+    check("live: a non-dict yields nothing",
+          make({"finding": "oops"}, wave=1, agent="a") is None)
+    check("live: a finding with no title yields nothing",
+          make({"finding": {"severity": "high", "evidence": "e"}},
+               wave=1, agent="a") is None)
+
+
+async def test_live_reporting_mid_wave(wd: Path) -> None:
+    """A report_finding call publishes before the wave ends.
+
+    This is the operator's actual request: agent-3 finds something and it shows
+    in the tracker *then*, not when the hunt finishes. The assertion that makes
+    it real is ordering — a ``hunt_finding`` must appear in the event stream
+    before the ``hunt_wave_end`` for the wave it was found in.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "auth", "brief": "probe auth", "owns": ["auth"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "worker_prompts": [],
+        "recon_final": "recon: one host",
+        # The worker's one tool call is the live report.
+        "first_tool": ("report_finding", {
+            "title": "SQL injection in ?id", "severity": "critical",
+            "asset": "api.x.test", "evidence": "curl returned a stack trace",
+        }),
+        # And its final message carries the same bug, as the contract asks. The
+        # tracker must not count it twice.
+        "final": _finding_json("SQL injection in ?id", asset="api.x.test"),
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    run = await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=1, concurrency=1,
+    )
+
+    kinds = [e["type"] for e in events]
+    check("live: a finding is published", "hunt_finding" in kinds, str(kinds))
+    if "hunt_finding" in kinds and "hunt_wave_end" in kinds:
+        first_finding = kinds.index("hunt_finding")
+        wave_end = kinds.index("hunt_wave_end")
+        check("live: the finding is published BEFORE the wave ends",
+              first_finding < wave_end,
+              f"finding@{first_finding} wave_end@{wave_end}")
+
+        # And specifically after the agent started, so it really is mid-turn.
+        check("live: the finding lands after its agent started",
+              kinds.index("hunt_agent_start") < first_finding)
+
+        # The event carries the finding, normalised, attributed to the agent.
+        ev = next(e for e in events if e["type"] == "hunt_finding")
+        got = ev["finding"]
+        check("live: the published finding is attributed to the worker",
+              got["agent"] == "auth", str(got.get("agent")))
+        check("live: the published finding keeps its severity",
+              got["severity"] == "critical", str(got.get("severity")))
+
+        # Exactly one, even though the agent both called the tool and repeated
+        # it in its final JSON: the tracker deduplicates the two paths.
+        n = sum(1 for e in events if e["type"] == "hunt_finding")
+        check("live: the tool report and the final JSON are not double-counted",
+              n == 1, str(n))
+        check("live: the tracker holds exactly one finding",
+              len(run.findings) == 1, str(len(run.findings)))
+        # A critical earns a report file, even though it arrived live.
+        check("live: a live critical still gets a report written",
+              run.findings[0].saved, str(run.findings[0].severity))
+
+
+async def test_live_reporting_is_per_agent(wd: Path) -> None:
+    """Two agents reporting the same bug publish it once, from the first.
+
+    The tracker is shared across a wave, so the second agent to rediscover a bug
+    must not publish it again — otherwise the operator's feed shows the same
+    finding twice and the wave's count is wrong.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "auth", "brief": "probe auth", "owns": ["auth"]},'
+              '{"name": "api", "brief": "probe api", "owns": ["api"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "worker_prompts": [],
+        "recon_final": "recon: one host",
+        "first_tool": ("report_finding", {
+            "title": "SQL injection in ?id", "severity": "high",
+            "asset": "api.x.test", "evidence": "same bug, found twice",
+        }),
+        # Neither agent repeats it in its final message, so every finding in the
+        # stream came from a live report.
+        "final": '{"findings": []}',
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    run = await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=2, concurrency=2,
+    )
+
+    published = [e["finding"] for e in events if e["type"] == "hunt_finding"]
+    check("live: the shared bug is published once for the wave",
+          len(published) == 1, str(len(published)))
+    check("live: the tracker holds one finding", len(run.findings) == 1,
+          str(len(run.findings)))
+    if published:
+        # Which agent wins is a scheduling race — both report it — so the
+        # assertion is that the winner is one of the two, not which one.
+        check("live: the published finding names the agent that reported it",
+              published[0]["agent"] in ("auth", "api"), published[0]["agent"])
+        # The wave's own count has to include what was published live, or the
+        # transcript reads "0 finding(s)" for a wave that announced a bug.
+        check("live: the wave-end count includes the live finding",
+              any(e.get("found") == 1 for e in events
+                  if e["type"] == "hunt_wave_end"),
+              str([e.get("found") for e in events if e["type"] == "hunt_wave_end"]))
+        check("live: the run's own wave log agrees",
+              any("1 finding(s)" in line for line in run.waves), str(run.waves))
 
 
 def test_tracker_model() -> None:
@@ -1700,6 +1938,8 @@ async def main() -> int:
     await test_loop_rail_hunt_render()
     test_pane()
     test_contract_reaches_the_worker()
+    test_report_finding_tool()
+    test_finding_from_tool()
     test_tracker_model()
     test_findings_panel()
 
@@ -1708,6 +1948,8 @@ async def main() -> int:
         test_reports(wd)
         await test_hunt_loop(wd)
         await test_contract_in_worker_prompts(wd)
+        await test_live_reporting_mid_wave(wd)
+        await test_live_reporting_is_per_agent(wd)
         await test_hunt_replans_from_findings(wd)
         await test_hunt_fallback_wave(wd)
         await test_brief_context(wd)

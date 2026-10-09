@@ -563,6 +563,46 @@ environment; none are hard-coded.
 
 ---
 
+## Bug hunt
+
+`/bug-hunt <target>` runs a campaign against a target you declare. Recon goes
+first — one agent maps what is reachable — and then it runs waves of ten agents,
+each with its own brief, all streaming at once. It keeps going until you stop
+it, re-planning each wave from what the last one found, so a second wave chases
+what the first one turned up rather than repeating it.
+
+```
+/bug-hunt target.com
+
+  ◈ recon    mapping the surface
+  ◈ wave 1   10 agents
+  ◈ findings 2 critical · 1 high
+```
+
+**The wave web.** When a wave launches, the screen becomes a web: ten panes,
+five a side, each one an agent with its live status and what it is doing, all
+tied by silk to a single node in the middle — **ZIM-TRACK**. ZIM-TRACK is not an
+eleventh agent; it is a view of the campaign, fed by the agents themselves, so
+it cannot be wrong and costs nothing to run. A pane lights up in its severity's
+colour the moment its agent reports.
+
+**Findings land live.** An agent calls `report_finding` the instant it confirms
+a bug, mid-turn, rather than saving everything for its final message — so
+ZIM-TRACK fills in while the wave is still running. Type `/stop-hunt` at any
+point; a terminal too small for the web gets the same facts as a list instead.
+
+Findings are deduplicated by title and asset, so a bug three agents each
+rediscover reads as one. Critical, high and medium findings are written to the
+case directory as they land; low and info are tracked and shown but not saved.
+`/findings` shows the whole campaign worst-first, live or after the fact.
+
+> **Authorised use only.** `/bug-hunt` is for a target you are authorised to
+> test — your own estate, or a declared engagement. The command cannot verify
+> that; the scope guard (`/scope`, `allow.yaml`) is how you state it, and the
+> rest is yours.
+
+---
+
 ## Phish
 
 `/phish` clones a login page, serves it locally, opens a public tunnel if a
@@ -645,6 +685,8 @@ tests/                        the test suite
 
 ```bash
 python tests/test_phase4.py        # from the checkout's venv
+python tests/test_hunt.py          # /bug-hunt — the wave loop, live reporting, reports
+python tests/test_web.py           # the wave web — geometry and the tracker
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_update.py        # self-update — real git, throwaway repos
 python tests/test_install.py       # install.sh + the launcher it writes

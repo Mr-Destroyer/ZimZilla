@@ -173,12 +173,69 @@ TOOL_SCHEMAS: list[dict] = [
             "required": ["url"],
         },
     },
+    {
+        # The one tool that exists only during a hunt. A wave agent confirms a
+        # bug in the middle of its turn and, until this existed, had no way to
+        # say so: findings were read out of the agent's FINAL text by
+        # ``hunt.parse_findings`` after the whole wave had finished, so a
+        # confirmed SQLi at minute two stayed invisible until minute twenty.
+        # Calling this publishes the finding the instant it is confirmed, which
+        # is what lets the live tracker show it while the hunt is still running.
+        #
+        # Withheld from an ordinary session by ``Agent.can_report`` — see the
+        # note there for why it must not be advertised outside a hunt.
+        "name": "report_finding",
+        "description": (
+            "Report a confirmed vulnerability to the engagement tracker, the "
+            "moment you confirm it. Use this DURING your work, not only at the "
+            "end: it is how the operator's live tracker learns what you found "
+            "while the wave is still running. Call it once per distinct bug, as "
+            "soon as you have the evidence — do not wait until you are done, "
+            "and do not batch them up for your final message. Reporting a bug "
+            "you cannot evidence is worse than not reporting it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string",
+                          "description": "Short name for the bug, e.g. 'SQL injection in ?id'."},
+                "severity": {
+                    "type": "string",
+                    # Spelled out rather than imported from hunt.VALID_SEVERITIES:
+                    # hunt imports agent, which imports this module, so reaching
+                    # back the other way would close an import cycle. The two are
+                    # pinned together by a test instead — see test_hunt.py's
+                    # "report_finding" suite.
+                    "enum": ["critical", "high", "medium", "low", "info"],
+                    "description": "Judge it honestly: a theoretical weakness with "
+                                   "no demonstrated impact is 'low', not 'critical'.",
+                },
+                "asset": {"type": "string",
+                          "description": "The host, URL or path affected."},
+                "summary": {"type": "string",
+                            "description": "What the bug is, in two or three sentences."},
+                "evidence": {"type": "string",
+                             "description": "The exact request, output or file:line "
+                                            "that proves it. Required — a finding "
+                                            "with no evidence is a guess."},
+                "remediation": {"type": "string",
+                                "description": "How to fix it."},
+            },
+            "required": ["title", "severity", "evidence"],
+        },
+    },
 ]
 
 TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
 
 # Tools that require an explicit user confirmation.
 GATED_TOOLS = {"bash", "write_file", "edit_file"}
+
+#: The tools a hunt agent may call but an ordinary session may not. See
+#: ``Agent.can_report``: advertising report_finding to a session that has no
+#: tracker to report into would let a model call a tool whose result goes
+#: nowhere, which reads as the harness losing the finding.
+HUNT_ONLY_TOOLS = {"report_finding"}
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
               ".pytest_cache", ".ruff_cache", "dist", "build", ".idea", ".tox"}
@@ -644,6 +701,48 @@ def _tool_web_fetch(args: dict, cfg) -> ToolResult:
     )
 
 
+def _tool_report_finding(args: dict, cfg) -> ToolResult:
+    """Accept a finding from a hunt agent and hand it back for publication.
+
+    Nothing is written here. The finding travels out on the *tool_result*
+    event's ``meta``, which is where ``hunt._run_agent`` picks it up and
+    deduplicates it into the run. Keeping the side effect out of the tool is
+    what lets it be tested without a campaign, and what stops a report from
+    being written twice — once here and once when the wave harvests the agent's
+    final text.
+
+    The tool returns a confirmation the agent can read, because a model that
+    cannot tell whether its report landed will report the same bug again on the
+    next turn.
+    """
+    title = _text(args.get("title", "")).strip()
+    evidence = _text(args.get("evidence", "")).strip()
+    if not title:
+        return ToolResult("report_finding: 'title' is required", is_error=True)
+    if not evidence:
+        # The contract already demands evidence. Enforcing it here rather than
+        # only in the prompt is what keeps the tracker free of guesses: a model
+        # that skips the evidence is told so, and the finding does not publish.
+        return ToolResult(
+            "report_finding: 'evidence' is required — quote the request, output "
+            "or file:line that proves the bug. An unevidenced finding is a guess.",
+            is_error=True,
+        )
+
+    severity = _text(args.get("severity", "")).strip().lower() or "info"
+    return ToolResult(
+        f"recorded: [{severity}] {title}",
+        meta={"finding": {
+            "title": title[:200],
+            "severity": severity,
+            "asset": _text(args.get("asset", "")).strip()[:300],
+            "summary": _text(args.get("summary", "")).strip(),
+            "evidence": evidence,
+            "remediation": _text(args.get("remediation", "")).strip(),
+        }},
+    )
+
+
 _DISPATCH = {
     "bash": _tool_bash,
     "read_file": _tool_read_file,
@@ -654,6 +753,7 @@ _DISPATCH = {
     "list_dir": _tool_list_dir,
     "search_web": _tool_web_search,
     "web_fetch": _tool_web_fetch,
+    "report_finding": _tool_report_finding,
 }
 
 
@@ -674,4 +774,9 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
     if name == "web_fetch":
         u = str(args.get("url", ""))
         return u if len(u) <= max_len else u[: max_len - 1] + "…"
+    if name == "report_finding":
+        sev = str(args.get("severity", "info")).upper()
+        title = str(args.get("title", ""))
+        label = f"[{sev}] {title}"
+        return label if len(label) <= max_len else label[: max_len - 1] + "…"
     return shlex.quote(str(args))[:max_len]

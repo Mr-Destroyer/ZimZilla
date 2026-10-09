@@ -35,6 +35,7 @@ from .boot import BootScreen
 from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
+from .web import WaveWeb
 from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
 
 
@@ -231,6 +232,89 @@ class ReconOverlay(ModalScreen[None]):
             self.query_one("#recon-status", Static).update(t)
         except NoMatches:
             pass
+
+
+class WaveOverlay(ModalScreen[None]):
+    """The wave, drawn as a web: ten agents around the ZIM-TRACK node.
+
+    Ten agents streaming into one transcript is unreadable — the operator sees
+    interleaved tool output and has to reconstruct which agent is doing what,
+    and the findings are buried in whichever stream happened to print them.
+    This takes the screen for the duration of a wave and draws the shape
+    instead: one pane per agent, silk converging on a centre node that tallies
+    what has been found, worst-first, as it is found.
+
+    Like ``ReconOverlay`` it is a window you look at rather than answer, so
+    ``can_focus = False`` keeps the prompt alive underneath — ``/stop-hunt``
+    has to stay typeable, which is the whole reason this cannot be a modal gate.
+    It is popped at the wave boundary and by the worker's ``finally``, so a stop
+    or a crash mid-wave cannot strand it over a dead campaign.
+
+    The drawing itself lives in ``ui/web.py``; this screen owns the timer that
+    repaints it and the size it paints at. The repaint is on a timer rather than
+    driven by events because two things on it change without any event: the
+    elapsed clock, and the flash that fades off an agent a couple of seconds
+    after it reports.
+    """
+
+    can_focus = False
+
+    #: Repaint interval. Fast enough that the flash reads as immediate, slow
+    #: enough that a full-canvas redraw is not competing with the agents'
+    #: streaming for the UI thread.
+    TICK = 0.25
+
+    def __init__(self, target: str, palette, *, wave: int = 1,
+                 size: int = 10) -> None:
+        super().__init__()
+        self.palette = palette
+        self.web = WaveWeb(target, palette, wave=wave, size=size)
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="wave-canvas")
+
+    def on_mount(self) -> None:
+        self._paint()
+        self.set_interval(self.TICK, self._paint)
+
+    # ---- events -----------------------------------------------------------
+    def note(self, event: dict) -> None:
+        """Apply one hunt event to the web. Repaint is left to the timer."""
+        etype = event.get("type")
+        if etype == "hunt_plan":
+            self.web.set_plan(event.get("workers") or [],
+                              wave=event.get("wave", self.web.wave))
+        elif etype == "hunt_agent_start":
+            self.web.agent_start(event.get("name", ""), event.get("brief", ""))
+        elif etype == "hunt_agent_tool":
+            detail = tools_mod.summarise_call(
+                event.get("tool", ""), event.get("args") or {}, self.cfg_of())
+            self.web.agent_activity(event.get("name", ""), detail)
+        elif etype == "hunt_agent_done":
+            self.web.agent_done(event.get("name", ""), ok=bool(event.get("ok")))
+        elif etype == "hunt_finding":
+            self.web.add_finding(event.get("finding") or {})
+            # Paint at once rather than waiting for the tick. A finding landing
+            # is the one thing on this screen the operator is watching for, and
+            # a quarter-second delay on it is the difference between the tracker
+            # reading as live and reading as a poll.
+            self._paint()
+        elif etype == "hunt_wave_end":
+            self.web.end()
+
+    def cfg_of(self):
+        """The Config the summariser needs. Kept as a method so tests can stub it."""
+        return self.app.cfg
+
+    def _paint(self) -> None:
+        try:
+            canvas = self.query_one("#wave-canvas", Static)
+        except NoMatches:
+            # Torn down before it mounted, or already popped — see the note in
+            # ReconOverlay.on_mount for how a wave can end in the tick it began.
+            return
+        size = self.size
+        canvas.update(self.web.render(size.width, size.height))
 
 
 class FindingsPanel(ModalScreen[None]):
@@ -461,6 +545,15 @@ class ZimZillaApp(App):
         scrollbar-color: $secondary;
     }
     #recon-lines { height: auto; }
+    /* The wave web. Unlike the recon window this is not a floating box: the
+       geometry needs the whole screen — two columns of panes, a centre node and
+       the silk between them — so it takes the full area and paints the shell
+       over. */
+    WaveOverlay { background: $background; }
+    #wave-canvas {
+        width: 100%;
+        height: 100%;
+    }
     FindingsPanel {
         align: center middle;
         background: $background 55%;
@@ -2796,6 +2889,11 @@ class ZimZillaApp(App):
         #: worker can pop exactly the screen it pushed, and so a stop mid-recon
         #: can take it down from the `finally`.
         overlay: dict = {"screen": None}
+        #: The live wave web, while a wave is running. Same lifecycle as the
+        #: recon window — pushed at the wave boundary, popped at the next one —
+        #: but a separate slot, because the two are never up at the same time and
+        #: one being replaced must not take the other's identity with it.
+        web: dict = {"screen": None}
 
         async def on_event(ev: dict) -> None:
             if self._cancelled:
@@ -2804,6 +2902,19 @@ class ZimZillaApp(App):
 
             if pane is not None:
                 pane.note_hunt(ev)
+
+            # The wave web sees every event that describes a wave, whether or
+            # not the transcript also renders it below. Fed before the transcript
+            # branches so a finding reaches the tracker in the same tick the
+            # transcript prints it, rather than after the whole chain of elifs.
+            if web["screen"] is not None and etype in (
+                "hunt_plan", "hunt_agent_start", "hunt_agent_tool",
+                "hunt_agent_done", "hunt_finding", "hunt_wave_end",
+            ):
+                try:
+                    web["screen"].note(ev)
+                except Exception:
+                    pass
 
             # Recon narrates into its own window. Every recon event is consumed
             # here and returns — nothing recon does belongs in the transcript,
@@ -2851,6 +2962,11 @@ class ZimZillaApp(App):
                     self.agent.turn_count + counter["wave"], p))
                 chat.write_block(R.user_prompt_block(
                     f"⚑ wave {counter['wave']} · {counter['total']} agents", p))
+                # The web goes up with the wave. It is pushed before the plan
+                # arrives, so the screen is already up and painting when the
+                # roster lands — pushing on the plan instead would leave the
+                # first agents' starts arriving at a screen that is not there.
+                self._open_wave(web, target, counter["wave"], counter["total"])
 
             elif etype == "hunt_plan":
                 if ev.get("fell_back"):
@@ -2950,6 +3066,11 @@ class ZimZillaApp(App):
                 self._refresh_findings()
 
             elif etype == "hunt_wave_end":
+                # The wave is over, so the web comes down and the transcript —
+                # which has the whole wave's tool output in it — is readable
+                # again. Popped here rather than at the next wave start so the
+                # operator gets the transcript back while the planner thinks.
+                self._close_wave(web)
                 # Every agent has reported, so `done` is already the roster
                 # size. Leave it — forcing it to the concurrency cap would show
                 # a wave that planned three agents as 10/10.
@@ -3007,8 +3128,10 @@ class ZimZillaApp(App):
         finally:
             spinner.cancel()
             # A stop or a crash during recon must not leave the window up over
-            # a dead campaign.
+            # a dead campaign — and the same for a wave stopped mid-flight, so
+            # both overlays come down here.
             self._close_recon(overlay)
+            self._close_wave(web)
             self.busy = False
             self._hunt_run = None
             chat.clear_stream()
@@ -3033,6 +3156,50 @@ class ZimZillaApp(App):
             self._sync_rails()
             self._set_rain(self.rain_on)
             self.query_one("#input", Input).focus()
+
+    def _open_wave(self, slot: dict, target: str, wave: int, size: int) -> None:
+        """Raise the wave web for a new wave, replacing any that is still up.
+
+        Replacing rather than refusing matters for a two-wave campaign: the
+        previous web is popped at its own wave_end, but a stop or an error can
+        skip that, and pushing on top would leave two webs stacked with the
+        older one swallowing the events meant for the newer.
+        """
+        self._close_wave(slot)
+        try:
+            screen = WaveOverlay(target, self.palette, wave=wave, size=size)
+            slot["screen"] = screen
+            self.push_screen(screen)
+        except Exception:
+            slot["screen"] = None
+
+    def _close_wave(self, slot: dict) -> None:
+        """Take the wave web down, if it is still up.
+
+        Same identity-checked, deferred pop as ``_close_recon``, and for the
+        same reasons: a blind ``pop_screen()`` would dismiss whatever the
+        operator opened on top, and a wave that ends in the tick it started
+        would tear its own tree down ahead of the queued Mount message.
+        """
+        screen = slot.get("screen")
+        slot["screen"] = None
+        if screen is None:
+            return
+        try:
+            if not screen.is_mounted:
+                self.call_after_refresh(self._close_wave_screen, screen)
+            elif self.screen is screen:
+                self.pop_screen()
+        except Exception:
+            pass
+
+    def _close_wave_screen(self, screen) -> None:
+        """The deferred half of ``_close_wave`` — pop it if it is still up."""
+        try:
+            if self.screen is screen:
+                self.pop_screen()
+        except Exception:
+            pass
 
     def _close_recon(self, overlay: dict) -> None:
         """Take the recon window down, if it is still up.

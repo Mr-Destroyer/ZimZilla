@@ -191,6 +191,7 @@ class Agent:
         cfg: Config,
         permission_handler: PermissionHandler | None = None,
         tool_hook: ToolHook | None = None,
+        can_report: bool = False,
     ) -> None:
         self.cfg = cfg
         self.messages: list[dict] = []
@@ -198,6 +199,12 @@ class Agent:
         # Awaited immediately before every tool executes. None for a normal
         # single-agent session — the hook is /team's serialisation point.
         self.tool_hook = tool_hook
+        # Whether report_finding is advertised. Only a hunt agent has a tracker
+        # to report into: the tool publishes through the hunt's own event
+        # stream, so in an ordinary session a call to it would return success
+        # and go nowhere, which reads as the harness losing a finding. Off by
+        # default and switched on by hunt._run_agent for the agents it owns.
+        self.can_report = can_report
 
         # accounting
         self.session_input_tokens = 0
@@ -255,6 +262,8 @@ class Agent:
     def tool_schemas(self) -> list[dict]:
         """The tool set advertised to the model for the current mode."""
         deny = self._mode_policy().get("deny", set())
+        if not self.can_report:
+            deny = deny | tools_mod.HUNT_ONLY_TOOLS
         return [t for t in tools_mod.TOOL_SCHEMAS if t["name"] not in deny]
 
     def _denied(self, name: str) -> str | None:
@@ -264,6 +273,12 @@ class Agent:
 
             label = MODES.get(self.cfg.mode, {}).get("label", self.cfg.mode)
             return f"the {name} tool is disabled in {label} mode"
+        # A hunt-only tool outside a hunt. Withholding it from the schema is
+        # what normally prevents this; this branch is for a model that calls it
+        # anyway, and it says why rather than executing something whose result
+        # has nowhere to go.
+        if name in tools_mod.HUNT_ONLY_TOOLS and not self.can_report:
+            return f"the {name} tool is only available to a hunt agent"
         return None
 
     # ---- history ----------------------------------------------------------
