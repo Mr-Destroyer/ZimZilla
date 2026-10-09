@@ -326,6 +326,76 @@ def test_truncated_roster_keeps_the_reporters() -> None:
           listed + hidden == 10, f"listed={listed} hidden={hidden}")
 
 
+# ---------------------------------------------------------------------------
+# The splash banner
+# ---------------------------------------------------------------------------
+
+def test_splash_banner() -> None:
+    """The banner is centred, and stays centred when the transcript reflows.
+
+    The old splash padded its own lines with a hardcoded indent, so it was
+    centred for exactly one width — the width it was launched at. Dragging a
+    rail re-renders every block in the transcript at the new width, and a
+    hand-padded banner does not survive that. The fix is to hand ``Align`` the
+    renderable and let it centre on each render, so what is asserted here is
+    that the renderable *is* the thing that re-centres, not that one particular
+    render looks right.
+    """
+    from rich.align import Align
+    from rich.console import Console
+
+    from zimzilla.ui.banner import EMBLEM, splash_mark
+    from zimzilla.theme import get_palette
+
+    p = get_palette("green", None)
+    mark = splash_mark(p, model="deepseek-v4.1-flash",
+                       base_url="http://localhost:4001")
+    text = mark.plain
+    check("splash: the mark carries the name", "ZIMZILLA" in text)
+    check("splash: the mark carries the model", "deepseek-v4.1-flash" in text)
+    check("splash: the mark carries the endpoint", "localhost:4001" in text)
+    check("splash: the mark is four rows", len(text.split("\n")) == len(EMBLEM),
+          str(len(text.split("\n"))))
+
+    def render(width: int) -> list[str]:
+        c = Console(width=width, record=True, force_terminal=False)
+        c.print(Align.center(mark))
+        return c.export_text().rstrip("\n").split("\n")
+
+    # At every width, the emblem column starts at the same place on every row —
+    # that is what "the mark is not sheared" means, and a per-line indent gets
+    # this wrong the moment one row is wider than the others.
+    for width in (120, 100, 80, 70):
+        rows = render(width)
+        check(f"splash: every row is the full pane width at {width}",
+              {len(r) for r in rows} == {width}, str(sorted({len(r) for r in rows})))
+        # The emblem's own first column: the row with the widest glyph starts
+        # leftmost, and the ▀ row is indented by one. So the emblem's left edge
+        # is where the widest row begins, and no row may begin further left.
+        starts = [len(r) - len(r.lstrip()) for r in rows if r.strip()]
+        check(f"splash: the emblem is not sheared at {width}",
+              max(starts) - min(starts) <= 1, str(starts))
+
+    # The point of the whole change: the same renderable re-centres itself, so
+    # the banner is centred at a width it was never rendered at before.
+    wide = render(120)[0]
+    narrow = render(70)[0]
+    check("splash: the banner re-centres for a new width",
+          len(narrow) - len(narrow.lstrip()) < len(wide) - len(wide.lstrip()),
+          f"wide indent={len(wide) - len(wide.lstrip())} "
+          f"narrow indent={len(narrow) - len(narrow.lstrip())}")
+
+    # And it is actually centred, not merely re-indented: the left and right
+    # margins of the widest row agree to within the odd/even rounding.
+    for width in (120, 101, 80, 71):
+        rows = render(width)
+        row = max(rows, key=lambda r: len(r.rstrip()))
+        left = len(row) - len(row.lstrip())
+        right = len(row) - len(row.rstrip())
+        check(f"splash: the banner is centred at {width}",
+              abs(left - right) <= 1, f"left={left} right={right}")
+
+
 def main() -> int:
     test_render_is_exact()
     test_web_fits_at_minimum()
@@ -339,6 +409,7 @@ def main() -> int:
     test_plan_replaces_the_roster()
     test_compact_fallback()
     test_truncated_roster_keeps_the_reporters()
+    test_splash_banner()
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print()

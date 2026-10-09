@@ -849,26 +849,21 @@ class ZimZillaApp(App):
         return text + "\n\n[referenced files]\n" + "\n\n".join(attached)
 
     def _splash(self) -> None:
-        p = self.palette
-        from .banner import banner_lines, banner_subtitle
+        """The banner, centred, at whatever width the transcript has now.
 
-        t = Text()
-        for line in banner_lines():
-            t.append(line + "\n", style=f"bold {p.primary}")
-        self.query_one(ChatPane).write_block(t)
+        Written as one renderable and centred by ``Align`` rather than padded
+        into place by hand. The transcript reflows every block it holds when a
+        rail is dragged (see ``RainRichLog._reflow``), so a banner centred in
+        the string would be correct at launch and off-centre from the first
+        resize onward; an ``Align`` re-centres on every re-render because the
+        renderable is kept, not the rendered lines.
+        """
+        from rich.align import Align
+        from .banner import splash_mark
 
-        sub = Text()
-        sub.append(f"       {banner_subtitle()}\n", style=p.accent)
-        sub.append("       ", style=p.dim)
-        sub.append(f"model {self.cfg.model}", style=p.dim)
-        sub.append("   ·   ", style=p.dim)
-        sub.append(self.cfg.base_url, style=p.dim)
-        sub.append("   ·   ", style=p.dim)
-        sub.append("type /help for commands\n", style=p.dim)
-        sub.append("       by ", style=p.dim)
-        sub.append("Mr-Destroyer / ZIM", style=p.primary)
-        sub.append("   ·   yt @Study_Hard69   ·   ig zimthegoat", style=p.dim)
-        self.query_one(ChatPane).write_block(sub)
+        mark = splash_mark(self.palette, model=self.cfg.model,
+                           base_url=self.cfg.base_url)
+        self.query_one(ChatPane).write_block(Align.center(mark))
 
     # ---- timers -----------------------------------------------------------
     def _status_bar(self) -> StatusBar | None:
