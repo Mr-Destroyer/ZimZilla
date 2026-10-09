@@ -856,16 +856,15 @@ class ZimPane(Static):
         if not found:
             t.append("  (none yet)\n", style=p.dim)
         else:
-            for sev in ("critical", "high", "medium", "low", "info"):
+            # The same severity colours the findings panel uses, so a CRITICAL
+            # cannot read red in the panel and amber in the rail. Imported
+            # locally, the way this module's other renderer calls are.
+            from .renderers import SEVERITY_ORDER, severity_style
+            for sev in SEVERITY_ORDER:
                 n = self.hunt_severity.get(sev, 0)
                 if not n:
                     continue
-                style = {
-                    "critical": f"bold {p.red}",
-                    "high": p.amber,
-                    "medium": p.primary,
-                }.get(sev, p.dim)
-                t.append(f"  {sev:<9}", style=style)
+                t.append(f"  {sev:<9}", style=severity_style(sev, p, bold=True))
                 t.append(f"{n}\n", style=p.dim)
 
         # The agents, most recently active last. Ten run at once but only

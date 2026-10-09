@@ -109,12 +109,19 @@ its own lines, wrapped in a ```json fence:
 ```
 
 Rules for this block:
+- This block is REQUIRED. It is how your work reaches the operator and the next
+  wave — a vulnerability you confirmed but did not report in this shape is a
+  vulnerability the engagement never learns about.
 - One entry per distinct bug. If you found nothing, omit the block entirely or
   send `{"findings": []}` — do not invent a finding to fill it.
 - `severity` must be one of the five words above. Judge it honestly: a
   theoretical weakness with no demonstrated impact is `low`, not `critical`.
 - `evidence` must be something you actually observed, not something you expect.
   A finding with no evidence is a guess and will be discarded.
+- Report a confirmed weakness even if you did not carry the exploitation all the
+  way through — an error that proves injection, a response that proves missing
+  access control, a banner that proves an old vulnerable version. Evidence of
+  the weakness is what counts, not a finished exploit.
 - Put nothing after the block. Anything you want to say, say before it.
 """
 
@@ -456,7 +463,7 @@ class HuntRun:
         if not self.findings:
             return "(nothing confirmed yet)"
         lines = []
-        for f in self.findings:
+        for f in self.ranked():
             asset = f" @ {f.asset}" if f.asset else ""
             lines.append(f"- [{f.severity}] {f.title}{asset} — {f.summary}".rstrip())
         return "\n".join(lines)
@@ -466,6 +473,41 @@ class HuntRun:
         if not self.waves:
             return "(this is the first wave)"
         return "\n".join(self.waves)
+
+    def add_finding(self, f: Finding) -> bool:
+        """Record a finding, deduplicated. Returns whether it was new.
+
+        Ten agents run at once against one target, so the same bug gets reported
+        more than once — "missing HSTS" is a title four different vectors might
+        each land on — and an undeduped tracker would show it four times and
+        inflate every count. Two findings are the same bug when their title
+        slugs and their assets match; the first one wins, because it is the one
+        whose evidence was captured against the asset as originally found.
+
+        The return value is what stops the transcript and the panel
+        double-counting: a repeat is dropped silently rather than announced
+        twice.
+        """
+        key = (_slug(f.title), (f.asset or "").strip().lower())
+        for existing in self.findings:
+            if (_slug(existing.title),
+                    (existing.asset or "").strip().lower()) == key:
+                return False
+        self.findings.append(f)
+        return True
+
+    def ranked(self) -> list[Finding]:
+        """The findings, worst first, then by wave and title.
+
+        One ordering, used by the findings panel, the transcript and the closing
+        summary, so a critical never sorts below an info in one place and above
+        it in another. `wave` breaks severity ties so an early confirmation
+        reads above a late restatement; `title` keeps it stable run to run.
+        """
+        return sorted(
+            self.findings,
+            key=lambda f: (SEVERITY_ORDER.get(f.severity, 9), f.wave, f.title),
+        )
 
 
 def _slug(text: str) -> str:
@@ -670,6 +712,7 @@ async def _run_agent(
     agent_factory: Callable[..., Agent],
     tool_hook,
     context: str = "",
+    contract: str = "",
 ) -> team_mod.WorkerResult:
     """Run one hunt agent to completion. Never raises except on cancellation.
 
@@ -682,6 +725,13 @@ async def _run_agent(
     every agent starts blind and spends its first turns re-deriving what recon
     already established — ten agents running the same ``ls`` and reading the
     same six files — which is most of a wave's budget spent on nothing.
+
+    ``contract`` is the finding-reporting block, appended *after* the brief so
+    it is the last thing the agent reads before it answers. It has to be here
+    and not only on the planner: a worker is the only one that runs a test, so
+    it is the only one that can report what the test found. Without it the agent
+    narrates a methodology, ``parse_findings`` reads no JSON, and the whole wave
+    reports nothing no matter what it actually discovered.
     """
     result = team_mod.WorkerResult(spec=spec)
 
@@ -703,7 +753,12 @@ async def _run_agent(
         if text:
             await on_event({"type": "hunt_agent_text", "name": spec.name, "text": text})
 
+    # Order matters: the shared context first, then the brief, then the contract
+    # last — the reporting block is what the agent should be holding in mind as
+    # it writes its final message.
     prompt = f"{context}\n\n{spec.brief}" if context else spec.brief
+    if contract:
+        prompt = f"{prompt}\n\n{contract}"
 
     try:
         async for ev in worker.run_turn(prompt):
@@ -766,6 +821,7 @@ async def _run_wave(
     stop: asyncio.Event,
     concurrency: int = HUNT_CONCURRENCY,
     context: str = "",
+    contract: str = "",
 ) -> list[team_mod.WorkerResult]:
     """Run one wave concurrently, racing the stop signal.
 
@@ -786,7 +842,7 @@ async def _run_wave(
             return await _run_agent(
                 spec, index, cfg,
                 on_event=on_event, agent_factory=agent_factory, tool_hook=hook,
-                context=context,
+                context=context, contract=contract,
             )
 
     tasks = [asyncio.create_task(_one(i, s)) for i, s in enumerate(specs)]
@@ -923,9 +979,9 @@ async def run_hunt(
     # stack trace in an error page. Harvest it before the first wave, or the
     # planner starts out blind to what recon already knew.
     for f in parse_findings(run.recon, wave=0, agent="recon"):
-        run.findings.append(f)
-        await on_event({"type": "hunt_finding", "finding": _finding_dict(f),
-                        "saved": _save(run, f)})
+        if run.add_finding(f):
+            await on_event({"type": "hunt_finding", "finding": _finding_dict(f),
+                            "saved": _save(run, f)})
 
     # ---- waves, until the operator stops it.
     while not run.stop.is_set():
@@ -984,6 +1040,7 @@ async def run_hunt(
             on_event=on_event, agent_factory=agent_factory,
             stop=run.stop, concurrency=concurrency,
             context=brief_context(run),
+            contract=FINDING_CONTRACT,
         )
 
         # ---- harvest. Findings come off each agent's final text, so the loop
@@ -1000,20 +1057,24 @@ async def run_hunt(
                 "input": r.input_tokens, "output": r.output_tokens,
             })
 
-        for f in found:
-            run.findings.append(f)
+        # `found` is every finding reported this wave; `fresh` is the ones the
+        # tracker had not already seen. Only the fresh ones are announced, and
+        # the wave counter uses `fresh` too, so a bug three agents each
+        # rediscovered reads as one finding rather than three.
+        fresh: list[Finding] = [f for f in found if run.add_finding(f)]
+        for f in fresh:
             await on_event({"type": "hunt_finding", "finding": _finding_dict(f),
                             "saved": _save(run, f)})
 
         ok = sum(1 for r in results if r.ok)
         run.waves.append(
             f"wave {wave}: {len(roster.workers)} agents, {ok} ok, "
-            f"{len(found)} finding(s)"
+            f"{len(fresh)} finding(s)"
             + (" (fixed vector fallback)" if fell_back else "")
         )
         await on_event({
             "type": "hunt_wave_end", "wave": wave,
-            "agents": len(roster.workers), "ok": ok, "found": len(found),
+            "agents": len(roster.workers), "ok": ok, "found": len(fresh),
             "cost": sum(r.cost for r in results),
             "input": sum(r.input_tokens for r in results),
             "output": sum(r.output_tokens for r in results),
@@ -1062,9 +1123,8 @@ def _save(run: HuntRun, f: Finding) -> str:
 def summary_prompt(run: HuntRun) -> str:
     """The closing brief: everything the run knows, for the final report."""
     if run.findings:
-        ordered = sorted(run.findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 9))
         blocks = []
-        for f in ordered:
+        for f in run.ranked():
             blocks.append(
                 f"### [{f.severity}] {f.title}\n"
                 f"asset: {f.asset or '(not stated)'}\n"

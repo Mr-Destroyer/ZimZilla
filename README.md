@@ -373,6 +373,10 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
+| `/bug-hunt <target>` | recon, then waves of 10 agents until stopped |
+| `/stop-hunt` | end a running hunt |
+| `/summary-hunt` | write the hunt report |
+| `/findings` | the finding tracker — every bug found, worst first |
 | `/clear` | wipe transcript and history |
 | `/exit` | leave |
 

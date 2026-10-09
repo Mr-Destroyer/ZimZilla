@@ -493,3 +493,79 @@ def agent_event_line(name: str, color: str, verb: str, detail: str,
     t.append(f"{verb:<9}", style=vstyle)
     t.append(detail, style=palette.dim if ok is None else palette.primary)
     return t
+
+
+# ---- hunt findings ---------------------------------------------------------
+# The findings panel and the zim-pane's summary both show the same thing, so the
+# severity colour lives here once. Two copies of this map is how a CRITICAL ends
+# up red in the panel and amber in the rail.
+
+#: Severity -> the palette attribute that carries it. `info` and anything
+#: unrecognised fall through to `dim` in severity_style.
+SEVERITY_PALETTE = {
+    "critical": "red",
+    "high": "amber",
+    "medium": "primary",
+    "low": "primary",
+    "info": "dim",
+}
+
+#: The display order, worst first.
+SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def severity_style(severity: str, palette: Palette, *, bold: bool = False) -> str:
+    """The Rich style for one severity, from the palette.
+
+    Unrecognised severities read as `info` rather than raising: a model that
+    invents a sixth word should produce a dim line, not break the pane.
+    """
+    attr = SEVERITY_PALETTE.get(str(severity or "").strip().lower(), "dim")
+    colour = getattr(palette, attr, palette.dim)
+    return f"bold {colour}" if bold else colour
+
+
+def finding_line(f: dict, palette: Palette, *, width: int = 9) -> Text:
+    """One finding as a single line: severity, title, asset, wave.
+
+    ``f`` is a finding dict as the hunt events carry it — the panel and the
+    transcript both build from that, so neither needs the Finding dataclass.
+    """
+    sev = str(f.get("severity") or "info").strip().lower()
+    t = Text()
+    t.append(f"{sev.upper():<{width}}", style=severity_style(sev, palette, bold=True))
+    t.append(str(f.get("title") or "(untitled)"), style=f"bold {palette.primary}")
+    asset = str(f.get("asset") or "").strip()
+    if asset:
+        t.append("  ·  ", style=palette.dim)
+        t.append(asset, style=palette.primary)
+    wave = f.get("wave")
+    if wave:
+        t.append(f"  wave {wave}", style=palette.dim)
+    return t
+
+
+def finding_detail(f: dict, palette: Palette, *, indent: int = 2) -> Text:
+    """The evidence and summary under a finding line, indented and dim.
+
+    Evidence leads: it is the part that makes a finding a finding rather than an
+    opinion, and it is what an operator copies into a report.
+    """
+    pad = " " * indent
+    t = Text()
+    evidence = str(f.get("evidence") or "").strip()
+    summary = str(f.get("summary") or "").strip()
+    if evidence:
+        t.append(f"{pad}evidence  ", style=palette.dim)
+        t.append(evidence, style=palette.primary)
+        t.append("\n")
+    if summary:
+        t.append(f"{pad}summary   ", style=palette.dim)
+        t.append(summary, style=palette.dim)
+        t.append("\n")
+    agent = str(f.get("agent") or "").strip()
+    if agent:
+        t.append(f"{pad}found by  ", style=palette.dim)
+        t.append(agent, style=palette.dim)
+        t.append("\n")
+    return t

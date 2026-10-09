@@ -43,6 +43,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/bug-hunt", "recon, then waves of 10 agents until stopped"),
     ("/stop-hunt", "end a running hunt"),
     ("/summary-hunt", "write the hunt report"),
+    ("/findings", "the hunt finding tracker"),
     ("/clear", "wipe transcript and history"),
     ("/exit", "leave the harness"),
 ]

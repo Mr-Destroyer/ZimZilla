@@ -231,6 +231,100 @@ class ReconOverlay(ModalScreen[None]):
             pass
 
 
+class FindingsPanel(ModalScreen[None]):
+    """The hunt's finding tracker, as its own window.
+
+    The transcript shows a finding the moment it lands and then scrolls past it;
+    the zim-pane shows only counts. Neither answers "what has this engagement
+    actually found", which is the question the operator asks while it runs and
+    again when it is over. So this floats a worst-first list over the screen:
+    severity, title, asset, wave, and the evidence that proves it.
+
+    It is a *view*, not a gate — ``can_focus = False`` keeps the prompt alive so
+    ``/stop-hunt`` stays typeable while it is open, and ``escape`` (or
+    ``/findings`` again) closes it. ``set_findings`` repaints it in place, so the
+    hunt worker can push each new finding in without reopening the window.
+
+    There is deliberately no click-to-dismiss: a click anywhere inside the
+    panel bubbles to this screen, so handling clicks here would close the
+    window the moment the operator clicked a finding to read it.
+    """
+
+    can_focus = False
+
+    BINDINGS = [Binding("escape", "dismiss_panel", "close", show=False)]
+
+    def __init__(self, palette, *, target: str = "", live: bool = False) -> None:
+        super().__init__()
+        self.palette = palette
+        self.target = target
+        #: Whether a campaign is still running, so the header can say LIVE vs a
+        #: finished campaign read back off disk.
+        self.live = live
+        self.findings: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="findings-box"):
+            yield Static(id="findings-title")
+            with VerticalScroll(id="findings-log"):
+                yield Static(id="findings-body")
+
+    def on_mount(self) -> None:
+        self._paint()
+
+    def set_findings(self, findings: list[dict]) -> None:
+        """Replace the list and repaint. Called as each finding lands."""
+        self.findings = list(findings or [])
+        self._paint()
+
+    def action_dismiss_panel(self) -> None:
+        self.dismiss(None)
+
+    def _paint(self) -> None:
+        try:
+            self.query_one("#findings-title", Static).update(self._title())
+            self.query_one("#findings-body", Static).update(self._body())
+        except NoMatches:
+            # Torn down before it mounted — the panel is dismissable and a hunt
+            # can end in the same tick it was opened. Nothing to paint.
+            return
+
+    def _title(self) -> Text:
+        p = self.palette
+        t = Text()
+        t.append("  ⟩ FINDINGS  ", style=f"bold {p.bg} on {p.accent}")
+        t.append("  ", style=p.dim)
+        t.append(self.target or "?", style=f"bold {p.primary}")
+        t.append("   ", style=p.dim)
+        t.append(f"{len(self.findings)}", style=f"bold {p.primary}")
+        t.append(" found", style=p.dim)
+        if self.live:
+            t.append("   ·   ", style=p.dim)
+            t.append("LIVE", style=f"bold {p.accent}")
+        t.append("      ", style=p.dim)
+        t.append("[esc] close", style=p.dim)
+        return t
+
+    def _body(self) -> Text:
+        p = self.palette
+        t = Text()
+        if not self.findings:
+            t.append("\n  nothing confirmed yet.\n\n", style=p.dim)
+            t.append(
+                "  A finding appears here the moment an agent reports one —\n"
+                "  a title, the asset, and the evidence that proves it.\n",
+                style=p.dim,
+            )
+            return t
+        for i, f in enumerate(self.findings):
+            if i:
+                t.append("\n")
+            t.append_text(R.finding_line(f, p))
+            t.append("\n")
+            t.append_text(R.finding_detail(f, p))
+        return t
+
+
 class ZimZillaApp(App):
     """Top-level application: boot screen, then the shell."""
 
@@ -365,6 +459,28 @@ class ZimZillaApp(App):
         scrollbar-color: $secondary;
     }
     #recon-lines { height: auto; }
+    FindingsPanel {
+        align: center middle;
+        background: $background 55%;
+    }
+    #findings-box {
+        width: 84%;
+        max-width: 120;
+        height: auto;
+        max-height: 80%;
+        border: heavy $accent;
+        background: $background;
+        padding: 1 2;
+    }
+    #findings-title { height: 1; }
+    #findings-log {
+        height: auto;
+        max-height: 28;
+        margin-top: 1;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $secondary;
+    }
+    #findings-body { height: auto; }
     """
 
     BINDINGS = [
@@ -420,6 +536,9 @@ class ZimZillaApp(App):
         self._hunt_run = None
         self._hunt_summary_queued = False
         self._hunt_tokens: tuple[int, int, float] = (0, 0, 0.0)
+        #: The findings window, while it is open. Held so `/findings` toggles it
+        #: and so the hunt worker can push each new finding into it live.
+        self._findings_panel: FindingsPanel | None = None
         # `/phish` events arrive on the HTTP thread. The queue is the only
         # crossing: the 0.25s rail tick drains it onto ZimPane on the UI
         # thread. A lock is enough — these are tiny dicts, not renderables.
@@ -1110,7 +1229,7 @@ class ZimZillaApp(App):
     #: interleave a second turn into the transcript of the first.
     BUSY_OK = frozenset({
         "help", "cost", "scope", "mode", "model",
-        "stop-hunt", "summary-hunt", "exit", "quit",
+        "stop-hunt", "summary-hunt", "findings", "exit", "quit",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1135,6 +1254,7 @@ class ZimZillaApp(App):
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
+            "findings": lambda a: self._cmd_findings(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-source": lambda a: self._cmd_zim_source(None),
@@ -1175,6 +1295,7 @@ class ZimZillaApp(App):
             ("/bug-hunt <target>", "recon, then waves of 10 agents until stopped"),
             ("/stop-hunt", "end a running hunt       (works while busy)"),
             ("/summary-hunt", "write the hunt report    (works while busy)"),
+            ("/findings", "the finding tracker      (works while busy)"),
             ("/exit", "leave the harness        (Ctrl+D also works)"),
         ]
         t = Text()
@@ -2118,7 +2239,9 @@ class ZimZillaApp(App):
         t.append("/stop-hunt", style=p.primary)
         t.append(" ends the campaign   ·   ", style=p.dim)
         t.append("/summary-hunt", style=p.primary)
-        t.append(" writes the report\n", style=p.dim)
+        t.append(" writes the report   ·   ", style=p.dim)
+        t.append("/findings", style=p.primary)
+        t.append(" shows the tracker\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
         pane = self._zim_pane()
@@ -2137,6 +2260,8 @@ class ZimZillaApp(App):
         t.append("end the campaign and print what it found\n", style=p.dim)
         t.append("  /summary-hunt        ", style=f"bold {p.primary}")
         t.append("write the closing report (works mid-hunt)\n", style=p.dim)
+        t.append("  /findings            ", style=f"bold {p.primary}")
+        t.append("the tracker — every bug found, worst first\n", style=p.dim)
         t.append("\n  Each wave: the planner reads what every earlier wave found and\n",
                  style=p.dim)
         t.append("  aims the next ten somewhere new. Run it under ", style=p.dim)
@@ -2181,6 +2306,71 @@ class ZimZillaApp(App):
             self._sys_line(f"no findings archived in {latest}", warn=True)
             return
         self._run_summary(run)
+
+    def _cmd_findings(self, args) -> None:
+        """/findings — the tracker, as its own window.
+
+        Mid-hunt it opens the live campaign's findings; with no hunt running it
+        reads the most recent campaign off disk, the same way `/summary-hunt`
+        does, so the tracker is still answerable after the campaign has ended.
+        Opening it again closes it, so the command toggles.
+        """
+        panel = self._findings_panel
+        if panel is not None:
+            self._close_findings()
+            return
+
+        if self._hunt_run is not None:
+            run = self._hunt_run
+            target, live = run.target, True
+        else:
+            latest = self._latest_hunt_dir()
+            run = hunt_mod.load_run(latest) if latest is not None else None
+            if run is None:
+                self._sys_line(
+                    "no findings yet — run /bug-hunt, or /findings after one "
+                    "has finished", warn=True)
+                return
+            target, live = run.target, False
+
+        # The panel reads finding *dicts*, the same shape the hunt events carry,
+        # so one renderer serves both the panel and the transcript line.
+        findings = [hunt_mod._finding_dict(f) for f in run.ranked()]
+        screen = FindingsPanel(self.palette, target=target, live=live)
+        screen.set_findings(findings)
+        self._findings_panel = screen
+        try:
+            self.push_screen(screen, self._findings_closed)
+        except Exception:
+            self._findings_panel = None
+
+    def _findings_closed(self, _result=None) -> None:
+        self._findings_panel = None
+
+    def _refresh_findings(self) -> None:
+        """Repaint the open tracker from the live run, if there is one.
+
+        Reads the run rather than the event so the panel and the transcript
+        cannot disagree about what was found, and a duplicate the tracker
+        dropped stays dropped.
+        """
+        panel = self._findings_panel
+        run = self._hunt_run
+        if panel is None or run is None:
+            return
+        try:
+            panel.set_findings([hunt_mod._finding_dict(f) for f in run.ranked()])
+        except Exception:
+            pass
+
+    def _close_findings(self) -> None:
+        panel = self._findings_panel
+        self._findings_panel = None
+        if panel is not None:
+            try:
+                panel.dismiss(None)
+            except Exception:
+                pass
 
     def _latest_hunt_dir(self) -> Path | None:
         """The most recent campaign directory, or None."""
@@ -2415,6 +2605,10 @@ class ZimZillaApp(App):
                     f"[{sev}] {f.get('title', '')}"
                     + (f"  ·  saved" if ev.get("saved") else ""),
                     p, ok=bool(ev.get("saved"))))
+                # Keep the tracker in step with the transcript. It reads the
+                # run's own list, so a finding the tracker already had is not
+                # added twice.
+                self._refresh_findings()
 
             elif etype == "hunt_wave_end":
                 # Every agent has reported, so `done` is already the roster
@@ -2443,6 +2637,11 @@ class ZimZillaApp(App):
                     f"hunt ended — {ev['wave']} wave(s), {ev['findings']} finding(s), "
                     f"{ev['saved']} report(s) in {ev['directory']}",
                     ok=True)
+                # The campaign is over; if the tracker is open it becomes a
+                # record of the run rather than a live view.
+                if self._findings_panel is not None:
+                    self._findings_panel.live = False
+                    self._refresh_findings()
 
         spinner = asyncio.create_task(self._verb_spinner())
 
@@ -2573,6 +2772,7 @@ class ZimZillaApp(App):
             ("/bug-hunt", "recon, then waves of 10 agents until stopped", "bug-hunt"),
             ("/stop-hunt", "end a running hunt", "stop-hunt"),
             ("/summary-hunt", "write the hunt report", "summary-hunt"),
+            ("/findings", "the hunt finding tracker", "findings"),
             ("/clear", "wipe transcript and history", "clear"),
             ("/exit", "leave the harness", "exit"),
         ]

@@ -301,9 +301,9 @@ def _hunt_factory(script):
                 ], _Usage(100, 20)))
                 return
 
-            yield ({"type": "text_delta", "text": script["final"]}, None)
-            yield (None, _Msg([_Blk(type="text", text=script["final"])],
-                              _Usage(30, 10)))
+            text = _next_final(script)
+            yield ({"type": "text_delta", "text": text}, None)
+            yield (None, _Msg([_Blk(type="text", text=text)], _Usage(30, 10)))
 
         agent._stream_once = fake_stream
         built.append(agent)
@@ -327,10 +327,27 @@ def _recorder(events, stop, *, after=1):
     return on_event
 
 
-def _finding_json(marker="auth bypass"):
+def _finding_json(marker="auth bypass", *, asset="x.test"):
     return ('{"findings": [{"title": "%s", "severity": "critical",'
-            ' "asset": "x.test", "summary": "no check", "evidence": "curl"}]}'
-            % marker)
+            ' "asset": "%s", "summary": "no check", "evidence": "curl"}]}'
+            % (marker, asset))
+
+
+def _next_final(script):
+    """The text the next worker reports.
+
+    ``script["final"]`` is a single string for the common case. It may also be a
+    list, consumed one entry per worker, so a test with several workers can give
+    each a *distinct* finding — which the tracker, now that it deduplicates,
+    needs in order to see more than one. The last entry is reused once the list
+    runs out.
+    """
+    final = script["final"]
+    if isinstance(final, list):
+        i = script.get("worker_finals", 0)
+        script["worker_finals"] = i + 1
+        return final[min(i, len(final) - 1)]
+    return final
 
 
 async def test_hunt_loop(wd: Path) -> None:
@@ -343,7 +360,10 @@ async def test_hunt_loop(wd: Path) -> None:
         "planner_calls": 0,
         "prompts": [],
         "recon_final": "the target answers on 443, nginx, a login form at /login",
-        "final": _finding_json(),
+        # Distinct findings per worker: the tracker deduplicates, so two
+        # identical reports would collapse to one and this test's "two findings
+        # harvested" would be measuring the dedup, not the harvest.
+        "final": [_finding_json("auth bypass"), _finding_json("idor on /api/users")],
     }
     factory = _hunt_factory(script)
 
@@ -405,7 +425,10 @@ async def test_hunt_replans_from_findings(wd: Path) -> None:
         "planner_calls": 0,
         "prompts": [],
         "recon_final": "recon: a single host, nothing exotic",
-        "final": _finding_json("unique-marker-bug"),
+        # A distinct finding each wave: the tracker deduplicates on title+asset,
+        # and this test is about accumulation across waves, not about dedup.
+        "final": [_finding_json("unique-marker-bug"),
+                  _finding_json("second-wave-bug")],
     }
     factory = _hunt_factory(script)
 
@@ -1395,8 +1418,8 @@ async def test_busy_gate(wd: Path) -> None:
     dispatch_names = {
         "help", "clear", "mode", "model", "cost", "scope", "rain", "theme",
         "save", "load", "compact", "team", "osint", "phish", "bug-hunt",
-        "stop-hunt", "summary-hunt", "zim-logfare", "zim-tokenjuice",
-        "zim-source", "exit", "quit",
+        "stop-hunt", "summary-hunt", "findings", "zim-logfare",
+        "zim-tokenjuice", "zim-source", "exit", "quit",
     }
     check("gate: every busy-permitted command is dispatchable",
           app.BUSY_OK <= dispatch_names,
@@ -1441,6 +1464,231 @@ async def test_busy_gate(wd: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The finding tracker
+# ---------------------------------------------------------------------------
+
+def test_contract_reaches_the_worker() -> None:
+    """The regression that made the tracker necessary.
+
+    ``FINDING_CONTRACT`` used to be formatted into the recon and planner prompts
+    only. The wave agents — the only ones that run a test and therefore the only
+    ones that can report what it found — never saw it, so they narrated a
+    methodology, ``parse_findings`` read no JSON, and every campaign reported
+    nothing no matter what it discovered. This pins the contract to the prompt
+    the worker is actually handed.
+    """
+    contract = hunt_mod.FINDING_CONTRACT
+    # A phrase that appears only in the contract, so a hit cannot be an accident
+    # of the brief's own wording.
+    marker = "One entry per distinct bug"
+    check("contract: the marker really is in the contract", marker in contract)
+
+    worker_prompt = "recon digest\n\nprobe the login form\n\n" + contract
+    check("contract: a worker prompt carrying it is detectable",
+          marker in worker_prompt)
+
+    # And the assembly itself, which is what regressed: context, then brief,
+    # then contract last, so the reporting block is what the agent reads as it
+    # writes its final message.
+    spec = team_mod.WorkerSpec(name="auth", brief="probe the login form",
+                               owns=["auth"])
+    prompt = f"the digest\n\n{spec.brief}"
+    if contract:
+        prompt = f"{prompt}\n\n{contract}"
+    check("contract: the contract is the last thing in the prompt",
+          prompt.rstrip().endswith(contract.rstrip()))
+    check("contract: the brief is still present", spec.brief in prompt)
+
+
+async def test_contract_in_worker_prompts(wd: Path) -> None:
+    """End to end: the prompt a wave agent is really handed carries it."""
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "auth", "brief": "probe auth", "owns": ["auth"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "worker_prompts": [],
+        "recon_final": "recon: one host, a login form",
+        "final": _finding_json(),
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    await hunt_mod.run_hunt(
+        cfg, "x.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=1, concurrency=1,
+    )
+
+    prompts = script["worker_prompts"]
+    check("contract: the worker was handed a prompt", len(prompts) == 1,
+          str(len(prompts)))
+    check("contract: the worker prompt carries the finding contract",
+          "One entry per distinct bug" in prompts[0], prompts[0][-200:])
+    check("contract: the contract comes after the brief",
+          prompts[0].index("probe auth") < prompts[0].index("One entry per"))
+
+
+def test_tracker_model() -> None:
+    """`add_finding` deduplicates; `ranked` orders worst first."""
+    run = hunt_mod.HuntRun(target="x.test", directory=Path("/tmp/x"))
+
+    a = hunt_mod.Finding(wave=1, agent="a", title="SQLi in ?id",
+                         severity="critical", asset="api.x.test")
+    b = hunt_mod.Finding(wave=1, agent="b", title="IDOR /api/users",
+                         severity="high", asset="api.x.test")
+    # The same bug, rediscovered by a third agent: same title slug, same asset.
+    dup = hunt_mod.Finding(wave=2, agent="c", title="SQLi in ?id",
+                           severity="critical", asset="api.x.test")
+    # Same title, different asset: a genuinely different finding.
+    other = hunt_mod.Finding(wave=2, agent="d", title="SQLi in ?id",
+                             severity="medium", asset="www.x.test")
+
+    check("tracker: a new finding is accepted", run.add_finding(a) is True)
+    check("tracker: a second distinct finding is accepted",
+          run.add_finding(b) is True)
+    check("tracker: an exact repeat is dropped", run.add_finding(dup) is False)
+    check("tracker: the repeat did not inflate the list",
+          len(run.findings) == 2, str(len(run.findings)))
+    check("tracker: the first report of a bug is the one kept",
+          run.findings[0].agent == "a")
+    check("tracker: the same title on another asset is a different finding",
+          run.add_finding(other) is True)
+
+    # Worst first, regardless of the order they arrived in.
+    run2 = hunt_mod.HuntRun(target="x.test", directory=Path("/tmp/x"))
+    for sev in ("info", "low", "medium", "high", "critical"):
+        run2.add_finding(hunt_mod.Finding(wave=1, agent="a",
+                                          title=f"{sev} bug", severity=sev))
+    order = [f.severity for f in run2.ranked()]
+    check("tracker: ranked is worst-first",
+          order == ["critical", "high", "medium", "low", "info"], str(order))
+
+    # The planner's digest reads in the same order.
+    check("tracker: the digest is worst-first too",
+          run2.digest().splitlines()[0].startswith("- [critical]"),
+          run2.digest().splitlines()[0])
+
+
+def test_findings_panel() -> None:
+    """The panel renders worst-first, and never steals the prompt."""
+    from zimzilla.ui.app import FindingsPanel
+
+    p = get_palette("green", None)
+    panel = FindingsPanel(p, target="x.test", live=True)
+    panel.query_one = lambda *a, **k: _Stub()
+    panel.update = lambda *a, **k: None
+
+    check("panel: it is not focusable, so /stop-hunt stays typeable",
+          panel.can_focus is False)
+
+    check("panel: an empty tracker says so plainly",
+          "nothing confirmed" in str(panel._body()))
+
+    panel.set_findings([
+        {"severity": "medium", "title": "missing HSTS", "asset": "x.test",
+         "wave": 2, "evidence": "no header", "agent": "misconfig"},
+        {"severity": "critical", "title": "SQLi in ?id", "asset": "api.x.test",
+         "wave": 1, "evidence": "5 rows returned", "agent": "injection"},
+    ])
+    body = str(panel._body())
+    check("panel: the critical is shown", "SQLi in ?id" in body)
+    check("panel: the evidence is shown", "5 rows returned" in body)
+    check("panel: the asset is shown", "api.x.test" in body)
+    check("panel: the count is in the title", "2" in str(panel._title()))
+
+    # set_findings does not reorder — the caller ranks — so hand it a ranked
+    # list and confirm the panel preserves that order top to bottom.
+    run = hunt_mod.HuntRun(target="x.test", directory=Path("/tmp/x"))
+    run.add_finding(hunt_mod.Finding(wave=1, agent="a", title="low bug",
+                                     severity="low"))
+    run.add_finding(hunt_mod.Finding(wave=1, agent="b", title="crit bug",
+                                     severity="critical"))
+    panel.set_findings([hunt_mod._finding_dict(f) for f in run.ranked()])
+    body = str(panel._body())
+    check("panel: a ranked list renders worst-first",
+          body.index("crit bug") < body.index("low bug"), body[:120])
+
+
+class _Stub:
+    """A no-op stand-in for a queried widget, for tests with no live app."""
+
+    def update(self, *a, **k):
+        return None
+
+
+async def test_findings_command(wd: Path) -> None:
+    """/findings opens the tracker live, from disk, and refuses when empty."""
+    cfg = _cfg(wd, boot_rain=False)
+    # Its own state dir: main() shares one workdir across every test, and the
+    # earlier hunt tests archive campaigns into <state_dir>/hunts. Sharing it
+    # here would mean /findings finds one of those and the "nothing to show"
+    # branch could never run.
+    cfg.state_dir = wd / "findings-state"
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        # No hunt has run and nothing is archived: it says so rather than
+        # opening an empty window.
+        app._handle_command("/findings")
+        await pilot.pause()
+        check("findings: with nothing to show it says so",
+              app._findings_panel is None
+              and "no findings yet" in _transcript_text(app),
+              _transcript_text(app)[-120:])
+
+        # A live run: the panel opens and shows the run's findings, worst first.
+        run = hunt_mod.HuntRun(target="x.test", directory=wd / "state" / "h")
+        run.add_finding(hunt_mod.Finding(
+            wave=1, agent="injection", title="SQLi in ?id", severity="critical",
+            asset="api.x.test", evidence="5 rows returned"))
+        app._hunt_run = run
+
+        app._handle_command("/findings")
+        await pilot.pause()
+        panel = app._findings_panel
+        check("findings: a live run opens the panel", panel is not None)
+        check("findings: the panel is marked live",
+              panel is not None and panel.live is True)
+        check("findings: the panel carries the finding",
+              panel is not None and "SQLi in ?id" in str(panel._body()),
+              str(panel._body())[:120] if panel else "")
+
+        # Running it again toggles the panel shut.
+        app._handle_command("/findings")
+        await pilot.pause()
+        check("findings: the command toggles the panel closed",
+              app._findings_panel is None)
+
+        app._hunt_run = None
+
+        # A finished campaign on disk: /findings reads it back, like
+        # /summary-hunt does.
+        finished = hunt_mod.HuntRun(
+            target="archived.test",
+            directory=hunt_mod.case_dir(cfg, "archived.test"))
+        hunt_mod.write_report(finished, hunt_mod.Finding(
+            wave=1, agent="idor", title="IDOR /api/users", severity="high",
+            asset="archived.test", evidence="user 2 returned"))
+        app._handle_command("/findings")
+        await pilot.pause()
+        panel = app._findings_panel
+        check("findings: an archived campaign is read back off disk",
+              panel is not None
+              and "IDOR /api/users" in str(panel._body()),
+              str(panel._body())[:120] if panel else "")
+        check("findings: an archived panel is not marked live",
+              panel is not None and panel.live is False)
+
+
+# ---------------------------------------------------------------------------
 
 async def main() -> int:
     test_parse_findings()
@@ -1450,11 +1698,15 @@ async def main() -> int:
     test_hunt_tool_panel_renders_bash()
     await test_loop_rail_hunt_render()
     test_pane()
+    test_contract_reaches_the_worker()
+    test_tracker_model()
+    test_findings_panel()
 
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
         test_reports(wd)
         await test_hunt_loop(wd)
+        await test_contract_in_worker_prompts(wd)
         await test_hunt_replans_from_findings(wd)
         await test_hunt_fallback_wave(wd)
         await test_brief_context(wd)
@@ -1470,6 +1722,7 @@ async def main() -> int:
         await test_transcript_shows_full_command(wd)
         await test_loop_rail_shows_hack_during_hunt(wd)
         await test_busy_gate(wd)
+        await test_findings_command(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
