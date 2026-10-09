@@ -1863,6 +1863,130 @@ class ZimZillaApp(App):
             self._sys_line("fetching the free model list…")
             self._fetch_tokenharbour_models(token)
 
+    # ---- OpenCode Zen ----------------------------------------------------
+    # The second hosted Anthropic-protocol gateway, and TokenHarbour's twin: the
+    # key is set by the operator (/opencode-api-setup) rather than discovered in
+    # a shipped profile, and the catalog is fetched live rather than declared.
+    # It differs in one way that matters to the code below — its catalog endpoint
+    # is public, so the free list can be shown before a key is set.
+    def _cmd_opencode_key(self, args) -> None:
+        """/opencode-api-setup {key} — store the OpenCode Zen API key.
+
+        Written to ~/.zimzilla/opencode/source, mode 600, in the same profile
+        format every other source uses. The key is never echoed back — the
+        confirmation names the file and the last four characters, which is
+        enough to tell two keys apart and not enough to leak one.
+        """
+        p = self.palette
+        if not args:
+            creds = oc_mod.load_credentials()
+            t = Text()
+            t.append("  OPENCODE ZEN API KEY\n\n", style=f"bold {p.accent}")
+            if creds is None:
+                t.append("  no key set.\n\n", style=p.amber)
+            else:
+                _, _, origin = creds
+                t.append("  source: ", style=p.dim)
+                t.append(origin + "\n\n", style=p.primary)
+            t.append("  set it with  ", style=p.dim)
+            t.append("/opencode-api-setup <key>\n", style=f"bold {p.primary}")
+            t.append("  get a key at  ", style=p.dim)
+            t.append("https://opencode.ai/zen\n", style=p.primary)
+            t.append(f"  stored in     {oc_mod.PROFILE}\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        key = args[0].strip()
+        if not oc_mod.looks_like_key(key):
+            self._sys_line(
+                "that does not look like an API key — paste just the key, "
+                "not the whole `export` line", warn=True)
+            return
+
+        # Keep whatever model is current, so setting a key does not silently
+        # reset the model the operator was on.
+        current = self.cfg.model if oc_mod.is_opencode(self.cfg.base_url) else ""
+        path = oc_mod.save_key(key, current)
+        oc_mod.clear_cache()          # a new key invalidates the old catalog
+        tail = key[-4:]
+        self._sys_line(f"OpenCode Zen key saved (…{tail}) to {path}", ok=True)
+        self._sys_line("switch to it with /opencode")
+
+    def _cmd_opencode(self, args) -> None:
+        """/opencode — repoint the session at OpenCode Zen, then show what is free.
+
+        One command does both, because the catalog is public: the free list is
+        worth showing whether or not a key is set, so this switches when it can
+        and lists the free models either way. Unlike TokenHarbour there is no
+        separate fetch command — the fetch is this command's second half.
+        """
+        creds = oc_mod.load_credentials()
+        if creds is None:
+            # No key: still worth showing the free list, since the endpoint that
+            # serves it needs no credential. Say why nothing was switched.
+            self._sys_line(
+                "no OpenCode Zen key found. Set one with /opencode-api-setup "
+                "<key>, or source a profile first — showing the free list anyway")
+            self._fetch_opencode_models("")
+            return
+
+        token, model, origin = creds
+        if sources_mod.active_key(self.cfg.base_url) == "opencode":
+            # Already pointed here — most often because a profile was sourced
+            # before launch. Record it anyway: the environment does not survive
+            # the next launch, and the whole point of the selection file is that
+            # the choice does.
+            oc_mod.set_current("opencode")
+            self._sys_line(f"already on OpenCode Zen ({origin})", ok=True)
+            self._fetch_opencode_models(token)
+            return
+
+        applied = oc_mod.apply_to(self.cfg)
+        if applied is None:            # unreachable: creds was just checked
+            self._sys_line("no OpenCode Zen key found", warn=True)
+            return
+        origin, model = applied
+        self.agent._client = None      # rebuild against the new host
+        oc_mod.set_current("opencode")
+        self._refresh_after_source_change("OpenCode Zen", f"key from {origin}")
+
+        # Always fetch, not only when no model is named: the free list is the
+        # point of this command, and it warms the cache /model reads from.
+        self._fetch_opencode_models(token)
+
+    @work(exclusive=True, thread=True)
+    def _fetch_opencode_models(self, token: str) -> None:
+        """The blocking fetch, off the UI thread, then a call back on it."""
+        models, err = oc_mod.fetch_models(token)
+        self.call_from_thread(self._show_opencode_models, models, err)
+
+    def _show_opencode_models(self, models, err: str) -> None:
+        p = self.palette
+        if models is None:
+            self._sys_line(f"OpenCode Zen: {err}", warn=True)
+            return
+        free = [m for m in models if m.free]
+        t = Text()
+        t.append("  OPENCODE ZEN — FREE MODELS\n\n", style=f"bold {p.accent}")
+        if not free:
+            t.append("  nothing is free right now.\n", style=p.amber)
+            t.append(f"  {len(models)} models are served, none marked free.\n",
+                     style=p.dim)
+        else:
+            for m in free:
+                mark = "◉" if m.id == self.cfg.model else "○"
+                style = f"bold {p.accent}" if m.id == self.cfg.model else p.primary
+                t.append(f"  {mark} {m.id:<30}", style=style)
+                t.append(m.blurb + "\n", style=p.dim)
+            t.append("\n  pick one with  ", style=p.dim)
+            t.append("/model <name>\n", style=f"bold {p.primary}")
+        t.append(f"  {len(models)} models served in total · "
+                 "see them all with /model\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        # The transcript is not a picker: offer these as the live list /model
+        # reads, so the two commands agree.
+        self._refresh_model_choices()
+
     def _refresh_model_choices(self) -> None:
         """Re-render the completion popup against the live catalog.
 
@@ -3039,6 +3163,10 @@ class ZimZillaApp(App):
              "tokenharbour-api-setup"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free",
              "tokenharbour-models"),
+            ("/opencode", "switch to OpenCode Zen; fetch the free models",
+             "opencode"),
+            ("/opencode-api-setup", "store your OpenCode Zen API key",
+             "opencode-api-setup"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),
