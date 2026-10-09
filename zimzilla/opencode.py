@@ -89,11 +89,19 @@ class Model:
 
     @property
     def free(self) -> bool:
-        """Whether this model is free.
+        """Whether OpenCode Zen marks this model free.
 
         The ``-free`` suffix is the only signal OpenCode Zen gives: the listing
         carries no pricing, so unlike TokenHarbour there is no zero price to fall
         back on.
+
+        Marked free is not the same as usable from here. Zen gates its free tier
+        to its own client at the gateway — a request for one of these models
+        answers ``403 FreeTierError: OpenCode's free tier can only be used from
+        within OpenCode``, whatever the credential or User-Agent (verified
+        against four agents, including ``opencode/0.0.1``). So this flag is
+        honest about the listing and says nothing about whether a turn will run;
+        a session on one of these needs a funded account and a paid model.
         """
         return self.id.endswith(FREE_SUFFIX)
 
@@ -231,11 +239,18 @@ def save_key(token: str, model: str = "") -> Path:
         os.chmod(PROFILE.parent, 0o700)
     except OSError:
         pass
+    # The key goes in ANTHROPIC_API_KEY, not ANTHROPIC_AUTH_TOKEN. The Anthropic
+    # SDK maps api_key to the ``x-api-key`` header and auth_token to
+    # ``Authorization: Bearer``; OpenCode Zen reads only ``x-api-key`` and
+    # ignores Bearer entirely, so a token here would be a key the gateway never
+    # looks at. AUTH_TOKEN is emptied rather than left alone because the SDK
+    # sends BOTH when both are set — a stale one from another provider would put
+    # a second, wrong credential on the wire.
     body = (
         f'export ANTHROPIC_BASE_URL="{DEFAULT_BASE_URL}/"\n'
-        f'export ANTHROPIC_AUTH_TOKEN="{token}"\n'
+        'export ANTHROPIC_AUTH_TOKEN=""\n'
         f'export ANTHROPIC_MODEL="{model}"\n'
-        'export ANTHROPIC_API_KEY=""\n'
+        f'export ANTHROPIC_API_KEY="{token}"\n'
     )
     # Create with 600 from the outset, then rewrite in place: never a window in
     # which the key sits in a world-readable file.
@@ -261,9 +276,11 @@ def apply_to(cfg) -> tuple[str, str] | None:
     session started by the command and one started from the remembered source end
     up configured identically.
 
-    ``api_key`` is cleared rather than left as-is: the client sends ``auth_token``
-    when it is set, and a stale ``api_key`` from another provider would be a
-    credential for the wrong service sitting in memory.
+    The key goes in ``api_key`` and ``auth_token`` is cleared, because the SDK
+    sends ``x-api-key`` for the former and ``Authorization: Bearer`` for the
+    latter — and Zen reads only ``x-api-key``. A token here would be a credential
+    the gateway never looks at; leaving a stale one in place would put a second,
+    wrong credential on the wire.
 
     Returns ``None`` when no key can be found anywhere, and leaves *cfg* alone.
     """
@@ -272,8 +289,8 @@ def apply_to(cfg) -> tuple[str, str] | None:
         return None
     token, model, origin = creds
     cfg.base_url = DEFAULT_BASE_URL
-    cfg.auth_token = token
-    cfg.api_key = ""
+    cfg.api_key = token
+    cfg.auth_token = ""
     if model:
         cfg.model = model
     return origin, model

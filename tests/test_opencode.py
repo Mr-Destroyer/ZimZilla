@@ -222,7 +222,13 @@ def test_profile_roundtrip() -> None:
     check("key: the directory is mode 700", parent_mode == 0o700, oct(parent_mode))
 
     exports = oc._read_exports(path)
-    check("key: the token round-trips", exports.get("ANTHROPIC_AUTH_TOKEN") == token)
+    # The key lives in ANTHROPIC_API_KEY, not ANTHROPIC_AUTH_TOKEN: the SDK sends
+    # x-api-key for the former and Authorization: Bearer for the latter, and Zen
+    # reads only x-api-key.
+    check("key: the key round-trips through ANTHROPIC_API_KEY",
+          exports.get("ANTHROPIC_API_KEY") == token)
+    check("key: ANTHROPIC_AUTH_TOKEN is empty (no stray Bearer)",
+          exports.get("ANTHROPIC_AUTH_TOKEN") == "")
     check("key: the model round-trips",
           exports.get("ANTHROPIC_MODEL") == "mimo-v2.6-flash-free")
     check("key: the endpoint is the gateway",
@@ -338,8 +344,8 @@ def test_apply_and_guard() -> None:
               cfg.base_url == oc.DEFAULT_BASE_URL)
         check("apply: the endpoint ends at /zen (the SDK adds /v1/messages)",
               cfg.base_url.endswith("/zen"), cfg.base_url)
-        check("apply: the token is set", cfg.auth_token.startswith("sk-"))
-        check("apply: the stale api_key is cleared", cfg.api_key == "")
+        check("apply: the key is set as api_key", cfg.api_key.startswith("sk-"))
+        check("apply: the stale auth_token is cleared", cfg.auth_token == "")
         check("apply: the model is applied", cfg.model == "mimo-v2.6-flash-free")
 
     with mock.patch.object(oc, "load_credentials", lambda: None):
@@ -384,6 +390,56 @@ def test_no_key_is_echoed(tmp: Path) -> None:
     check("display: the origin is a path, not a key", "sk-" not in origin, origin)
 
 
+def test_client_sends_the_key_where_zen_reads_it() -> None:
+    """The regression this suite was missing.
+
+    OpenCode Zen reads ``x-api-key`` and ignores ``Authorization: Bearer``. The
+    Anthropic SDK maps ``api_key`` to the former and ``auth_token`` to the
+    latter, so a key parked in ANTHROPIC_AUTH_TOKEN — which is what every other
+    source in this project uses — reaches the gateway as a header it never looks
+    at. Worse, the SDK sends BOTH when both are set, so a leftover api_key lands
+    on the wire as the literal string "placeholder" and the gateway answers 401.
+
+    This asserts on the real SDK's ``auth_headers`` for the config ``apply_to``
+    produces, because that dict is what actually goes over the wire.
+    """
+    import anthropic
+
+    from zimzilla import opencode as oc
+
+    class _Cfg:
+        base_url = "http://localhost:4001"
+        api_key = "sk-leftover-from-another-provider"
+        auth_token = "leftover-token"
+        model = "deepseek-v4.1-flash"
+
+    with mock.patch.object(oc, "load_credentials",
+                           lambda: ("sk-zen000000000000000000000",
+                                    "mimo-v2.6-flash-free", "test")):
+        cfg = _Cfg()
+        oc.apply_to(cfg)
+        # Mirror agent._ensure_client: auth_token wins the branch, and a
+        # placeholder is only stood in when there is no real key.
+        kwargs = {}
+        if cfg.auth_token:
+            kwargs["auth_token"] = cfg.auth_token
+            kwargs["api_key"] = cfg.api_key or "placeholder"
+        elif cfg.api_key:
+            kwargs["api_key"] = cfg.api_key
+        else:
+            kwargs["api_key"] = "placeholder"
+        client = anthropic.AsyncAnthropic(base_url=cfg.base_url, **kwargs)
+        headers = dict(client.auth_headers)
+
+    check("wire: x-api-key carries the real key",
+          headers.get("X-Api-Key") == "sk-zen000000000000000000000",
+          str(headers))
+    check("wire: x-api-key is NOT the placeholder",
+          headers.get("X-Api-Key") != "placeholder", str(headers))
+    check("wire: no Authorization header is sent",
+          "Authorization" not in headers, str(headers))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="zim-oc-test-"))
     # Pin the module's paths to the temp tree before anything imports it.
@@ -402,6 +458,7 @@ def main() -> int:
     test_active_key_recognises_host()
     test_credential_precedence(tmp)
     test_apply_and_guard()
+    test_client_sends_the_key_where_zen_reads_it()
     test_selection_file_is_shared()
     test_no_key_is_echoed(tmp)
 

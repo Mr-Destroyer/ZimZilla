@@ -231,9 +231,16 @@ class Agent:
             }
             if self.cfg.auth_token:
                 kwargs["auth_token"] = self.cfg.auth_token
+                # Only stand in a placeholder when there is no real key. The SDK
+                # sends BOTH headers whenever both are set, so filling this in
+                # beside a real api_key would put the literal string
+                # "placeholder" on the wire as x-api-key — which is exactly what
+                # a gateway that reads x-api-key (OpenCode Zen) then rejects.
                 kwargs["api_key"] = self.cfg.api_key or "placeholder"
+            elif self.cfg.api_key:
+                kwargs["api_key"] = self.cfg.api_key
             else:
-                kwargs["api_key"] = self.cfg.api_key or "placeholder"
+                kwargs["api_key"] = "placeholder"
             self._client = anthropic.AsyncAnthropic(**kwargs)
         return self._client
 
