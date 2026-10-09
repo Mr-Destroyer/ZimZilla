@@ -81,18 +81,25 @@ if [[ -n "$_inherited_base_url" \
   ZIMZILLA_NO_PROXY=1
 fi
 
-if [[ "$_current_source" == "tokenharbour" && "$_skip_profile" != "1" ]]; then
-  # TokenHarbour is remote: there is no proxy to start. ZimZilla's own profile
-  # (written by /tokenharbour-api-setup) is sourced when it exists, which sets
-  # ANTHROPIC_BASE_URL to the hosted endpoint; the case below then skips the
-  # proxy on its own. When it does not exist the key lives in the environment
-  # or in ~/claude-source, and the harness resolves it from there — so nothing
-  # is sourced and nothing is required, but the fail-closed check must still be
-  # told there is no proxy to insist on.
-  if [[ -r "$ZIMZILLA_HOME/tokenharbour/source" ]]; then
-    LITELLM_ENV_FILE="${_env_override:-$ZIMZILLA_HOME/tokenharbour/source}"
-  fi
-  ZIMZILLA_NO_PROXY=1
+# The hosted gateways are remote: there is no proxy to start. ZimZilla's own
+# profile (written by /tokenharbour-api-setup or /opencode-api-setup) is sourced
+# when it exists, which sets ANTHROPIC_BASE_URL to the hosted endpoint; the case
+# below then skips the proxy on its own. When it does not exist the key lives in
+# the environment or in ~/claude-source, and the harness resolves it from there
+# — so nothing is sourced and nothing is required, but the fail-closed check must
+# still be told there is no proxy to insist on.
+#
+# Both gateways keep their profile at the same path shape — $ZIMZILLA_HOME/<key>/
+# source — so this is one rule for the pair, not a copy per provider.
+if [[ "$_skip_profile" != "1" ]]; then
+  case "$_current_source" in
+    tokenharbour|opencode)
+      if [[ -r "$ZIMZILLA_HOME/$_current_source/source" ]]; then
+        LITELLM_ENV_FILE="${_env_override:-$ZIMZILLA_HOME/$_current_source/source}"
+      fi
+      ZIMZILLA_NO_PROXY=1
+      ;;
+  esac
 fi
 
 if [[ "$_current_source" == "tokenjuice" ]]; then
