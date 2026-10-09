@@ -1993,7 +1993,13 @@ class ZimZillaApp(App):
             for m in free:
                 mark = "◉" if m.id == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m.id == self.cfg.model else p.primary
-                t.append(f"  {mark} {m.id:<30}", style=style)
+                # Pad to a minimum, not a fixed width: several of these ids are
+                # longer than any sane column, and ``:<30`` pads nothing when the
+                # id already exceeds it — so the note runs straight into the id
+                # ("…contributor-freefree"). The max(1, …) keeps one space
+                # whatever the id's length.
+                t.append(f"  {mark} {m.id}"
+                         f"{' ' * max(1, 30 - len(m.id))}", style=style)
                 t.append(m.blurb + "\n", style=p.dim)
             t.append("\n  pick one with  ", style=p.dim)
             t.append("/model <name>\n", style=f"bold {p.primary}")
