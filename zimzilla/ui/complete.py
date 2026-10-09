@@ -162,10 +162,16 @@ class CompletionPopup(VerticalScroll):
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so
-                    # TokenHarbour's fetched catalog shows up here too. Imported
-                    # locally to keep this module free of a package-level cycle.
+                    # Logfare's and TokenHarbour's fetched catalogs show up here
+                    # too. Imported locally to keep this module free of a
+                    # package-level cycle.
                     from .. import sources as sources_mod
-                    pool = list(sources_mod.models_for(self.base_url) or [])
+                    from ..config import KNOWN_MODELS
+                    # None means "no live catalog" — a cold cache or an offline
+                    # box. Falling back to the declared list keeps the popup
+                    # useful there; an empty popup would look like a bug.
+                    pool = list(sources_mod.models_for(self.base_url)
+                                or KNOWN_MODELS)
                 items = [(a, "") for a in pool if a.startswith(arg) and a != arg]
             else:
                 items = [(c, d) for c, d in SLASH_COMMANDS if c.startswith(query)]

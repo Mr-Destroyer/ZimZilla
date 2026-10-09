@@ -159,9 +159,13 @@ Out of the box it runs **`deepseek-v4.1-flash`** against Logfare. Switch any
 time with `/model`, or override before launch:
 
 ```bash
-zimzilla -m claude-opus-4.6        # this run only
-ANTHROPIC_MODEL=$MODEL_KIMI zimzilla   # via a profile alias
+zimzilla -m qwen-3.8-27b           # this run only
+ANTHROPIC_MODEL=$MODEL_QWEN zimzilla   # via a profile alias
 ```
+
+Logfare retires models without notice, so ZimZilla fetches the live list from
+Logfare's own status API rather than trusting a baked-in one. `/logfare-models`
+shows what is up right now, with uptime, and `/model` is built from it.
 
 ### Updates
 

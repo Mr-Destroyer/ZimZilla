@@ -41,17 +41,23 @@ class Source:
     config: Path        # the litellm yaml
     model: str          # default model name for this upstream
     root: Path          # checkout the service manager is started from
-    models: tuple[str, ...] = ()   # everything this upstream actually serves
+    models: tuple[str, ...] = ()   # declared fallback list; the live one is fetched
 
     @property
     def base_url(self) -> str:
         return f"http://localhost:{self.port}"
 
 
-# What each upstream's catalog really advertises as chat-capable. Anything not
-# listed here returns "Model not found" (404) at request time, so /model offers
-# exactly these — no more. Verified against each upstream's /v1/models and a
-# per-model chat/completions probe.
+# The *fallback* list for each upstream — what to show when the live catalog
+# has not been fetched (no network, or /model opened before the startup warm-up
+# finished). The real list comes from the upstream's own status API; see
+# models_for().
+#
+# This is a snapshot, so it rots: it was fourteen models, ten of which Logfare
+# retired upstream, and /model kept offering them long after every request for
+# them 404'd. Treat it as a starting point that /logfare-models corrects, not as
+# the truth. Anything not in the live catalog returns "Model not found" (404) at
+# request time.
 #
 # Logfare's catalog also lists image/TTS/STT models (flux-*, sdxl-lightning,
 # whisper-large-v3-turbo, aura-2-en, nova-3, phoenix-1.0, lucid-origin); they
@@ -59,22 +65,13 @@ class Source:
 #
 # Token Juice is deliberately a single entry: its whole catalog is one model,
 # exposed upstream as `deepseek-ai/DeepSeek-V4.1-Flash` and aliased to
-# `deepseek-v4.1-flash` by its litellm config.
+# `deepseek-v4.1-flash` by its litellm config. It publishes no status API, so
+# this list is all there is for it.
 LOGFARE_MODELS: tuple[str, ...] = (
-    "claude-opus-4.6",
-    "claude-sonnet-4.6",
-    "deepseek-v3.2",
     "deepseek-v4.1-flash",
     "gemma-4-26b",
-    "gemma-4-31b",
-    "glm-5",
-    "gpt-oss-120b",
-    "grok-4.6",
-    "kimi-k2-thinking",
-    "kimi-k2.5",
     "logfare/auto",
     "qwen-3.8-27b",
-    "space-bunny-alpha",
 )
 
 TOKENJUICE_MODELS: tuple[str, ...] = (
@@ -87,19 +84,38 @@ MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
 }
 
 
+def catalog_for(base_url: str):
+    """The active source's live catalog, or ``None`` if it has none.
+
+    Only Logfare publishes one. Returned as the source module's own ``Model``
+    objects so the caller can read health without knowing where it came from.
+    Never fetches: this is the cache, and a cold cache is ``None`` — /model runs
+    on the UI thread and must not block on the network.
+    """
+    if active_key(base_url) != "logfare":
+        return None
+    from . import logfare as lf_mod
+    return lf_mod.cached_models()
+
+
 def models_for(base_url: str) -> tuple[str, ...] | None:
     """The model list for whichever source this endpoint points at.
 
     None means "not a known source" — the caller should fall back to the
     default registry rather than showing an empty list.
 
-    TokenHarbour's list is fetched, not declared, so it comes from the catalog
-    cache rather than MODELS_BY_KEY. A cold cache yields None, and the caller
-    falls back — which is why /tokenharbour-models exists to warm it.
+    Logfare's and TokenHarbour's lists are fetched, not declared, so they come
+    from a catalog cache rather than MODELS_BY_KEY. A cold cache yields None,
+    and the caller falls back to the declared list — which is why
+    /logfare-models and /tokenharbour-models exist to warm it.
     """
     key = active_key(base_url)
     if key is None:
         return None
+    if key == "logfare":
+        from . import logfare as lf_mod
+        cached = lf_mod.cached_ids()
+        return tuple(cached) if cached else None
     if key == "tokenharbour":
         from . import tokenharbour as th_mod
         cached = th_mod.cached_ids()

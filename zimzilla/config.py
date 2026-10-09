@@ -131,48 +131,29 @@ DEFAULT_MODE = "auto"
 
 # model_name -> (input $/Mtok, output $/Mtok)
 # Kept in step with the models Logfare actually serves (sources.LOGFARE_MODELS)
-# plus Token Juice's single entry.
+# plus Token Juice's single entry. A model the upstream retires has its row
+# removed here too, so the accounting never quotes a price for a 404.
 PRICING: dict[str, tuple[float, float]] = {
     "deepseek-v4.1-flash": (0.28, 0.42),
-    "deepseek-v3.2": (0.28, 0.42),
-    "claude-opus-4.6": (15.00, 75.00),
-    "claude-sonnet-4.6": (3.00, 15.00),
-    "kimi-k2.5": (0.60, 2.50),
-    "kimi-k2-thinking": (0.60, 2.50),
-    "glm-5": (0.60, 2.20),
-    "grok-4.6": (3.00, 15.00),
     "qwen-3.8-27b": (0.20, 0.60),
     "gemma-4-26b": (0.10, 0.30),
-    "gemma-4-31b": (0.15, 0.45),
-    "gpt-oss-120b": (0.15, 0.60),
     "logfare/auto": (0.50, 1.50),
-    "space-bunny-alpha": (0.50, 1.50),
 }
 
 DEFAULT_PRICE = (1.00, 3.00)
 
 # Models offered by /model when the user types a bare index or `list`.
 #
-# These are the models the *upstream* actually serves, not a wish list: the
-# Logfare catalog advertises exactly these as chat-capable, and anything else
-# comes back "Model not found" (404) at request time. Per-source lists live in
-# sources.py — this is the default (Logfare) set, used when the endpoint is not
-# one of the known proxies.
+# A *snapshot*, not the truth: the live list is fetched from the upstream's own
+# status API (see zimzilla/logfare.py and sources.models_for). This is the
+# default (Logfare) set, used when the endpoint is not one of the known proxies
+# — and the fallback when a fetch has not happened yet. Anything the upstream
+# does not serve comes back "Model not found" (404) at request time.
 KNOWN_MODELS: list[str] = [
-    "claude-opus-4.6",
-    "claude-sonnet-4.6",
-    "deepseek-v3.2",
     "deepseek-v4.1-flash",
     "gemma-4-26b",
-    "gemma-4-31b",
-    "glm-5",
-    "gpt-oss-120b",
-    "grok-4.6",
-    "kimi-k2-thinking",
-    "kimi-k2.5",
     "logfare/auto",
     "qwen-3.8-27b",
-    "space-bunny-alpha",
 ]
 
 

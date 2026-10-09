@@ -19,6 +19,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import hunt as hunt_mod
+from .. import logfare as lf_mod
 from .. import osint as osint_mod
 from .. import phish as phish_mod
 from .. import session as session_mod
@@ -684,6 +685,12 @@ class ZimZillaApp(App):
                 warn=True,
             )
         inp = self.query_one("#input", Input)
+        # Warm the Logfare catalog while the operator reads the banner, so the
+        # first /model is current instead of showing the declared fallback. Only
+        # for the local proxy: on a hosted source this would be a pointless
+        # round-trip to a status API that has nothing to do with the session.
+        if sources_mod.active_key(self.cfg.base_url) == "logfare":
+            self._warm_logfare_catalog()
         # Replay anything the user typed while the boot animation was running.
         text = "".join(typed or [])
         inp.focus()
@@ -1236,6 +1243,7 @@ class ZimZillaApp(App):
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
+        "logfare-models",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1267,6 +1275,7 @@ class ZimZillaApp(App):
             "zim-source": lambda a: self._cmd_zim_source(None),
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
+            "logfare-models": lambda a: self._cmd_logfare_models(a),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
         }
@@ -1298,6 +1307,7 @@ class ZimZillaApp(App):
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
+            ("/logfare-models", "fetch the live catalog; show what is up"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
@@ -1420,6 +1430,9 @@ class ZimZillaApp(App):
         # free flag the other sources have no equivalent of. Read once, here.
         th_catalog = (th_mod.cached_models()
                       if active == "tokenharbour" else None)
+        # Logfare's is fetched too, and carries per-model health. Read once for
+        # the same reason: the fetch is the slow part and this is a render.
+        lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
 
         if not args:
             t = Text()
@@ -1441,12 +1454,21 @@ class ZimZillaApp(App):
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
                 t.append(f"  {mark} {m:<26}", style=style)
-                note = self._model_note(m, th_catalog)
+                note = self._model_note(m, th_catalog, lf_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             if active == "tokenharbour":
                 t.append("  the catalog is live — /tokenharbour-models refetches it\n",
                          style=p.dim)
+            elif active == "logfare":
+                # Say where the list came from, because the two cases look
+                # identical in the transcript and only one of them is current.
+                if lf_catalog is None:
+                    t.append("  list not fetched yet — /logfare-models refreshes it\n",
+                             style=p.dim)
+                else:
+                    t.append("  the catalog is live — /logfare-models refetches it\n",
+                             style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -1498,12 +1520,17 @@ class ZimZillaApp(App):
         rest = [m for m in ids if m not in free and m != self.cfg.model]
         return head + frees + rest
 
-    def _model_note(self, name: str, catalog) -> str:
+    def _model_note(self, name: str, catalog, lf_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
         gateway's own price, not this harness's estimate — so it wins when
         present. Everywhere else the local estimate table answers, as before.
+
+        Logfare's catalog has no prices, but it has something the estimate table
+        cannot know: whether the model is actually up. A model Logfare reports as
+        unstable is called out, so a degraded pick is a choice rather than a
+        surprise three turns in.
         """
         live = th_mod.price_for(name, catalog)
         if live is not None:
@@ -1512,7 +1539,11 @@ class ZimZillaApp(App):
                 return "free"
             return f"${pin:g}/${pout:g} per Mtok"
         pin, pout = price_for(name)
-        return f"${pin:.2f}/${pout:.2f} per Mtok"
+        note = f"${pin:.2f}/${pout:.2f} per Mtok"
+        health = lf_mod.health_for(name) if lf_catalog else None
+        if health is not None and not health.healthy:
+            note += f"  ·  {health.status}" if health.status else "  ·  degraded"
+        return note
 
     def _cmd_cost(self, args=None) -> None:
         p = self.palette
@@ -1802,6 +1833,60 @@ class ZimZillaApp(App):
         self.query_one(ChatPane).write_block(t)
         # The transcript is not a picker: offer the free ones as the live list
         # /model reads, so the two commands agree.
+        self._refresh_model_choices()
+
+    # ---- logfare catalog --------------------------------------------------
+    def _cmd_logfare_models(self, args) -> None:
+        """/logfare-models — fetch Logfare's live catalog and show what is up.
+
+        The status API is public, so this needs no key and works before the
+        operator has authenticated anything. That is also why it is the one
+        catalog that can be warmed at startup.
+        """
+        self._sys_line("fetching the Logfare catalog…")
+        self._fetch_logfare_models()
+
+    @work(exclusive=True, thread=True)
+    def _fetch_logfare_models(self) -> None:
+        """The blocking fetch, off the UI thread, then a call back on it."""
+        models, err = lf_mod.fetch_models()
+        self.call_from_thread(self._show_logfare_models, models, err)
+
+    @work(exclusive=True, thread=True)
+    def _warm_logfare_catalog(self) -> None:
+        """Fetch the catalog once at startup, silently.
+
+        Deliberately says nothing, on success or failure: a launch that cannot
+        reach the status API is still a working launch — /model falls back to
+        the declared list and says so, and /logfare-models reports the failure
+        on demand. A catalog that is merely *fresh* is not news.
+        """
+        lf_mod.fetch_models()
+
+    def _show_logfare_models(self, models, err: str) -> None:
+        p = self.palette
+        if models is None:
+            self._sys_line(f"Logfare: {err}", warn=True)
+            return
+        t = Text()
+        t.append("  LOGFARE — LIVE MODELS\n\n", style=f"bold {p.accent}")
+        if not models:
+            t.append("  Logfare is serving no chat models right now.\n",
+                     style=p.amber)
+        else:
+            for m in models:
+                mark = "◉" if m.id == self.cfg.model else "○"
+                style = f"bold {p.accent}" if m.id == self.cfg.model else p.primary
+                t.append(f"  {mark} {m.id:<26}", style=style)
+                # A degraded model is flagged in amber rather than dim: it is
+                # the one thing on this screen worth noticing.
+                t.append(m.blurb + "\n", style=p.dim if m.healthy else p.amber)
+            t.append("\n  pick one with  ", style=p.dim)
+            t.append("/model <name>\n", style=f"bold {p.primary}")
+        t.append(f"  {len(models)} chat models served · fetched from "
+                 f"{lf_mod.HOST}{lf_mod.STATUS_PATH}\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        # The popup and /model both read the cache this fetch just warmed.
         self._refresh_model_choices()
 
     def _cmd_zim_tokenharbour(self, args) -> None:
@@ -3022,6 +3107,8 @@ class ZimZillaApp(App):
              "tokenharbour-api-setup"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free",
              "tokenharbour-models"),
+            ("/logfare-models", "fetch the live catalog; show what is up",
+             "logfare-models"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),

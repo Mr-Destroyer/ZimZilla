@@ -15,19 +15,12 @@ export ANTHROPIC_MODEL="deepseek-v4.1-flash"
 export ANTHROPIC_API_KEY=""
 
 # Model aliases — switch per-invocation, e.g.:
-#   ANTHROPIC_MODEL=$MODEL_KIMI zimzilla
-# Full list lives in litellm-config.yaml next to this file.
+#   ANTHROPIC_MODEL=$MODEL_QWEN zimzilla
+# These are the models Logfare currently serves. Logfare retires models without
+# notice, so the live list is fetched, not declared: /logfare-models in the TUI
+# shows what is up right now.
 export MODEL_DEFAULT="deepseek-v4.1-flash"
-export MODEL_OPUS="claude-opus-4.6"
-export MODEL_DEEPSEEK="deepseek-v3.2"
 export MODEL_DEEPSEEK_FLASH="deepseek-v4.1-flash"
-export MODEL_KIMI="kimi-k2.5"
-export MODEL_GLM="glm-5"
-export MODEL_GROK="grok-4.6"
 export MODEL_QWEN="qwen-3.8-27b"
-export MODEL_AUTO="logfare/auto"
-export MODEL_SONNET="claude-sonnet-4.6"
-export MODEL_KIMI_THINKING="kimi-k2-thinking"
 export MODEL_GEMMA="gemma-4-26b"
-export MODEL_GEMMA_31B="gemma-4-31b"
-export MODEL_GPT_OSS="gpt-oss-120b"
+export MODEL_AUTO="logfare/auto"

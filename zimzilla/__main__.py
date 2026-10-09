@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from . import logfare as lf_mod
 from . import sources as sources_mod
 from . import tokenharbour as th_mod
 from . import update as update_mod
@@ -76,7 +77,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.list_models:
-        for m in KNOWN_MODELS:
+        # The live catalog when it can be reached, the declared snapshot when it
+        # cannot. This is a one-shot that exits, so one blocking fetch is the
+        # right price for a list that is not a month out of date — and a failure
+        # is reported on stderr rather than silently printing a stale list as
+        # though it were current.
+        models, err = lf_mod.model_ids()
+        if models is None:
+            print(f"zimzilla: {err} — showing the declared list", file=sys.stderr)
+            models = list(KNOWN_MODELS)
+        for m in models:
             print(m)
         return 0
 
