@@ -1420,7 +1420,8 @@ async def test_busy_gate(wd: Path) -> None:
         "save", "load", "compact", "team", "osint", "phish", "bug-hunt",
         "stop-hunt", "summary-hunt", "findings", "zim-logfare",
         "zim-tokenjuice", "zim-source", "zim-tokenharbour",
-        "tokenharbour-api-setup", "tokenharbour-models", "exit", "quit",
+        "tokenharbour-api-setup", "tokenharbour-models",
+        "opencode", "opencode-api-setup", "exit", "quit",
     }
     check("gate: every busy-permitted command is dispatchable",
           app.BUSY_OK <= dispatch_names,

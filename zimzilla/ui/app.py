@@ -19,6 +19,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import hunt as hunt_mod
+from .. import opencode as oc_mod
 from .. import osint as osint_mod
 from .. import phish as phish_mod
 from .. import session as session_mod
@@ -35,6 +36,17 @@ from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
 from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
+
+
+#: The hosted gateways, by source key: their display name and the command that
+#: refetches their catalog. Both are remote, both are fetched rather than
+#: declared, and both carry a free tier — so /model treats them identically and
+#: only the two names differ. The local proxies are absent on purpose: they have
+#: declared catalogs and no free flag, so nothing here applies to them.
+HOSTED_SOURCES: dict[str, tuple[str, str]] = {
+    "tokenharbour": ("TokenHarbour", "/tokenharbour-models"),
+    "opencode": ("OpenCode Zen", "/opencode"),
+}
 
 
 def _dedupe(items) -> list[str]:
@@ -1236,6 +1248,7 @@ class ZimZillaApp(App):
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
+        "opencode-api-setup", "opencode",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1267,6 +1280,8 @@ class ZimZillaApp(App):
             "zim-source": lambda a: self._cmd_zim_source(None),
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
+            "opencode": lambda a: self._cmd_opencode(a),
+            "opencode-api-setup": lambda a: self._cmd_opencode_key(a),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
         }
@@ -1298,6 +1313,8 @@ class ZimZillaApp(App):
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
+            ("/opencode", "switch to OpenCode Zen; fetch the free models"),
+            ("/opencode-api-setup <key>", "store your OpenCode Zen API key"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
