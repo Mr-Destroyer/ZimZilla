@@ -302,16 +302,18 @@ or a colour diff of the change, and three keys:
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, so it can run against a local LiteLLM proxy or a hosted gateway
-without any code caring which. Three sources are wired up:
+without any code caring which. Four sources are wired up:
 
 | Source | Endpoint | How it starts |
 |---|---|---|
 | **Logfare** | `:4001` | the bundled proxy — the default |
 | **Token Juice** | `:4000` | its own local proxy |
 | **TokenHarbour** | `tokenharbor.ai` | hosted — nothing to start |
+| **OpenCode Zen** | `opencode.ai/zen` | hosted — nothing to start |
 
-Switch with `/zim-logfare`, `/zim-tokenjuice` or `/zim-tokenharbour`; the choice
-is remembered, so the next launch comes back to the one that was working.
+Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-tokenharbour` or
+`/opencode`; the choice is remembered, so the next launch comes back to the one
+that was working.
 
 ### TokenHarbour
 
@@ -346,6 +348,33 @@ TokenHarbour's catalog is **live** — it changes, and some models are free:
 
 `/model` reads the fetched catalog, so free models sort to the top and the
 prices shown are the gateway's own rather than a local estimate.
+
+### OpenCode Zen
+
+OpenCode Zen is the second hosted gateway, and works the same way — a key of
+your own, stored in the same profile format:
+
+```
+/opencode-api-setup sk-yourkeyhere
+```
+
+That writes `~/.zimzilla/opencode/source` (mode 600), and the same
+`~/claude-source` fallbacks apply: a profile pointing at `opencode.ai/zen` is
+picked up whether or not it was sourced.
+
+`/opencode` does both halves in one command — it switches the session to the
+gateway **and** fetches the catalog:
+
+```
+/opencode                  # switch, then list the free models
+/model                     # free models first
+/model mimo-v2.6-flash-free
+```
+
+Its catalog endpoint is **public**, so the free list can be shown before a key is
+set — `/opencode` with no key still lists what is free and tells you how to set
+one. A model is free when its id ends `-free`; the gateway's listing carries no
+prices, so unlike TokenHarbour there is no price column, only the free flag.
 
 ---
 
@@ -427,6 +456,8 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
+| `/opencode` | switch to OpenCode Zen; fetch the free models |
+| `/opencode-api-setup <key>` | store your OpenCode Zen API key |
 | `/bug-hunt <target>` | recon, then waves of 10 agents until stopped |
 | `/stop-hunt` | end a running hunt |
 | `/summary-hunt` | write the hunt report |
