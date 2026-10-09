@@ -37,6 +37,17 @@ from .rails import LoopRail, TelemetryRail
 from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
 
 
+#: The hosted gateways, by source key: their display name and the command that
+#: refetches their catalog. Both are remote, both are fetched rather than
+#: declared, and both carry a free tier — so /model treats them identically and
+#: only the two names differ. The local proxies are absent on purpose: they have
+#: declared catalogs and no free flag, so nothing here applies to them.
+HOSTED_SOURCES: dict[str, tuple[str, str]] = {
+    "tokenharbour": ("TokenHarbour", "/tokenharbour-models"),
+    "opencode": ("OpenCode Zen", "/opencode"),
+}
+
+
 def _dedupe(items) -> list[str]:
     """Order-preserving de-dupe.
 
@@ -1416,10 +1427,15 @@ class ZimZillaApp(App):
         # does not know is a 404 at request time, not a switch.
         active = sources_mod.active_key(self.cfg.base_url)
         models = sources_mod.models_for(self.cfg.base_url) or tuple(KNOWN_MODELS)
-        # TokenHarbour's catalog is fetched, so it also carries prices and a
-        # free flag the other sources have no equivalent of. Read once, here.
-        th_catalog = (th_mod.cached_models()
-                      if active == "tokenharbour" else None)
+        # A hosted gateway's catalog is fetched, so it also carries a free flag
+        # the other sources have no equivalent of. Read once, here. Both gateways
+        # expose cached_models(), so the live catalog is chosen by source key.
+        hosted = HOSTED_SOURCES.get(active or "")
+        live_catalog = None
+        if active == "tokenharbour":
+            live_catalog = th_mod.cached_models()
+        elif active == "opencode":
+            live_catalog = oc_mod.cached_models()
 
         if not args:
             t = Text()
@@ -1427,8 +1443,7 @@ class ZimZillaApp(App):
             t.append(self.cfg.model + "\n", style=f"bold {p.accent}")
             if active:
                 src = sources_mod.discover().get(active)
-                label = src.label if src else ("TokenHarbour" if active == "tokenharbour"
-                                               else active)
+                label = src.label if src else (hosted[0] if hosted else active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
                 t.append(f"   ·   {self.cfg.base_url}\n", style=p.dim)
