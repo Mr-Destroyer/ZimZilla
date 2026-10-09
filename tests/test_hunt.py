@@ -1089,6 +1089,66 @@ async def test_recon_overlay_fast_target(wd: Path) -> None:
               app._close_recon({"screen": None}) is None)
 
 
+async def test_overlays_do_not_stack(wd: Path) -> None:
+    """The wave web must not leave the recon window stranded underneath it.
+
+    ``_close_recon`` used to defer its pop a tick when the screen had not
+    mounted, and the deferred half re-checked ``self.screen is screen`` before
+    popping. By the time it ran, ``hunt_wave_start`` had pushed the wave web on
+    top, so the check failed and recon stayed on the stack — under the web, for
+    the whole campaign, with a fresh web stacked above it every wave. The
+    operator saw the first wave's screen and then nothing that repainted.
+
+    The order here is the real one: recon's done event, then the wave start.
+    """
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+
+    from zimzilla.ui.app import ReconOverlay as _RO
+    from zimzilla.ui.app import WaveOverlay as _WO
+
+    async with app.run_test(size=(140, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        recon = _RO("x.test", app.palette, app.cfg)
+        app.push_screen(recon)
+        # Recon finishes in the same tick it went up, and the wave web follows
+        # immediately — the exact sequence that stranded recon.
+        app._close_recon({"screen": recon})
+        web = _WO("x.test", app.palette, wave=1, size=10)
+        app.push_screen(web)
+        for _ in range(10):
+            await pilot.pause()
+
+        names = [type(s).__name__ for s in app.screen_stack]
+        check("stack: recon is gone", recon not in app.screen_stack, str(names))
+        check("stack: the wave web is the active screen", app.screen is web,
+              str(names))
+
+        # A wave ends and the next one starts. Neither web may survive.
+        web2 = _WO("x.test", app.palette, wave=2, size=10)
+        app._close_wave({"screen": web})
+        app.push_screen(web2)
+        for _ in range(10):
+            await pilot.pause()
+        names = [type(s).__name__ for s in app.screen_stack]
+        check("stack: the finished wave is gone", web not in app.screen_stack,
+              str(names))
+        check("stack: only one web is up", names.count("WaveOverlay") == 1,
+              str(names))
+        check("stack: nothing is stranded above the shell",
+              names == ["Screen", "WaveOverlay"], str(names))
+
+        # And the whole thing unwinds cleanly at the end of the campaign.
+        app._close_wave({"screen": web2})
+        for _ in range(10):
+            await pilot.pause()
+        check("stack: the shell is back",
+              [type(s).__name__ for s in app.screen_stack] == ["Screen"],
+              str([type(s).__name__ for s in app.screen_stack]))
+        check("stack: the app is still alive", app.is_running)
+
+
 def test_hunt_tool_panel_renders_bash() -> None:
     """The bash panel: whole command, whole response, attributed.
 
@@ -1962,6 +2022,7 @@ async def main() -> int:
         await test_recon_overlay(wd)
         await test_stop_hunt_reaches_the_loop(wd)
         await test_recon_overlay_fast_target(wd)
+        await test_overlays_do_not_stack(wd)
         await test_transcript_shows_full_command(wd)
         await test_loop_rail_shows_hack_during_hunt(wd)
         await test_busy_gate(wd)

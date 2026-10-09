@@ -329,6 +329,21 @@ class WaveWeb:
             return self._render_compact(width, height)
         return self._render_web(width, height, p)
 
+    @property
+    def planning(self) -> bool:
+        """Whether the wave is still being planned — no roster has arrived.
+
+        The screen is pushed at ``hunt_wave_start``, but the roster only lands
+        with ``hunt_plan``, which is emitted after the planner's turn returns.
+        That turn is a real model call over recon, findings, wave history and a
+        long instruction, so it runs for tens of seconds — and for all of it the
+        web held zero agents and drew "WAVE 1 · 0 agents" under a header
+        claiming a wave. That is not a cosmetic gap: it reads as a wave that
+        started with nobody in it, which is exactly the fault this class was
+        built to make visible.
+        """
+        return not self.agents and not self.findings
+
     # -- the web ------------------------------------------------------------
     def _render_web(self, width: int, height: int, p: Palette) -> Text:
         g = _Grid(width, height)
@@ -509,8 +524,14 @@ class WaveWeb:
         counts = self.counts()
         secs = self.elapsed()
         rule_w = max(0, min(width, 60) - 2)
-        line(f" WAVE {self.wave} · {len(self.agents)} agents · {self.target}",
-             f"bold {p.accent}")
+        if self.planning:
+            # No roster yet. Say so, rather than counting zero agents under a
+            # header that announces a wave — see ``planning``.
+            line(f" WAVE {self.wave} · planning · {self.target}",
+                 f"bold {p.accent}")
+        else:
+            line(f" WAVE {self.wave} · {len(self.agents)} agents · {self.target}",
+                 f"bold {p.accent}")
         line(f" ZIM-TRACK  {secs // 60}:{secs % 60:02d}  "
              f"{sum(counts.values())} finding(s)", p.primary)
         line(" " + "─" * rule_w, p.dim)
@@ -538,6 +559,12 @@ class WaveWeb:
                  style)
         if hidden > 0:
             line(f" · +{hidden} more", p.dim)
+        if not roster:
+            # The roster slot, empty. Before the planner returns there is
+            # nothing to list, and a blank gap between two rules is what the
+            # operator was left staring at while a model wrote ten briefs.
+            line(" · planning the wave — the roster lands when the "
+                 "planner returns", p.dim)
 
         line(" " + "─" * rule_w, p.dim)
         lanes = "  ".join(f"{SEVERITY_LABEL[s]} {counts.get(s, 0)}" for s in LANES)

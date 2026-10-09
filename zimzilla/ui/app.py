@@ -3171,30 +3171,17 @@ class ZimZillaApp(App):
     def _close_wave(self, slot: dict) -> None:
         """Take the wave web down, if it is still up.
 
-        Same identity-checked, deferred pop as ``_close_recon``, and for the
-        same reasons: a blind ``pop_screen()`` would dismiss whatever the
-        operator opened on top, and a wave that ends in the tick it started
-        would tear its own tree down ahead of the queued Mount message.
+        Same identity-checked removal as ``_close_recon``, and for the same
+        reasons — see ``_drop_screen``. A blind ``pop_screen()`` would dismiss
+        whatever the operator opened on top, and a wave that ends in the tick it
+        started is popped the moment it is on top rather than a tick later, when
+        the next wave's web may already have been pushed above it.
         """
         screen = slot.get("screen")
         slot["screen"] = None
         if screen is None:
             return
-        try:
-            if not screen.is_mounted:
-                self.call_after_refresh(self._close_wave_screen, screen)
-            elif self.screen is screen:
-                self.pop_screen()
-        except Exception:
-            pass
-
-    def _close_wave_screen(self, screen) -> None:
-        """The deferred half of ``_close_wave`` — pop it if it is still up."""
-        try:
-            if self.screen is screen:
-                self.pop_screen()
-        except Exception:
-            pass
+        self._drop_screen(screen)
 
     def _close_recon(self, overlay: dict) -> None:
         """Take the recon window down, if it is still up.
@@ -3204,31 +3191,38 @@ class ZimZillaApp(App):
         permission modal, and a blind pop would dismiss *that* instead — leaving
         the recon window stranded over the shell. Idempotent, because both the
         recon-done event and the worker's ``finally`` call it.
-
-        The pop is deferred a tick when the screen has not mounted yet. A fast
-        target finishes recon before its window is on screen, and popping in the
-        same tick it was pushed tears the tree down ahead of the queued Mount
-        message — the overlay then raises on a child that is already gone. One
-        tick lets it come up and go down cleanly, and the operator never sees it
-        because nothing paints in between.
         """
         screen = overlay.get("screen")
         overlay["screen"] = None
         if screen is None:
             return
-        try:
-            if not screen.is_mounted:
-                self.call_after_refresh(self._close_recon_screen, screen)
-            elif self.screen is screen:
-                self.pop_screen()
-        except Exception:
-            pass
+        self._drop_screen(screen)
 
-    def _close_recon_screen(self, screen) -> None:
-        """The deferred half of ``_close_recon`` — pop it if it is still up."""
+    def _drop_screen(self, screen, tries: int = 3) -> None:
+        """Remove *screen* from the stack, wherever it sits.
+
+        Popped the moment it is on top, even if it has not mounted. This used to
+        defer a tick, on the theory that popping an unmounted screen tore the
+        widget tree down ahead of the queued Mount message — but Textual 8.2.8
+        pops it cleanly (``ReconOverlay.on_mount`` keeps its ``NoMatches`` guard
+        for the general case), and the deferral cost far more than it bought: the
+        callback re-checks ``self.screen is screen`` when it finally runs, and by
+        then ``hunt_wave_start`` has pushed the wave web on top, so the check
+        fails and recon is left on the stack for the whole campaign — with a
+        fresh wave web stacked above it every wave.
+
+        When it is genuinely not on top, the retry is bounded and identity
+        checked, because whatever is above it — a permission modal, the command
+        palette — is transient and will go on its own. A blind ``pop_screen()``
+        would dismiss that instead, which is the fault this exists to avoid.
+        """
         try:
+            if screen not in self.screen_stack:
+                return
             if self.screen is screen:
                 self.pop_screen()
+            elif tries > 0:
+                self.call_after_refresh(self._drop_screen, screen, tries - 1)
         except Exception:
             pass
 

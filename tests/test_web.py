@@ -396,6 +396,53 @@ def test_splash_banner() -> None:
               abs(left - right) <= 1, f"left={left} right={right}")
 
 
+def test_planning_state() -> None:
+    """Before the roster lands the screen says it is planning, not "0 agents".
+
+    The web is pushed at ``hunt_wave_start``, but the roster only arrives with
+    ``hunt_plan``, which is emitted after the planner's turn returns. That turn
+    is a real model call over recon, findings, wave history and a long
+    instruction — tens of seconds. For all of it the web held zero agents and
+    drew "WAVE 1 · 0 agents", which reads as a wave that started with nobody in
+    it: the exact fault this screen exists to make visible.
+    """
+    from zimzilla.theme import get_palette
+    from zimzilla.ui.web import WaveWeb
+
+    w = WaveWeb("*.lerevecraze.com", get_palette("green", None), wave=1, size=10)
+    check("planning: a fresh web is planning", w.planning is True)
+
+    # A planning wave always takes the list: `render` needs two agents to draw
+    # a web, so there is no wide layout to check while the roster is empty. The
+    # list is what the operator sees for the whole planner call, so that is
+    # where the state has to be legible.
+    narrow = w.render(118, 36).plain
+    check("planning: the header says planning, not 0 agents",
+          "planning" in narrow and "0 agents" not in narrow,
+          narrow.replace("\n", "|")[:200])
+    check("planning: the empty roster slot is explained",
+          "roster lands" in narrow, narrow.replace("\n", "|")[:200])
+
+    # And it stops saying it the moment a roster arrives.
+    w.set_plan([{"name": f"agent-{i + 1}", "brief": "b"} for i in range(10)])
+    check("planning: a roster ends the planning state", w.planning is False)
+    after = w.render(118, 36).plain
+    check("planning: the web is drawn, not the list",
+          "╲" in after or "╱" in after, after.replace("\n", "|")[:120])
+    check("planning: the web goes back to LIVE", "LIVE" in after,
+          after.replace("\n", "|")[:120])
+    header = w.render(60, 18).plain.split("\n")[0]
+    check("planning: the header counts the real roster",
+          "10 agents" in header, header)
+
+    # A finding with no roster is not a planning wave — it is a wave that has
+    # already reported, which only happens once agents exist. Guard the
+    # predicate so a stray finding cannot leave the header stuck on PLANNING.
+    w2 = WaveWeb("t.test", get_palette("green", None), wave=1, size=10)
+    w2.add_finding({"agent": "agent-1", "severity": "high", "title": "x"})
+    check("planning: a reported finding is not planning", w2.planning is False)
+
+
 def main() -> int:
     test_render_is_exact()
     test_web_fits_at_minimum()
@@ -409,6 +456,7 @@ def main() -> int:
     test_plan_replaces_the_roster()
     test_compact_fallback()
     test_truncated_roster_keeps_the_reporters()
+    test_planning_state()
     test_splash_banner()
 
     failed = [n for n, ok, _ in RESULTS if not ok]
