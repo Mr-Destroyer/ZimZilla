@@ -1648,20 +1648,22 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {k:<12}", style=style)
                 t.append(f":{src.port}  {src.label:<12} ", style=p.primary)
                 t.append(f"{state}\n", style=p.accent if up else p.amber)
-            # TokenHarbour has no port and no local proxy, so it is listed from
-            # its credential rather than from discover() — "proxy up" is not a
-            # question you can ask a hosted gateway.
-            th = th_mod.load_credentials()
-            mark = "◉" if active == "tokenharbour" else "○"
-            style = f"bold {p.accent}" if active == "tokenharbour" else p.primary
-            t.append(f"  {mark} {'tokenharbour':<12}", style=style)
-            t.append("hosted  TokenHarbour ", style=p.primary)
-            if th is None:
-                t.append("no key — /tokenharbour-api-setup\n", style=p.amber)
-            else:
-                t.append(f"key from {th[2]}\n", style=p.accent)
-            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice  or  "
-                     "/zim-tokenharbour\n", style=p.dim)
+            # The hosted gateways have no port and no local proxy, so they are
+            # listed from their credential rather than from discover() — "proxy
+            # up" is not a question you can ask a remote host.
+            for key, (label, _cmd) in HOSTED_SOURCES.items():
+                creds = (th_mod.load_credentials() if key == "tokenharbour"
+                         else oc_mod.load_credentials())
+                mark = "◉" if active == key else "○"
+                style = f"bold {p.accent}" if active == key else p.primary
+                t.append(f"  {mark} {key:<12}", style=style)
+                t.append(f"hosted  {label:<12} ", style=p.primary)
+                if creds is None:
+                    t.append(f"no key — /{key}-api-setup\n", style=p.amber)
+                else:
+                    t.append(f"key from {creds[2]}\n", style=p.accent)
+            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice,  "
+                     "/zim-tokenharbour  or  /opencode\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
 
