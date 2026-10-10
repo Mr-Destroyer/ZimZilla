@@ -20,8 +20,10 @@ Two invariants this file is built around:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2148,6 +2150,28 @@ def test_hunt_findings_tool(wd: Path) -> None:
     recent = tools_mod.execute("hunt_findings", {}, cfg)
     check("hunt_findings: with no scope it reads the most recent campaign",
           "target.test" in recent.output, recent.output[:120])
+
+    # ---- "most recent" follows the artefacts, not the directory's mtime.
+    # migrate_hunts moves files *into* a scope directory and bumps its mtime to
+    # now, so a week-old campaign merged at boot would otherwise sort ahead of
+    # one that finished an hour ago. The artefacts' mtimes survive the move.
+    stale = cfg.state_dir / "hunts" / "stale.test"
+    hunt_mod.write_recon(hunt_mod.HuntRun(target="stale.test", directory=stale),
+                         "an old campaign, merged at boot")
+    old_time = time.time() - 86400 * 7
+    for path in stale.rglob("*"):
+        os.utime(path, (old_time, old_time))
+    os.utime(stale, (time.time(), time.time()))   # the move bumped the dir
+    still = tools_mod.execute("hunt_findings", {}, cfg)
+    check("hunt_findings: a freshly-touched old directory does not win",
+          "target.test" in still.output, still.output[:120])
+
+    # ---- the scope is reduced the same way the directory name is, so what the
+    # operator types finds the campaign however they think of the engagement.
+    for typed in ("https://target.test/login", "target.test:443", "TARGET.TEST"):
+        hit = tools_mod.execute("hunt_findings", {"scope": typed}, cfg)
+        check(f"hunt_findings: scope {typed!r} finds the campaign",
+              "auth bypass" in hit.output, hit.output[:120])
 
     # ---- recon
     recon = tools_mod.execute("hunt_findings", {"scope": "target.test",

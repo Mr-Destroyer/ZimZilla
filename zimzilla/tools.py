@@ -832,15 +832,53 @@ def _first_heading(text: str) -> str:
 def _campaign_dirs(state_dir: Path) -> list[Path]:
     """Every campaign directory, newest first.
 
-    Newest by mtime, because the layout is now one directory *per scope*: the
-    directory does not carry a timestamp, so "most recent campaign" has to be
-    the one most recently written to.
+    "Newest" is the most recently *written artefact* under the directory, not
+    the directory's own mtime. The layout is one directory per scope now, so the
+    directory carries no timestamp — and its mtime is not a usable substitute,
+    because writing a new file into a directory does not touch the directory's
+    mtime at all, while ``migrate_hunts`` moving files *into* one bumps it to
+    now. A campaign that ran last week and was merged at boot would sort ahead
+    of one that finished an hour ago. The artefacts' mtimes survive the move, so
+    they are what decides it.
     """
     root = Path(state_dir) / _HUNTS_DIR
     if not root.is_dir():
         return []
+
+    def newest_artefact(directory: Path) -> float:
+        latest = 0.0
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                latest = max(latest, path.stat().st_mtime)
+            except OSError:
+                continue
+        return latest
+
     dirs = [d for d in root.iterdir() if d.is_dir()]
-    return sorted(dirs, key=lambda d: d.stat().st_mtime, reverse=True)
+    return sorted(dirs, key=newest_artefact, reverse=True)
+
+
+def _scope_name(target: str) -> str:
+    """The bare scope a target names — ``https://dev.example.com/login`` →
+    ``dev.example.com``.
+
+    The same reduction ``hunt.scope_name`` performs, duplicated for the same
+    reason as ``_HUNTS_DIR``: reading hunt's would close an import cycle. The
+    operator types whatever they think of the engagement — a host, a URL, a
+    host with a port — and the campaign is filed under the bare scope, so the
+    lookup has to reduce the same way or ``scope=https://x/login`` matches
+    nothing.
+    """
+    text = str(target or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+    text = text.split("/", 1)[0]
+    text = text.split("@")[-1]
+    text = text.split(":", 1)[0]
+    return text.lower()
 
 
 def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
@@ -872,8 +910,10 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
     if scope:
         # Match on the directory's scope name and, failing that, on the target
         # recorded inside its findings — the directory name is derived, but the
-        # frontmatter holds exactly what the operator typed.
-        want = scope.strip().lower()
+        # frontmatter holds exactly what the operator typed. Both sides are
+        # reduced first, so a URL or a host-with-port finds the campaign filed
+        # under its bare scope.
+        want = _scope_name(scope)
         for d in campaigns:
             if d.name.lower() == want:
                 directory = d
@@ -886,7 +926,7 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
                             f.read_text(encoding="utf-8", errors="replace"))
                     except OSError:
                         continue
-                    if meta.get("target", "").strip().lower() == want:
+                    if _scope_name(meta.get("target", "")) == want:
                         directory = d
                         break
                 if directory is not None:

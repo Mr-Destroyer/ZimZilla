@@ -652,6 +652,32 @@ def _finding_markdown(run: HuntRun, f: Finding) -> str:
 SCOPE_NAME_MAX = 80
 
 
+def scope_name(target: str) -> str:
+    """The bare scope a target names — ``https://dev.example.com/login`` →
+    ``dev.example.com``.
+
+    The reduction itself, split out from ``scope_slug`` because two other places
+    need to compare a scope *without* slugging it: ``migrate_hunts`` deciding
+    whether a legacy directory already sits at its own scope, and the
+    ``hunt_findings`` tool matching the scope the operator typed against a
+    campaign directory. Both used to compare raw strings, so ``hunt_findings
+    scope=https://dev.example.com/login`` matched nothing.
+
+    Empty for anything that is not host-shaped enough to reduce, which is the
+    caller's signal to reject it.
+    """
+    text = str(target or "").strip()
+    if not text:
+        return ""
+    # Strip a scheme and anything after the authority, so a URL reduces to its
+    # host. `//` starts the authority; a bare host has none.
+    text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+    text = text.split("/", 1)[0]
+    text = text.split("@")[-1]          # drop any userinfo
+    text = text.split(":", 1)[0]        # drop a port
+    return text.lower()
+
+
 def scope_slug(target: str) -> str:
     """The scope name a target files under. Never empty.
 
@@ -666,16 +692,9 @@ def scope_slug(target: str) -> str:
     an operator mistake, and a directory named after its first eighty
     characters is a mistake preserved on disk; raising lets the caller say so.
     """
-    text = str(target or "").strip()
+    text = scope_name(target)
     if not text:
         raise ValueError("a hunt needs a target")
-
-    # Strip a scheme and anything after the authority, so a URL files under
-    # its host. `//` starts the authority; a bare host has none.
-    text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
-    text = text.split("/", 1)[0]
-    text = text.split("@")[-1]          # drop any userinfo
-    text = text.split(":", 1)[0]        # drop a port
 
     if " " in text:
         raise ValueError(
@@ -750,7 +769,7 @@ def _campaign_scope(directory: Path) -> str:
                 # campaign is not.
                 break
     match = _LEGACY_DIR_RE.match(directory.name)
-    return (match.group("scope") if match else directory.name).lower()
+    return scope_name(match.group("scope") if match else directory.name)
 
 
 def migrate_hunts(cfg: Config) -> list[tuple[Path, Path]]:
