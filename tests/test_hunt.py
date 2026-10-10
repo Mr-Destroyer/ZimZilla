@@ -1159,7 +1159,10 @@ async def test_recon_overlay(wd: Path) -> None:
         await pilot.pause()
 
         check("overlay: it is the active screen", app.screen is overlay)
-        check("overlay: it does not steal the prompt",
+        # "Does not take focus itself" — not "leaves the prompt usable". The
+        # prompt is unreachable behind any of these overlays; see
+        # test_wave_overlay_can_still_be_escaped for the pinned behaviour.
+        check("overlay: it does not take focus itself",
               overlay.can_focus is False)
 
         overlay.note({"type": "hunt_recon_tool", "tool": "bash",
@@ -2434,8 +2437,9 @@ def test_findings_panel() -> None:
     panel.query_one = lambda *a, **k: _Stub()
     panel.update = lambda *a, **k: None
 
-    check("panel: it is not focusable, so /stop-hunt stays typeable",
-          panel.can_focus is False)
+    # Not focusable, so it never takes the keyboard — but that is not the same
+    # as /stop-hunt staying typeable, which it does not while this panel is up.
+    check("panel: it is not focusable", panel.can_focus is False)
 
     check("panel: an empty tracker says so plainly",
           "nothing confirmed" in str(panel._body()))
@@ -2541,6 +2545,501 @@ async def test_findings_command(wd: Path) -> None:
 
 # ---------------------------------------------------------------------------
 
+async def test_stream_turn_watchdog() -> None:
+    """The planner's prose reaches the UI while it is still thinking.
+
+    A turn's prose arrives as ``text_delta`` events, and the consumers only
+    forward it on a tool call or at the end of the turn. The wave planner
+    reasons for tens of seconds over the whole recon before it writes a word of
+    roster, so without a bound on the wait the wave view has nothing to draw for
+    that entire time — the empty screen the planning feed exists to fill.
+
+    What is asserted is only *when* prose is handed on: nothing is invented,
+    reordered, or dropped, and the events still arrive in order.
+    """
+    class _Slow:
+        """An agent whose stream emits a delta, stalls, then finishes.
+
+        ``closed`` is appended to from the generator's own ``finally``, which is
+        what ``aclose`` on the async generator triggers. It is deliberately not
+        an ``aclose`` on the agent: ``_stream_turn`` holds the agent's
+        ``run_turn`` *generator*, and it is that generator which has to be
+        finalised so the HTTP response behind it is released. Asserting on an
+        agent-level method would pass without ever proving the generator closed.
+        """
+
+        def __init__(self, events, *, gap, closed):
+            self._events = events
+            self._gap = gap
+            self._closed = closed
+
+        async def run_turn(self, prompt):
+            try:
+                for ev in self._events:
+                    await asyncio.sleep(self._gap)
+                    yield ev
+            finally:
+                self._closed.append(True)
+
+    # A stream slower than the idle bound: on_idle must fire between events.
+    closed: list[bool] = []
+    agent = _Slow([{"type": "text_delta", "text": "looking at wp-json"},
+                   {"type": "text_delta", "text": "then auth"}],
+                  gap=0.05, closed=closed)
+    flushes: list[int] = []
+
+    async def on_idle():
+        flushes.append(len(flushes))
+
+    seen = [ev async for ev in hunt_mod._stream_turn(agent, "plan", on_idle,
+                                                     idle=0.01)]
+    check("watchdog: a slow stream flushes while it waits", len(flushes) >= 2,
+          f"flushes={len(flushes)}")
+    check("watchdog: every event still arrives", len(seen) == 2, str(len(seen)))
+    check("watchdog: the events are unchanged and in order",
+          [e["text"] for e in seen] == ["looking at wp-json", "then auth"],
+          str([e["text"] for e in seen]))
+    check("watchdog: the agent's stream is closed", closed == [True], str(closed))
+
+    # A stream that never goes quiet must not flush spuriously: flushing
+    # mid-sentence would put a partial clause on screen as if it were the
+    # planner's whole thought.
+    closed2: list[bool] = []
+    fast = _Slow([{"type": "text_delta", "text": "a"},
+                  {"type": "text_delta", "text": "b"}],
+                 gap=0.0, closed=closed2)
+    flushes2: list[int] = []
+    seen2 = [ev async for ev in hunt_mod._stream_turn(
+        fast, "plan", lambda: flushes2.append(1), idle=5.0)]
+    check("watchdog: a stream that keeps up does not flush spuriously",
+          flushes2 == [], f"flushes={len(flushes2)}")
+    check("watchdog: the fast stream still yields both events",
+          len(seen2) == 2, str(len(seen2)))
+
+    # A consumer that walks away — the hunt stopped mid-turn — must still close
+    # the underlying stream, or the agent's HTTP response is left open.
+    #
+    # The close is explicit because ``break`` does not finalise an async
+    # generator: it stays suspended until the collector reaches it, which for a
+    # turn holding an HTTP response is too late to rely on. So the caller closes
+    # the generator, and this asserts that doing so reaches the agent's own
+    # ``finally`` — that is the whole point of ``_stream_turn`` wrapping it.
+    closed3: list[bool] = []
+    abandoned = _Slow([{"type": "text_delta", "text": "x"}] * 50,
+                      gap=0.0, closed=closed3)
+    stream = hunt_mod._stream_turn(abandoned, "plan", _noop_idle, idle=5.0)
+    async for _ in stream:
+        break
+    await stream.aclose()
+    check("watchdog: an abandoned turn closes its stream",
+          closed3 == [True], str(closed3))
+
+
+async def _noop_idle() -> None:
+    return None
+
+
+async def test_planner_feed_reaches_the_wave_view() -> None:
+    """The planner's live reasoning is routed to the wave view, not dropped.
+
+    ``_collect_text_live`` emits ``hunt_plan_text`` and ``hunt_plan_tool`` while
+    the planner works. Those events have to reach ``WaveWeb`` or the planning
+    state draws an empty box — which is the whole complaint: the operator
+    watches a blank screen for the length of a model call with no way to tell
+    planning from a hang.
+    """
+    from zimzilla.theme import get_palette
+    from zimzilla.ui.web import WaveWeb
+
+    web = WaveWeb("t.test", get_palette("green", None), wave=1, size=10)
+    check("plan feed: a fresh wave is planning", web.planning is True)
+
+    events: list[dict] = []
+
+    async def on_event(ev):
+        events.append(ev)
+        # This is the same routing the overlay's ``note`` does.
+        if ev["type"] == "hunt_plan_text":
+            web.planner_text(ev.get("text", ""))
+        elif ev["type"] == "hunt_plan_tool":
+            web.planner_tool(ev.get("tool", ""), ev.get("args") or {},
+                             _cfg(Path(".")))
+
+    class _Planner:
+        """A planner that thinks out loud, then calls one tool."""
+
+        async def run_turn(self, prompt):
+            yield {"type": "text_delta",
+                   "text": "the auth bypass is closed so wave 2 pivots"}
+
+        async def aclose(self):
+            return None
+
+    class _PlannerWithTool:
+        async def run_turn(self, prompt):
+            yield {"type": "text_delta", "text": "checking the notes"}
+            yield {"type": "tool_call", "name": "grep",
+                   "args": {"pattern": "wp-json"}}
+
+        async def aclose(self):
+            return None
+
+    await hunt_mod._collect_text_live(_Planner(), "plan", on_event,
+                                      prefix="plan")
+    await hunt_mod._collect_text_live(_PlannerWithTool(), "plan", on_event,
+                                      prefix="plan")
+
+    kinds = [e["type"] for e in events]
+    check("plan feed: prose is emitted as plan text",
+          "hunt_plan_text" in kinds, str(kinds))
+    check("plan feed: the tool call is emitted",
+          "hunt_plan_tool" in kinds, str(kinds))
+    text = web.render(118, 36).plain
+    check("plan feed: the reasoning is on screen",
+          "pivots" in text, text.replace("\n", "|")[:300])
+    # The tool call is summarised with its arguments, not recorded as a bare
+    # name: "grep" alone says nothing about where the wave is being aimed.
+    check("plan feed: the tool call is on screen with its arguments",
+          "wp-json" in text, text.replace("\n", "|")[:300])
+    check("plan feed: the tool call is drawn as a command",
+          "$ " in text, text.replace("\n", "|")[:300])
+    # And the wave view is still in its planning state: nothing has claimed a
+    # roster exists yet.
+    check("plan feed: the view still says planning", web.planning is True)
+
+
+async def test_wave_overlay_live(wd: Path) -> None:
+    """The wave view's controls work in a real app: clicks, keys and the wheel.
+
+    ``WaveWeb`` is deliberately free of Textual, so its own suite can only prove
+    the geometry and the hit map. What that cannot prove is that the widget
+    routes an event to the right place — that a click's coordinates arrive as
+    grid coordinates, that ``escape`` closes the drawer, that the wheel scrolls
+    it. Those only exist once the overlay is mounted in a running app, which is
+    what this drives.
+    """
+    from textual.events import Click, MouseMove
+    from zimzilla.ui.app import WaveOverlay
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    async with app.run_test(size=(118, 36)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        overlay = WaveOverlay("target.test", app.palette, wave=1, size=10)
+        app.push_screen(overlay)
+        await pilot.pause()
+        check("wave overlay: it is the active screen", app.screen is overlay)
+        # ``can_focus = False`` means the screen never wants the keyboard for
+        # itself. It does *not* mean the prompt underneath is usable — pushing a
+        # screen moves focus off the prompt, and this one paints over it — so
+        # ``ctrl+c`` is asserted below as the way out rather than ``/stop-hunt``.
+        check("wave overlay: it does not take focus itself",
+              overlay.can_focus is False)
+
+        # A planning wave: the feed has to be on screen before any roster.
+        # ``_paint`` is called directly rather than waiting for the repaint
+        # timer: the timer is what keeps the spinner and clock moving, and a
+        # test that slept for it would be timing-dependent for no gain.
+        overlay.note({"type": "hunt_plan_text",
+                      "text": "pivoting to the wp-json surface"})
+        overlay.note({"type": "hunt_plan_tool", "tool": "grep",
+                      "args": {"pattern": "wp-json"}})
+        overlay._paint()
+        await pilot.pause()
+        canvas = str(overlay.query_one("#wave-canvas").render())
+        check("wave overlay: the planner's reasoning is on screen",
+              "pivoting to the wp-json surface" in canvas, canvas[:200])
+        check("wave overlay: the planner's tool call is on screen",
+              "$ " in canvas and "wp-json" in canvas, canvas[:200])
+        check("wave overlay: it says PLANNING, not 0 agents",
+              "PLANNING" in canvas and "0 agents" not in canvas, canvas[:120])
+
+        # The roster lands, the agents run, one reports.
+        overlay.note({"type": "hunt_plan", "wave": 1, "workers": [
+            {"name": f"agent-{i + 1}", "brief": f"vector {i + 1}"}
+            for i in range(10)]})
+        overlay.note({"type": "hunt_agent_start", "name": "agent-1",
+                      "brief": "vector 1"})
+        overlay.note({"type": "hunt_agent_tool", "name": "agent-1",
+                      "tool": "bash", "args": {"command": "curl -s -i $U/x"}})
+        overlay.note({"type": "hunt_agent_result", "name": "agent-1",
+                      "tool": "bash", "args": {"command": "curl -s -i $U/x"},
+                      "output": "HTTP/1.1 200 OK\nbody"})
+        overlay.note({"type": "hunt_finding", "finding": {
+            "wave": 1, "agent": "agent-2", "severity": "medium",
+            "title": "Unauthenticated order status read",
+            "asset": "http://dev.target.test/orders/1042",
+            "summary": "The v3 route answers without a nonce.",
+            "evidence": "GET -> 200 with billing email"}})
+        overlay._paint()
+        await pilot.pause()
+
+        canvas = str(overlay.query_one("#wave-canvas").render())
+        check("wave overlay: the command reaches the pane",
+              "curl -s -i" in canvas, canvas[:200])
+        check("wave overlay: the output reaches the pane",
+              "HTTP/1.1 200 OK" in canvas, canvas[:300])
+        check("wave overlay: the finding reaches the tracker",
+              "MED" in canvas, canvas[:200])
+
+        # A click on the MED lane, delivered as a real Click event. The canvas
+        # fills the screen at its origin, so the event's coordinates are the
+        # grid's — which is the assumption this proves.
+        overlay.web.render(*overlay.size)
+        lane = next(pos for pos, (kind, key) in overlay.web._hits.items()
+                    if kind == "lane" and key == "medium")
+        overlay.on_click(Click(None, lane[0], lane[1], 0, 0, 1, False, False,
+                               False, screen_x=lane[0], screen_y=lane[1]))
+        overlay._paint()
+        await pilot.pause()
+        check("wave overlay: clicking the lane opens the drawer",
+              overlay.web.detail.kind == "findings"
+              and overlay.web.detail.key == "medium",
+              f"{overlay.web.detail.kind}/{overlay.web.detail.key}")
+        canvas = str(overlay.query_one("#wave-canvas").render())
+        check("wave overlay: the drawer's finding is on screen",
+              "Unauthenticated" in canvas, canvas[:400])
+
+        # Escape closes it. The binding is on the overlay and the overlay is the
+        # active screen, so this fires without the overlay holding focus.
+        await pilot.press("escape")
+        await pilot.pause()
+        check("wave overlay: escape closes the drawer",
+              overlay.web.detail.kind == "", str(overlay.web.detail.kind))
+
+        # A click on a pane opens that agent's run.
+        overlay.web.render(*overlay.size)
+        pane = next(pos for pos, (kind, _) in overlay.web._hits.items()
+                    if kind == "pane" and _ == "agent-1")
+        overlay.on_click(Click(None, pane[0], pane[1], 0, 0, 1, False, False,
+                               False, screen_x=pane[0], screen_y=pane[1]))
+        overlay._paint()
+        await pilot.pause()
+        check("wave overlay: clicking a pane opens the agent's run",
+              overlay.web.detail.kind == "agent"
+              and overlay.web.detail.key == "agent-1",
+              f"{overlay.web.detail.kind}/{overlay.web.detail.key}")
+
+        # The wheel scrolls the drawer rather than rotating the panes.
+        overlay.on_mouse_scroll_down(None)
+        await pilot.pause()
+        check("wave overlay: the wheel scrolls the open drawer",
+              overlay.web.detail.kind == "agent",
+              str(overlay.web.detail.kind))
+        await pilot.press("escape")
+        await pilot.pause()
+        check("wave overlay: escape closes the agent drawer",
+              overlay.web.detail.kind == "", str(overlay.web.detail.kind))
+
+        # The resize keys. Plain arrows move the rail, shift+arrows the drawer —
+        # and the drawer only exists while it is open, so that half is checked
+        # with a lane drawer open.
+        before = overlay.web._layout.rail_w
+        await pilot.press("right")
+        await pilot.pause()
+        check("wave overlay: right widens the rail",
+              overlay.web._layout.rail_w > before,
+              f"{before} -> {overlay.web._layout.rail_w}")
+        await pilot.press("left")
+        await pilot.pause()
+        check("wave overlay: left narrows it back",
+              overlay.web._layout.rail_w == before,
+              str(overlay.web._layout.rail_w))
+
+        overlay.web.open_findings("medium")
+        overlay._paint()
+        await pilot.pause()
+        # The drawer is resized at a wide terminal on purpose. At 118 columns it
+        # is already pinned at 37 by the room the two pane columns must keep, so
+        # a wider request is clamped straight back and the keys would look
+        # broken when they are in fact working.
+        await pilot.resize_terminal(200, 50)
+        overlay._paint()
+        await pilot.pause()
+        drawer_before = overlay.web._layout.drawer_w
+        check("wave overlay: the drawer opens at a default width",
+              drawer_before > 0, str(drawer_before))
+        await pilot.press("shift+right")
+        await pilot.pause()
+        check("wave overlay: shift+right widens the drawer",
+              overlay.web._layout.drawer_w > drawer_before,
+              f"{drawer_before} -> {overlay.web._layout.drawer_w}")
+        await pilot.press("shift+left")
+        await pilot.pause()
+        check("wave overlay: shift+left narrows the drawer back",
+              overlay.web._layout.drawer_w == drawer_before,
+              str(overlay.web._layout.drawer_w))
+        # And the panes survive the drawer: it must never be the only thing left.
+        check("wave overlay: the panes are still drawn beside the drawer",
+              overlay.web._layout.cols >= 2,
+              str(overlay.web._layout.cols))
+
+        overlay.on_mouse_move(MouseMove(None, 3, 6, 0, 0, 0, False, False,
+                                        False))
+        await pilot.pause()
+        check("wave overlay: a move event updates the hover",
+              overlay.web.hover == (3, 6), str(overlay.web.hover))
+
+
+async def test_wave_overlay_can_still_be_escaped(wd: Path) -> None:
+    """A campaign can be stopped *gracefully* while the wave view has the screen.
+
+    This is pinned because the obvious claim about it is wrong. ``can_focus =
+    False`` is often read as "the prompt stays usable underneath", and that is
+    what the docstrings used to say — but pushing a screen moves focus off the
+    prompt, and the wave view paints over it at 100% width and height, so
+    ``/stop-hunt`` cannot be typed while it is up. That half is asserted below
+    as a fact rather than a hope.
+
+    The consequence used to be that ``ctrl+c`` was the only way out, and that is
+    a bad way out: ``interrupt`` cancels the workers outright instead of setting
+    the hunt's stop flag, so the wave does not unwind and the closing report may
+    never be written. So the wave view now carries its own ``ctrl+x``, which
+    routes through the same ``_cmd_stop_hunt`` the typed command uses. Both
+    halves are pinned here — the key that works and the keystrokes that do not —
+    because a runaway campaign must always have a way out and it has to be known
+    which one it is.
+    """
+    from zimzilla.ui.widgets import PromptInput
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app._team_agent_factory = _hunt_factory(
+        {"rosters": ['{"summary": "s", "workers": '
+                     '[{"name": "p", "brief": "b", "owns": ["p"]}]}'],
+         "planner_calls": 0, "prompts": [], "recon_final": "r", "final": "none"})
+
+    async with app.run_test(size=(118, 36)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        prompt = app.query_one(PromptInput)
+        prompt.focus()
+        await pilot.pause()
+
+        app._run_hunt("x.test")
+        await pilot.pause()
+        await pilot.pause()
+        check("escape hatch: the campaign is in flight", app.busy is True)
+        check("escape hatch: the wave view has the screen",
+              type(app.screen).__name__ == "WaveOverlay",
+              type(app.screen).__name__)
+        overlay = app.screen
+
+        # The key is discoverable: the prompt it replaces is covered, so a key
+        # that ends the campaign is only usable if the view says so.
+        canvas = overlay.web.render(118, 36).plain
+        check("escape hatch: the stop key is written in the rail",
+              "ctrl+x" in canvas, canvas[-400:])
+        check("escape hatch: and it is not yet claiming to be stopping",
+              "stopping" not in canvas)
+
+        # The typed command does not arrive — this is the honest half.
+        await pilot.press(*"/stop-hunt")
+        await pilot.pause()
+        check("escape hatch: /stop-hunt cannot be typed behind the wave view",
+              prompt.value == "", repr(prompt.value))
+        check("escape hatch: and so the stop flag is not set by typing",
+              app._hunt_stop.is_set() is False)
+
+        # ctrl+x is the graceful path, and it must set the *stop flag* — not
+        # merely cancel workers, which is what ctrl+c does. Asserted against the
+        # app rather than the captured overlay on purpose: a hunt replaces its
+        # wave view at every wave boundary, so by the time the key lands the
+        # screen object captured above may already be a previous wave's. The
+        # flag is the thing that has to be right.
+        await pilot.press("ctrl+x")
+        check("escape hatch: ctrl+x sets the hunt's stop flag",
+              app._hunt_stop.is_set() is True)
+        await pilot.pause()
+        check("escape hatch: the campaign stops", app.busy is False)
+        check("escape hatch: and it stopped gracefully, not by cancellation",
+              app._cancelled is False)
+
+
+async def test_wave_overlay_stop_key_confirms_itself(wd: Path) -> None:
+    """``ctrl+x`` shows that it was heard, without racing a live hunt.
+
+    The end-to-end path is covered above; this covers the part that a live hunt
+    makes untestable, because a hunt swaps its wave view at every wave boundary
+    and the screen under test can be replaced mid-keypress. So the campaign here
+    is stood up by hand — a pushed overlay and a non-``None`` run — which is
+    exactly the precondition ``_cmd_stop_hunt`` checks before it will set the
+    flag.
+
+    The confirmation matters because the line ``_cmd_stop_hunt`` writes goes to
+    the transcript, and the wave view is covering the transcript. Without the
+    footer changing, the key would look inert for as long as the wave takes to
+    unwind.
+    """
+    from zimzilla.ui.app import WaveOverlay
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+
+    async with app.run_test(size=(118, 36)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        overlay = WaveOverlay("target.test", app.palette, wave=1, size=10)
+        app.push_screen(overlay)
+        await pilot.pause()
+
+        before = overlay.web.render(118, 36).plain
+        check("stop key: the rail advertises it", "ctrl+x" in before)
+        check("stop key: and does not claim to be stopping yet",
+              "stopping" not in before)
+
+        # A campaign is live, which is what the command handler gates on.
+        app._hunt_stop = asyncio.Event()
+        app._hunt_run = object()
+        await pilot.press("ctrl+x")
+        await pilot.pause()
+
+        check("stop key: the flag is set", app._hunt_stop.is_set() is True)
+        check("stop key: the view records it", overlay.web.stopping is True)
+        after = overlay.web.render(118, 36).plain
+        check("stop key: the footer confirms it", "stopping" in after)
+        check("stop key: the hint is replaced, not duplicated",
+              "ctrl+x" not in after)
+
+        # Pressing it twice is harmless — the wave unwinds on its own schedule.
+        await pilot.press("ctrl+x")
+        await pilot.pause()
+        check("stop key: a second press is a no-op",
+              app._hunt_stop.is_set() is True and overlay.web.stopping is True)
+
+
+async def test_wave_overlay_ctrl_c_still_interrupts(wd: Path) -> None:
+    """``ctrl+c`` still works from the wave view, as the blunt fallback.
+
+    Kept separate from the graceful path above because they are different
+    mechanisms with different consequences: this one cancels the workers and
+    leaves ``_hunt_stop`` unset, so the wave does not unwind. It is the right
+    key when the graceful path is not responding, and the wrong one to rely on.
+    """
+    app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    app._team_agent_factory = _hunt_factory(
+        {"rosters": ['{"summary": "s", "workers": '
+                     '[{"name": "p", "brief": "b", "owns": ["p"]}]}'],
+         "planner_calls": 0, "prompts": [], "recon_final": "r", "final": "none"})
+
+    async with app.run_test(size=(118, 36)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        app._run_hunt("x.test")
+        await pilot.pause()
+        await pilot.pause()
+        check("ctrl+c: the campaign is in flight", app.busy is True)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        check("ctrl+c: it reaches the app through the wave view",
+              app._cancelled is True)
+        await pilot.pause()
+        check("ctrl+c: the campaign is stopped", app.busy is False)
+        check("ctrl+c: it does not set the graceful stop flag",
+              app._hunt_stop.is_set() is False)
+
+
 async def main() -> int:
     test_parse_findings()
     test_fallback()
@@ -2554,6 +3053,8 @@ async def main() -> int:
     test_finding_from_tool()
     test_tracker_model()
     test_findings_panel()
+    await test_stream_turn_watchdog()
+    await test_planner_feed_reaches_the_wave_view()
 
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
@@ -2579,6 +3080,10 @@ async def main() -> int:
         await test_campaign_reaches_the_main_agent(wd)
         await test_boot_migrates_hunts(wd)
         await test_recon_overlay(wd)
+        await test_wave_overlay_live(wd)
+        await test_wave_overlay_can_still_be_escaped(wd)
+        await test_wave_overlay_stop_key_confirms_itself(wd)
+        await test_wave_overlay_ctrl_c_still_interrupts(wd)
         await test_stop_hunt_reaches_the_loop(wd)
         await test_recon_overlay_fast_target(wd)
         await test_overlays_do_not_stack(wd)

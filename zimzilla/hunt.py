@@ -65,6 +65,15 @@ HUNT_CONCURRENCY = 10
 #: transcript and fed to the next planner, but it does not earn an artefact.
 SAVE_SEVERITIES = {"critical", "high", "medium"}
 
+#: How long a turn's event stream may go quiet before the prose produced so far
+#: is flushed to the UI anyway. The planner's turn runs for tens of seconds over
+#: the whole recon before it writes a word of roster, and the wave view has
+#: nothing else to draw for that whole time — so a buffer that only empties on a
+#: tool call leaves the operator staring at an empty screen. Short enough to
+#: feel live, long enough that a streaming model is not flushed mid-sentence on
+#: every token.
+STREAM_IDLE_SECONDS = 0.4
+
 #: Severity spellings a model reaches for, mapped onto the four we accept.
 _SEVERITY_ALIASES = {
     "crit": "critical",
@@ -1267,21 +1276,74 @@ async def _collect_text(agent: Agent, prompt: str) -> str:
     return "".join(parts)
 
 
+async def _stream_turn(agent: Agent, prompt: str,
+                       on_idle: Callable[[], Awaitable[None]],
+                       *, idle: float = STREAM_IDLE_SECONDS):
+    """Yield a turn's events, calling ``on_idle`` when the stream goes quiet.
+
+    A turn's prose arrives as ``text_delta`` events, and the consumers below
+    only forward it when something *else* happens — a tool call, or the end of
+    the turn. For a planner that reasons for forty seconds before its first tool
+    call, that means the screen shows nothing at all for forty seconds, which is
+    indistinguishable from a hang and is exactly the complaint the wave view was
+    built to answer.
+
+    So the wait between events is bounded: when ``idle`` seconds pass with no
+    event, ``on_idle`` runs — the consumers flush their buffer through it — and
+    the wait restarts. ``on_idle`` is a callback rather than an event yielded to
+    the caller so the generator can keep the same shape for callers that only
+    care about events.
+
+    Nothing here invents content or reorders anything: the only thing that
+    changes is *when* prose the model has already produced is handed on.
+    """
+    agen = agent.run_turn(prompt).__aiter__()
+    task: asyncio.Task | None = None
+    try:
+        while True:
+            if task is None:
+                task = asyncio.ensure_future(agen.__anext__())
+            done, _ = await asyncio.wait({task}, timeout=idle)
+            if not done:
+                await on_idle()
+                continue
+            try:
+                ev = task.result()
+            except StopAsyncIteration:
+                return
+            task = None
+            yield ev
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 async def _collect_text_live(
     agent: Agent,
     prompt: str,
     on_event: Callable[[dict], Awaitable[None]],
     run: HuntRun | None = None,
+    *,
+    prefix: str = "recon",
 ) -> str:
     """Run one turn, reporting what it is doing as it does it.
 
-    Recon is the one turn the operator watches directly: it can run for minutes
-    against a live target, and a frozen "mapping the target…" line for that long
-    is indistinguishable from a hang. So unlike ``_collect_text`` this forwards
-    each tool call and each flushed block of prose as ``recon_*`` events, and
-    returns the same text it would have returned silently.
+    Two turns in a campaign run long enough that the operator watches them
+    directly, and a frozen line for that long is indistinguishable from a hang:
+    recon, which can take minutes against a live target, and the wave planner,
+    which is a real model call over the whole recon, every finding so far and
+    the wave history before it writes ten briefs. Both go through here, and the
+    ``prefix`` names the events they emit — ``recon`` or ``plan``. The UI routes
+    each to its own sink, so the planner's reasoning lands in the wave view
+    while recon's lands in its own window.
 
-    Only the *tool call* is reported, not its output: a recon tool result is
+    Only the *tool call* is reported, not its output: a tool result here is
     arbitrary target text, and pushing it into a UI sink unescaped is how a
     scan of a hostile page ends up painting the overlay. The model's own prose
     is the interesting part and it is what gets shown.
@@ -1290,7 +1352,8 @@ async def _collect_text_live(
     same way a wave agent's does. Recon is the first thing to touch the target,
     and it is where an exposed debug endpoint or a stack trace in an error page
     turns up — a finding confirmed here should reach the tracker now, not at the
-    first wave boundary.
+    first wave boundary. The planner is in plan mode and cannot report at all,
+    so it passes nothing.
     """
     parts: list[str] = []
     buf: list[str] = []
@@ -1299,9 +1362,11 @@ async def _collect_text_live(
         text = "".join(buf).strip()
         buf.clear()
         if text:
-            await on_event({"type": "hunt_recon_text", "text": text})
+            await on_event({"type": f"hunt_{prefix}_text", "text": text})
 
-    async for ev in agent.run_turn(prompt):
+    # The watchdog, so prose reaches the screen while the model is still
+    # thinking rather than at its first tool call — see ``_stream_turn``.
+    async for ev in _stream_turn(agent, prompt, flush):
         etype = ev.get("type")
         if etype == "text_delta":
             chunk = ev.get("text", "")
@@ -1311,7 +1376,7 @@ async def _collect_text_live(
             # Flush first, so the reasoning lands above the call it explains.
             await flush()
             await on_event({
-                "type": "hunt_recon_tool",
+                "type": f"hunt_{prefix}_tool",
                 "tool": ev.get("name", ""),
                 "args": ev.get("args") or {},
                 "blocked": False,
@@ -1325,14 +1390,14 @@ async def _collect_text_live(
                     await _report_live(run, live, on_event)
         elif etype == "blocked":
             await on_event({
-                "type": "hunt_recon_tool",
+                "type": f"hunt_{prefix}_tool",
                 "tool": ev.get("name", ""),
                 "args": ev.get("args") or {},
                 "blocked": True,
             })
         elif etype == "error":
-            await on_event({"type": "hunt_recon_text",
-                            "text": f"(recon error: {ev.get('message', '')})"})
+            await on_event({"type": f"hunt_{prefix}_text",
+                            "text": f"({prefix} error: {ev.get('message', '')})"})
     await flush()
     return "".join(parts)
 
@@ -1419,16 +1484,25 @@ async def run_hunt(
             waves=run.wave_digest(),
             contract=FINDING_CONTRACT,
         )
-        plan_text = await _collect_text(planner, plan_prompt)
+        # Reported live, not collected silently. This turn is a real model call
+        # over the whole recon, every finding so far and the wave history — tens
+        # of seconds during which the wave view had no roster to draw and said
+        # nothing, so the operator watched a blank screen while the briefs were
+        # written. The events go out as `hunt_plan_*` and the wave view feeds
+        # them to the planning feed.
+        plan_text = await _collect_text_live(planner, plan_prompt, on_event,
+                                             prefix="plan")
         roster = team_mod.parse_roster(plan_text, max_agents=wave_size)
 
         # One retry before giving up on the planner. A model that answered in
         # prose or wrapped the object in a fence it malformed usually gets it
         # right when told plainly what was wrong, and a real roster is worth
-        # far more than the fixed matrix.
+        # far more than the fixed matrix. Streamed too, so a retry is not a
+        # second unexplained silence.
         if roster is None or not roster.workers:
-            retry_text = await _collect_text(
-                planner, plan_prompt + "\n\n" + PLANNER_RETRY_NUDGE)
+            retry_text = await _collect_text_live(
+                planner, plan_prompt + "\n\n" + PLANNER_RETRY_NUDGE, on_event,
+                prefix="plan")
             if retry_text.strip():
                 plan_text = retry_text
                 roster = team_mod.parse_roster(retry_text, max_agents=wave_size)

@@ -13,8 +13,9 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import MouseUp, TextSelected
+from textual.events import Click, MouseMove, MouseUp, TextSelected
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
@@ -235,34 +236,61 @@ class ReconOverlay(ModalScreen[None]):
 
 
 class WaveOverlay(ModalScreen[None]):
-    """The wave, drawn as a web: ten agents around the ZIM-TRACK node.
+    """The wave, drawn as panes around a tracker rail.
 
     Ten agents streaming into one transcript is unreadable — the operator sees
     interleaved tool output and has to reconstruct which agent is doing what,
     and the findings are buried in whichever stream happened to print them.
     This takes the screen for the duration of a wave and draws the shape
-    instead: one pane per agent, silk converging on a centre node that tallies
-    what has been found, worst-first, as it is found.
+    instead: one pane per agent showing the command it is on and what that
+    command returned, beside a rail that tallies what has been found,
+    worst-first, as it is found.
 
     Like ``ReconOverlay`` it is a window you look at rather than answer, so
-    ``can_focus = False`` keeps the prompt alive underneath — ``/stop-hunt``
-    has to stay typeable, which is the whole reason this cannot be a modal gate.
-    It is popped at the wave boundary and by the worker's ``finally``, so a stop
-    or a crash mid-wave cannot strand it over a dead campaign.
+    ``can_focus = False`` — it never wants the keyboard for itself. Be clear
+    about what that does and does not buy, because the difference matters when a
+    campaign has to be stopped: it stops this screen from *taking* focus, but
+    pushing any screen moves focus off the prompt and this one paints over it,
+    so the prompt underneath is not reachable while it is up and ``/stop-hunt``
+    cannot be typed from here. Two keys stand in for it: ``ctrl+x`` asks the
+    campaign to stop the same way the command does, and ``ctrl+c`` interrupts
+    harder — ``interrupt`` is a priority binding on the app, so it fires above
+    the active screen and cancels the workers outright rather than letting the
+    wave unwind. It is popped at the wave boundary and by the worker's
+    ``finally``, so a stop or a crash mid-wave cannot strand it over a dead
+    campaign.
 
     The drawing itself lives in ``ui/web.py``; this screen owns the timer that
-    repaints it and the size it paints at. The repaint is on a timer rather than
-    driven by events because two things on it change without any event: the
-    elapsed clock, and the flash that fades off an agent a couple of seconds
-    after it reports.
+    repaints it, the size it paints at, and the mouse and key handling. The
+    repaint is on a timer rather than driven by events because three things on
+    it change without any event: the elapsed clock, the flash that fades off an
+    agent a couple of seconds after it reports, and the spinner that says a
+    quiet agent is still working.
     """
 
     can_focus = False
 
-    #: Repaint interval. Fast enough that the flash reads as immediate, slow
-    #: enough that a full-canvas redraw is not competing with the agents'
-    #: streaming for the UI thread.
+    #: Repaint interval. Fast enough that the spinner and the flash read as
+    #: live, slow enough that a full-canvas redraw is not competing with the
+    #: agents' streaming for the UI thread.
     TICK = 0.25
+
+    BINDINGS = [
+        Binding("escape", "close_detail", "close", show=False),
+        Binding("ctrl+x", "stop_hunt", "stop", show=False),
+        Binding("left", "rail_narrower", "rail -", show=False),
+        Binding("right", "rail_wider", "rail +", show=False),
+        Binding("shift+left", "drawer_narrower", "drawer -", show=False),
+        Binding("shift+right", "drawer_wider", "drawer +", show=False),
+    ]
+
+    class StopRequested(Message):
+        """The operator asked to end the campaign from the wave view.
+
+        A message rather than a direct call into the app, so this screen does
+        not have to know how a hunt is stopped — it only has to know that the
+        operator asked. The app owns ``_hunt_stop`` and decides what to do.
+        """
 
     def __init__(self, target: str, palette, *, wave: int = 1,
                  size: int = 10) -> None:
@@ -279,7 +307,14 @@ class WaveOverlay(ModalScreen[None]):
 
     # ---- events -----------------------------------------------------------
     def note(self, event: dict) -> None:
-        """Apply one hunt event to the web. Repaint is left to the timer."""
+        """Apply one hunt event to the view. Repaint is left to the timer.
+
+        Every event a wave produces that has something to draw is handled here.
+        Three of them used to be routed to this screen by ``_hunt_run`` and then
+        dropped on the floor — ``hunt_plan_text``, ``hunt_plan_tool`` and
+        ``hunt_agent_result`` — which is why the panes showed a command and no
+        output, and why the planner's turn was a blank screen.
+        """
         etype = event.get("type")
         if etype == "hunt_plan":
             self.web.set_plan(event.get("workers") or [],
@@ -287,9 +322,23 @@ class WaveOverlay(ModalScreen[None]):
         elif etype == "hunt_agent_start":
             self.web.agent_start(event.get("name", ""), event.get("brief", ""))
         elif etype == "hunt_agent_tool":
-            detail = tools_mod.summarise_call(
-                event.get("tool", ""), event.get("args") or {}, self.cfg_of())
-            self.web.agent_activity(event.get("name", ""), detail)
+            # The command, not the summary: the summary is clipped to 70 columns
+            # for a transcript line, and the whole point of the pane is that it
+            # has room for the real command.
+            self.web.agent_activity(
+                event.get("name", ""),
+                tools_mod.summarise_call(event.get("tool", ""),
+                                         event.get("args") or {},
+                                         self.cfg_of(), max_len=400))
+        elif etype == "hunt_agent_result":
+            self.web.agent_result(
+                event.get("name", ""),
+                tools_mod.summarise_call(event.get("tool", ""),
+                                         event.get("args") or {},
+                                         self.cfg_of(), max_len=400),
+                event.get("output", ""))
+        elif etype == "hunt_agent_text":
+            self.web.agent_text(event.get("name", ""), event.get("text", ""))
         elif etype == "hunt_agent_done":
             self.web.agent_done(event.get("name", ""), ok=bool(event.get("ok")))
         elif etype == "hunt_finding":
@@ -299,12 +348,86 @@ class WaveOverlay(ModalScreen[None]):
             # a quarter-second delay on it is the difference between the tracker
             # reading as live and reading as a poll.
             self._paint()
+        elif etype == "hunt_plan_text":
+            self.web.planner_text(event.get("text", ""))
+        elif etype == "hunt_plan_tool":
+            self.web.planner_tool(event.get("tool", ""),
+                                  event.get("args") or {}, self.cfg_of())
         elif etype == "hunt_wave_end":
             self.web.end()
 
     def cfg_of(self):
         """The Config the summariser needs. Kept as a method so tests can stub it."""
         return self.app.cfg
+
+    # ---- mouse ------------------------------------------------------------
+    def on_click(self, event: Click) -> None:
+        """A click resolves against the hit map the last render produced.
+
+        The canvas fills this screen and sits at its origin, so the event's
+        widget-relative coordinates are the grid coordinates — no translation,
+        and no need for the view to predict where it drew anything.
+        """
+        hit = self.web.click(event.x, event.y)
+        if hit is not None:
+            self.web.hover = (event.x, event.y)
+        self._paint()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        """Track the pointer so clickable things can light up under it."""
+        pos = (event.x, event.y)
+        if pos != self.web.hover:
+            self.web.hover = pos
+            self._paint()
+
+    def on_mouse_scroll_down(self, event) -> None:
+        """Scroll the drawer, or rotate the pane window when it is closed."""
+        self._scroll_detail(1)
+
+    def on_mouse_scroll_up(self, event) -> None:
+        self._scroll_detail(-1)
+
+    def _scroll_detail(self, delta: int) -> None:
+        if self.web.detail:
+            self.web.scroll_detail(delta)
+            self._paint()
+
+    # ---- keys -------------------------------------------------------------
+    def action_close_detail(self) -> None:
+        if self.web.detail:
+            self.web.close_detail()
+            self._paint()
+
+    def action_stop_hunt(self) -> None:
+        """``ctrl+x`` — ask the app to end the campaign.
+
+        This exists because this screen covers the prompt: ``/stop-hunt`` cannot
+        be typed while the wave view is up (see the class docstring), so without
+        a key here the only way out of a runaway campaign would be ``ctrl+c``,
+        which cancels the workers outright rather than letting the wave unwind.
+
+        Idempotent, and it paints immediately rather than waiting for the repaint
+        timer so the footer confirms the keypress at once.
+        """
+        self.web.stopping = True
+        self._paint()
+        self.post_message(self.StopRequested())
+
+    def action_rail_wider(self) -> None:
+        self.web.resize_rail(2)
+        self._paint()
+
+    def action_rail_narrower(self) -> None:
+        self.web.resize_rail(-2)
+        self._paint()
+
+    def action_drawer_wider(self) -> None:
+        self.web.resize_drawer(4)
+        self._paint()
+
+    def action_drawer_narrower(self) -> None:
+        self.web.resize_drawer(-4)
+        self._paint()
 
     def _paint(self) -> None:
         try:
@@ -326,10 +449,14 @@ class FindingsPanel(ModalScreen[None]):
     again when it is over. So this floats a worst-first list over the screen:
     severity, title, asset, wave, and the evidence that proves it.
 
-    It is a *view*, not a gate — ``can_focus = False`` keeps the prompt alive so
-    ``/stop-hunt`` stays typeable while it is open, and ``escape`` (or
-    ``/findings`` again) closes it. ``set_findings`` repaints it in place, so the
-    hunt worker can push each new finding in without reopening the window.
+    It is a *view*, not a gate — ``can_focus = False`` so it never takes the
+    keyboard, and ``escape`` (or ``/findings`` again) closes it. Note that this
+    does *not* leave the prompt usable underneath: pushing a screen moves focus
+    off the prompt and this one paints over it, so ``/stop-hunt`` cannot be typed
+    while it is open and ``ctrl+c`` is the way to interrupt from here. (The same
+    holds for ``WaveOverlay`` and ``ReconOverlay``; see ``WaveOverlay``'s
+    docstring.) ``set_findings`` repaints it in place, so the hunt worker can push
+    each new finding in without reopening the window.
 
     There is deliberately no click-to-dismiss: a click anywhere inside the
     panel bubbles to this screen, so handling clicks here would close the
@@ -2726,6 +2853,17 @@ class ZimZillaApp(App):
         t.append("  each wave's plan accumulate there across campaigns\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
+    def on_wave_overlay_stop_requested(
+            self, event: WaveOverlay.StopRequested) -> None:
+        """``ctrl+x`` in the wave view — the same thing ``/stop-hunt`` does.
+
+        Routed through ``_cmd_stop_hunt`` rather than setting the flag here, so
+        the two ways to stop a campaign cannot drift apart. The view has already
+        confirmed the keypress in its own footer, which matters because the line
+        ``_cmd_stop_hunt`` writes goes to the transcript behind the overlay.
+        """
+        self._cmd_stop_hunt(None)
+
     def _cmd_stop_hunt(self, args) -> None:
         """/stop-hunt — end the campaign. Works while the harness is busy."""
         run = self._hunt_run
@@ -2933,13 +3071,20 @@ class ZimZillaApp(App):
             if pane is not None:
                 pane.note_hunt(ev)
 
-            # The wave web sees every event that describes a wave, whether or
+            # The wave view sees every event that describes a wave, whether or
             # not the transcript also renders it below. Fed before the transcript
             # branches so a finding reaches the tracker in the same tick the
             # transcript prints it, rather than after the whole chain of elifs.
+            #
+            # ``hunt_agent_result`` and ``hunt_agent_text`` are in this list
+            # because they are the half of an agent's work the panes exist to
+            # show: the result is the command's actual output, and without it
+            # every pane drew a command over an empty box. They were being
+            # emitted, routed to the transcript, and dropped here.
             if web["screen"] is not None and etype in (
                 "hunt_plan", "hunt_agent_start", "hunt_agent_tool",
-                "hunt_agent_done", "hunt_finding", "hunt_wave_end",
+                "hunt_agent_result", "hunt_agent_text", "hunt_agent_done",
+                "hunt_finding", "hunt_wave_end",
             ):
                 try:
                     web["screen"].note(ev)
@@ -2958,11 +3103,26 @@ class ZimZillaApp(App):
                         pass
                 return
 
+            # The planner narrates into the wave view, which is already up and
+            # has no roster to draw yet. Consumed here rather than falling
+            # through: this is the wave's own thinking, not campaign output, and
+            # the transcript is where the agents' work goes.
+            if etype in ("hunt_plan_tool", "hunt_plan_text"):
+                screen = web["screen"]
+                if screen is not None:
+                    try:
+                        screen.note(ev)
+                    except Exception:
+                        pass
+                return
+
             if etype == "hunt_recon_start":
                 self._sys_line("recon — mapping the target…")
                 bar.set_activity("hunt: recon", busy=True)
-                # can_focus is False, so this does not steal the prompt: the
-                # operator can still type /stop-hunt while recon runs.
+                # can_focus is False, so this screen never takes the keyboard
+                # itself — but it does paint over the prompt, so /stop-hunt is
+                # not typeable while recon runs. ctrl+c is (priority binding).
+                # See WaveOverlay's docstring for the full explanation.
                 try:
                     screen = ReconOverlay(ev.get("target", target), p, self.cfg)
                     overlay["screen"] = screen
