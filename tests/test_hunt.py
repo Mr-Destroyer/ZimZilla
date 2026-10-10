@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from zimzilla import hunt as hunt_mod  # noqa: E402
 from zimzilla import team as team_mod  # noqa: E402
+from zimzilla import tools as tools_mod  # noqa: E402
 from zimzilla.agent import Agent  # noqa: E402
 from zimzilla.config import Config  # noqa: E402
 from zimzilla.theme import get_palette  # noqa: E402
@@ -228,11 +229,22 @@ def test_reports(wd: Path) -> None:
     # The summary archives into the flat reports store, like /osint.
     dest = hunt_mod.write_summary(cfg, run, "the closing report")
     check("summary: it is written beside the evidence",
-          (run.directory / "summary.md").is_file())
+          len(list(run.directory.glob("summary-*.md"))) == 1,
+          str([p.name for p in run.directory.glob("summary-*.md")]))
     check("summary: it is archived into the reports store",
           dest.parent == hunt_mod.reports_dir(cfg), str(dest))
     check("summary: the archive carries the run's shape",
           "waves: 2" in dest.read_text() and "findings: 1" in dest.read_text())
+
+    # A second campaign on the same scope must not overwrite the first's report:
+    # the directory is the scope's and is reused, so a fixed name would lose it.
+    dest2 = hunt_mod.write_summary(cfg, run, "the second campaign's report")
+    check("summary: a second campaign gets its own report file",
+          dest2 != dest and dest.is_file() and dest2.is_file(),
+          f"{dest.name} vs {dest2.name}")
+    check("summary: the first campaign's report survives the second",
+          "the closing report" in dest.read_text()
+          and "second campaign" in dest2.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +431,293 @@ async def test_hunt_loop(wd: Path) -> None:
           len(agents) == 3, str(len(agents)))  # recon + 2 workers
     check("hunt: each agent gets its own Config",
           len({id(a.cfg) for a in agents}) == 3)
+
+
+def test_scope_naming(wd: Path) -> None:
+    """A target files under one scope directory, or is refused.
+
+    The scope is derived from the target rather than used verbatim: a URL and a
+    bare host are the same engagement, and a sentence in the target field is an
+    operator mistake that must not become a directory name.
+    """
+    check("scope: a bare host is its own scope",
+          hunt_mod.scope_slug("example.com") == "example.com")
+    check("scope: a wildcard drops the star",
+          hunt_mod.scope_slug("*.lerevecraze.com") == "lerevecraze.com")
+    check("scope: a URL files under its host",
+          hunt_mod.scope_slug("https://dev.example.com/login") == "dev.example.com")
+    check("scope: a port is dropped",
+          hunt_mod.scope_slug("example.com:8443") == "example.com")
+    check("scope: a CIDR keeps its network",
+          hunt_mod.scope_slug("10.0.0.0/24") == "10.0.0.0")
+
+    # A sentence is refused, not truncated. This is the real failure: an
+    # operator typed prose into the target field and got a directory named
+    # after its first sixty characters.
+    for bad, why in [
+        ("bdgroup.com the recons are in this directory", "prose"),
+        ("find the bugs", "not a host"),
+        ("", "empty"),
+        ("   ", "whitespace"),
+    ]:
+        try:
+            got = hunt_mod.scope_slug(bad)
+        except ValueError:
+            check(f"scope: {why} is refused", True)
+        else:
+            check(f"scope: {why} is refused", False, repr(got))
+
+    # One directory per scope, reused: a second campaign against the same host
+    # adds to the first's history rather than starting a sibling.
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+    first = hunt_mod.case_dir(cfg, "https://mail.lerevecraze.com/login")
+    second = hunt_mod.case_dir(cfg, "mail.lerevecraze.com")
+    check("scope: the same host reuses one directory", first == second, str(first))
+    check("scope: the directory is named for the scope",
+          first.name == "mail.lerevecraze.com", first.name)
+    check("scope: the campaign subdirectories are made",
+          (first / "findings").is_dir() and (first / "plans").is_dir())
+
+
+async def test_campaign_notes(wd: Path) -> None:
+    """Recon and each wave's plan land on disk, so a campaign accumulates notes.
+
+    Recon used to exist only on the run object and each plan only as a UI event,
+    so stopping a campaign lost both — the operator's "save the findings" had
+    nothing to resolve against, and `/summary-hunt` after a restart said "recon
+    produced nothing" about a recon that was the most informative part of the run.
+    """
+    roster = ('{"summary": "aiming at auth", "workers": ['
+              '{"name": "auth", "brief": "test auth", "owns": ["auth", "login"]}]}')
+    script = {
+        "rosters": [roster],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "the target answers on 443, nginx, a login form at /login",
+        "final": _finding_json("auth bypass"),
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    run = await hunt_mod.run_hunt(
+        cfg, "notes.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=1, concurrency=1,
+    )
+
+    # ---- recon notes
+    recon_files = sorted(run.directory.glob("recon-*.md"))
+    check("notes: recon is written to the campaign directory",
+          len(recon_files) == 1, str([p.name for p in recon_files]))
+    body = recon_files[0].read_text()
+    check("notes: the recon text is preserved", "nginx" in body)
+    check("notes: recon is stamped wave 0", "wave: 0" in body)
+    check("notes: recon carries the target", "target: notes.test" in body)
+    check("notes: the recon file is named by its timestamp",
+          len(recon_files[0].stem) == len("recon-20261010-025510"),
+          recon_files[0].name)
+
+    done = [e for e in events if e["type"] == "hunt_recon_done"]
+    check("notes: the recon event carries the path it wrote",
+          done and done[0].get("saved") == str(recon_files[0]),
+          str(done[0].get("saved") if done else None))
+
+    # ---- plans
+    plan_files = sorted((run.directory / "plans").glob("wave-*.md"))
+    check("notes: the wave's plan is written",
+          len(plan_files) == 1, str([p.name for p in plan_files]))
+    plan = plan_files[0].read_text()
+    check("notes: the plan names its wave", plan_files[0].name.startswith("wave-1-"),
+          plan_files[0].name)
+    check("notes: the plan keeps each brief", "test auth" in plan)
+    check("notes: the plan keeps what each agent owns", "auth, login" in plan)
+    check("notes: the plan records the roster size", "agents: 1" in plan)
+    check("notes: a read planner is not marked as fallen back",
+          "fell_back: false" in plan)
+    check("notes: a good plan does not paste the raw reply",
+          "## Planner reply" not in plan)
+
+    # ---- recon is also fed to the planner, unchanged by being written first.
+    check("notes: recon still reaches the planner", "nginx" in run.recon)
+
+    # ---- and it reads back. A summary asked for after a restart must not say
+    # "recon produced nothing" over a recon that mapped the target.
+    recovered = hunt_mod.load_run(run.directory)
+    check("notes: a campaign reads back off disk", recovered is not None)
+    check("notes: the recon is recovered, not lost",
+          recovered is not None and "nginx" in recovered.recon,
+          (recovered.recon[:80] if recovered else ""))
+    check("notes: the recovered recon drops the file's own heading",
+          recovered is not None and not recovered.recon.startswith("#"),
+          (recovered.recon[:40] if recovered else ""))
+    check("notes: the recovered recon drops the frontmatter",
+          recovered is not None and "timestamp:" not in recovered.recon,
+          (recovered.recon[:60] if recovered else ""))
+    check("notes: the recovered wave history names the wave",
+          recovered is not None and any(w.startswith("wave 1: 1 agents")
+                                        for w in recovered.waves),
+          str(recovered.waves if recovered else None))
+
+    # A campaign with recon but no findings is still summarisable — that is the
+    # exact case the operator hit: stopped mid-campaign, nothing confirmed, but
+    # recon full of information.
+    empty = run.directory.parent / "recon-only.test"
+    (empty / "findings").mkdir(parents=True)
+    hunt_mod.write_recon(hunt_mod.HuntRun(target="recon-only.test",
+                                          directory=empty),
+                         "an exposed log at /logs, directory listing on /img")
+    only = hunt_mod.load_run(empty)
+    check("notes: recon alone is enough to summarise a campaign",
+          only is not None, str(only))
+    check("notes: the recon-only campaign keeps its notes",
+          only is not None and "exposed log" in only.recon,
+          (only.recon[:80] if only else ""))
+    check("notes: a recon-only campaign has no findings",
+          only is not None and only.findings == [])
+
+
+async def test_plan_records_a_fallback(wd: Path) -> None:
+    """A planner whose reply could not be read keeps what it actually said.
+
+    The fixed matrix runs in its place, and the raw reply is the only way to
+    tell a malformed object from an empty turn from a prompt that needs
+    rewriting — so it has to outlive the event that announced it.
+    """
+    script = {
+        "rosters": ["I'll send ten agents to look at the login page."],
+        "planner_calls": 0,
+        "prompts": [],
+        "recon_final": "nothing reachable",
+        "final": _finding_json("x"),
+    }
+    factory = _hunt_factory(script)
+
+    events: list[dict] = []
+    stop = asyncio.Event()
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    run = await hunt_mod.run_hunt(
+        cfg, "fallback.test", on_event=_recorder(events, stop),
+        agent_factory=factory, stop=stop, wave_size=2, concurrency=1,
+    )
+
+    plan_files = sorted((run.directory / "plans").glob("wave-*.md"))
+    check("fallback: the wave still has a plan file", len(plan_files) == 1)
+    plan = plan_files[0].read_text()
+    check("fallback: the plan is marked as fallen back",
+          "fell_back: true" in plan)
+    check("fallback: the raw planner reply is kept",
+          "I'll send ten agents" in plan, plan[:200])
+    check("fallback: the fixed matrix's briefs are recorded",
+          "agents: 2" in plan, plan[:300])
+
+
+def _legacy_campaign(root: Path, name: str, *,
+                     target: str = "", finding: str = "f.md") -> Path:
+    """A campaign directory in the pre-scope layout: ``<name>/findings/<finding>``."""
+    d = root / name / "findings"
+    d.mkdir(parents=True, exist_ok=True)
+    if finding:
+        body = ("---\n" + (f"target: {target}\n" if target else "")
+                + "wave: 0\nseverity: high\ntimestamp: 2026-10-09T03:32:50Z\n---\n\n"
+                + f"# {name} finding\n")
+        (d / finding).write_text(body)
+    return root / name
+
+
+def test_migrate_hunts(wd: Path) -> None:
+    """Legacy stamped campaigns fold into one directory per scope, idempotently.
+
+    The old layout made a new ``<slug>-<stamp>`` sibling for every `/bug-hunt`,
+    so one engagement scattered across a dozen directories. The scope comes from
+    the findings' own ``target`` where there is one — the directory *name* is
+    what was wrong, since a prose target became a name.
+    """
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+    root = cfg.state_dir / "hunts"
+    root.mkdir(parents=True, exist_ok=True)
+
+    # Two legacy campaigns for the same host, one with a wildcard target that
+    # must normalise to the same scope as the bare host.
+    _legacy_campaign(root, "lerevecraze.com-20261009-084705",
+                     target="*.lerevecraze.com", finding="a.md")
+    _legacy_campaign(root, "lerevecraze.com-20261010-025510",
+                     target="lerevecraze.com", finding="b.md")
+
+    # A prose target whose findings recorded prose too: the name is all there is,
+    # and it still has to shed its stamp.
+    _legacy_campaign(root, "bdgroup.com-the-recons-are-in-here-20261008-162136",
+                     target="bdgroup.com the recons are in here", finding="c.md")
+
+    # A campaign with no findings at all — nothing to derive a scope from.
+    _legacy_campaign(root, "empty.test-20261009-000814", finding="")
+
+    # Already scope-shaped: has plans/, so it is left strictly alone.
+    done = root / "settled.test"
+    (done / "plans").mkdir(parents=True)
+    (done / "findings").mkdir()
+    (done / "findings" / "keep.md").write_text("---\ntarget: settled.test\n---\n# k\n")
+
+    moved = hunt_mod.migrate_hunts(cfg)
+    dests = {str(src.name): dst.name for src, dst in moved}
+
+    check("migrate: both campaigns for one host merge into its scope",
+          (root / "lerevecraze.com" / "findings" / "a.md").is_file()
+          and (root / "lerevecraze.com" / "findings" / "b.md").is_file(),
+          str(sorted(p.name for p in (root / "lerevecraze.com" / "findings").glob("*.md"))))
+    check("migrate: a wildcard target files under the bare host",
+          dests.get("lerevecraze.com-20261009-084705") == "lerevecraze.com",
+          str(dests))
+    check("migrate: the legacy directories are gone",
+          not (root / "lerevecraze.com-20261009-084705").exists()
+          and not (root / "lerevecraze.com-20261010-025510").exists())
+    check("migrate: the scope gets the marker, so a hunt can start there",
+          (root / "lerevecraze.com" / "plans").is_dir())
+
+    # Prose: the finding recorded prose, so the scope falls back to the name
+    # with its stamp stripped — not to the whole sentence.
+    check("migrate: a prose-named campaign sheds its stamp",
+          dests.get("bdgroup.com-the-recons-are-in-here-20261008-162136")
+          == "bdgroup.com-the-recons-are-in-here", str(dests))
+    check("migrate: the prose campaign's finding survived",
+          (root / "bdgroup.com-the-recons-are-in-here" / "findings" / "c.md").is_file())
+
+    check("migrate: an empty legacy campaign is removed",
+          not (root / "empty.test-20261009-000814").exists())
+    check("migrate: an empty campaign yields no move",
+          "empty.test-20261009-000814" not in dests, str(dests))
+    check("migrate: an empty campaign leaves no stray scope directory",
+          not (root / "empty.test").exists())
+
+    check("migrate: a scope-shaped directory is left alone",
+          (done / "findings" / "keep.md").is_file()
+          and "settled.test" not in dests)
+
+    # Idempotent: a second call moves nothing and disturbs nothing.
+    again = hunt_mod.migrate_hunts(cfg)
+    check("migrate: a second run is a no-op", again == [], str(again))
+    check("migrate: the merged findings are still there after a second run",
+          len(list((root / "lerevecraze.com" / "findings").glob("*.md"))) == 2,
+          str(sorted(p.name for p in (root / "lerevecraze.com" / "findings").glob("*.md"))))
+
+    # A collision keeps both: a genuinely different finding with the same
+    # filename must not be overwritten by the migration.
+    _legacy_campaign(root, "collide.test-20261009-010101", target="collide.test",
+                     finding="dup.md")
+    (root / "collide.test" / "findings").mkdir(parents=True, exist_ok=True)
+    (root / "collide.test" / "findings" / "dup.md").write_text("the original")
+    hunt_mod.migrate_hunts(cfg)
+    check("migrate: a filename collision keeps the existing file",
+          (root / "collide.test" / "findings" / "dup.md").read_text()
+          == "the original")
+    check("migrate: nothing to migrate is not an error",
+          hunt_mod.migrate_hunts(cfg) == [])
 
 
 async def test_hunt_replans_from_findings(wd: Path) -> None:
@@ -915,6 +1214,120 @@ async def test_recon_overlay(wd: Path) -> None:
         await pilot.pause()
         check("overlay: a second close does not pop anything else",
               app.screen is not None)
+
+
+async def test_boot_migrates_hunts(wd: Path) -> None:
+    """The app folds legacy campaigns at boot, before any command can read them.
+
+    Migration at boot rather than on first use is what makes `/findings` and
+    `/summary-hunt` see the merged layout from the first command — otherwise the
+    first lookup after an upgrade reads a half-migrated store.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = wd / "state"
+    _legacy_campaign(cfg.state_dir / "hunts", "legacy.test-20261009-010101",
+                     target="legacy.test", finding="a.md")
+
+    app = ZimZillaApp(cfg)
+    async with app.run_test(size=(110, 40)) as pilot:
+        # Dismiss the splash the way the operator does, so `_boot_done` — which
+        # is what runs the migration — actually runs. Popping the screen
+        # directly would skip it and the test would be checking nothing.
+        app._boot_done()
+        await pilot.pause()
+
+        check("boot: the legacy campaign is folded into its scope",
+              (cfg.state_dir / "hunts" / "legacy.test" / "findings"
+               / "a.md").is_file(),
+              str(sorted(p.name for p in (cfg.state_dir / "hunts").iterdir())))
+        check("boot: the legacy directory is gone",
+              not (cfg.state_dir / "hunts" / "legacy.test-20261009-010101").exists())
+        check("boot: the main agent is offered the read tool",
+              "hunt_findings" in {t["name"] for t in app.agent.tool_schemas()})
+
+        # The merge is said in the transcript, where the operator sees it —
+        # not in the agent's context, which is for the agent's own work. Read
+        # the transcript's blocks, not the pane's render: the pane renders to
+        # Blank when it has no scrollable content yet.
+        log = app.query_one(ChatPane).query_one("#transcript")
+        body = "\n".join(str(item[0]) for item in getattr(log, "_blocks", []))
+        check("boot: the operator is told the merge happened",
+              "merged" in body, body[-400:])
+
+
+async def test_campaign_reaches_the_main_agent(wd: Path) -> None:
+    """A finished campaign is put into the main agent's context, with its path.
+
+    A hunt runs on its own Agent instances and the main agent sees none of it,
+    so an operator who stopped a wave and said "save the findings" was answered
+    "nothing found" over a directory full of evidence. The fix has two halves —
+    a read tool, and this notice — and this is the one that does not depend on
+    the model choosing to call anything.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = wd / "state"
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        before = len(app.agent.messages)
+        app._hunt_target = "lerevecraze.com"
+        app._register_hunt({
+            "type": "hunt_end", "wave": 2, "findings": 3, "saved": 2,
+            "directory": str(cfg.state_dir / "hunts" / "lerevecraze.com"),
+        })
+        await pilot.pause()
+
+        # Buffered, not appended: the history must keep its user/assistant
+        # alternation, because the gateway behind ANTHROPIC_BASE_URL may not
+        # merge two user turns the way the API does.
+        check("notice: the campaign is buffered for the next turn",
+              app.agent._drain_notices() != "" and len(app.agent.messages) == before,
+              f"{before} -> {len(app.agent.messages)}")
+
+        # It leads the next turn, so the model sees it before the instruction.
+        app._register_hunt({
+            "type": "hunt_end", "wave": 2, "findings": 3, "saved": 2,
+            "directory": str(cfg.state_dir / "hunts" / "lerevecraze.com"),
+        })
+        seen: list[str] = []
+
+        async def _fake_stream():
+            # Records what the turn is about to send, then ends the stream so
+            # run_turn unwinds without needing a gateway.
+            seen.append(app.agent.messages[-1]["content"])
+            return
+            yield  # pragma: no cover - marks this an async generator
+
+        app.agent._stream_once = _fake_stream
+        async for _ in app.agent.run_turn("save the findings"):
+            pass
+
+        check("notice: it leads the next turn's user text",
+              seen and seen[0].startswith("[hunt]"), (seen[0][:120] if seen else ""))
+        check("notice: the operator's instruction is still in the turn",
+              seen and "save the findings" in seen[0], (seen[0][-80:] if seen else ""))
+        notice = seen[0] if seen else ""
+        check("notice: it names the campaign directory",
+              "hunts/lerevecraze.com" in notice, notice[:200])
+        check("notice: it names the target", "lerevecraze.com" in notice)
+        check("notice: it carries the counts",
+              "findings: 3" in notice and "waves: 2" in notice, notice[:300])
+        check("notice: it points at the read tool",
+              "hunt_findings" in notice, notice[:400])
+        check("notice: it warns against a false 'nothing found'",
+              "nothing was found" in notice, notice[:400])
+        check("notice: a second turn does not repeat it",
+              app.agent._drain_notices() == "")
+
+        # A hunt event with no directory must not buffer a dangling note —
+        # there would be nothing for the agent to act on.
+        app._register_hunt({"type": "hunt_end", "wave": 0, "findings": 0})
+        await pilot.pause()
+        check("notice: an event with no directory adds nothing",
+              app.agent._drain_notices() == "")
 
 
 async def test_recon_reports_live(wd: Path) -> None:
@@ -1680,6 +2093,121 @@ def test_report_finding_tool() -> None:
           denied is not None and "hunt" in denied, str(denied))
 
 
+def test_hunt_findings_tool(wd: Path) -> None:
+    """The main agent's read tool: a campaign on disk, answered from disk.
+
+    A hunt runs on its own Agent instances, so the main agent sees none of it.
+    When the operator stopped a wave and said "save the findings", it had no
+    path to the campaign directory and said nothing was found — over a directory
+    that already held a high-severity finding. This tool is that path.
+    """
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = wd / "state"
+
+    # Nothing has run yet: the tool must say so, not invent a campaign. On its
+    # own pristine store, since the tests above share this workdir and have
+    # already made campaigns in it.
+    virgin = _cfg(Path(tempfile.mkdtemp()), mode="zim")
+    virgin.state_dir = Path(tempfile.mkdtemp()) / "state"
+    empty = tools_mod.execute("hunt_findings", {}, virgin)
+    check("hunt_findings: no campaign yet is stated plainly",
+          "no /bug-hunt campaign" in empty.output, empty.output)
+
+    # Build two campaigns: one with findings, recon and plans, and a later one
+    # that must win the "most recent" default.
+    old = cfg.state_dir / "hunts" / "quiet.test"
+    (old / "findings").mkdir(parents=True)
+    (old / "plans").mkdir()
+    hunt_mod.write_recon(hunt_mod.HuntRun(target="quiet.test", directory=old),
+                         "quiet.test answers on 80, nothing else")
+
+    run = hunt_mod.HuntRun(target="target.test", directory=(
+        cfg.state_dir / "hunts" / "target.test"))
+    hunt_mod.case_dir(cfg, "target.test")
+    hunt_mod.write_recon(run, "443 open, nginx, a login form at /login")
+    hunt_mod.write_plan(run, 1, hunt_mod.team_mod.Roster(
+        summary="aiming at auth",
+        workers=[hunt_mod.team_mod.WorkerSpec(
+            name="auth", brief="test auth", owns=["auth"])]),
+        raw="", fell_back=False)
+    hunt_mod.write_report(run, hunt_mod.Finding(
+        wave=1, agent="auth", title="auth bypass", severity="critical",
+        asset="target.test/login", summary="no check", evidence="curl"))
+
+    # ---- findings
+    res = tools_mod.execute("hunt_findings", {"scope": "target.test"}, cfg)
+    check("hunt_findings: it names the campaign", "target.test" in res.output,
+          res.output[:120])
+    check("hunt_findings: it reports the finding",
+          "auth bypass" in res.output and "CRITICAL" in res.output, res.output)
+    check("hunt_findings: it gives the file path to read in full",
+          "wave-1-auth-bypass.md" in res.output, res.output)
+    check("hunt_findings: it does not error", res.is_error is False)
+
+    # ---- the default is the most recently written campaign
+    recent = tools_mod.execute("hunt_findings", {}, cfg)
+    check("hunt_findings: with no scope it reads the most recent campaign",
+          "target.test" in recent.output, recent.output[:120])
+
+    # ---- recon
+    recon = tools_mod.execute("hunt_findings", {"scope": "target.test",
+                                                "include": "recon"}, cfg)
+    check("hunt_findings: recon is read back",
+          "nginx" in recon.output and "/login" in recon.output, recon.output[:200])
+    check("hunt_findings: recon is not the frontmatter",
+          "timestamp:" not in recon.output, recon.output[:200])
+
+    # ---- plans
+    plans = tools_mod.execute("hunt_findings", {"scope": "target.test",
+                                                "include": "plans"}, cfg)
+    check("hunt_findings: the wave plan is listed",
+          "wave 1" in plans.output and "1 agents" in plans.output, plans.output)
+
+    # ---- all
+    everything = tools_mod.execute("hunt_findings", {"scope": "target.test",
+                                                     "include": "all"}, cfg)
+    check("hunt_findings: 'all' carries findings, recon and plans",
+          "auth bypass" in everything.output and "nginx" in everything.output
+          and "wave 1" in everything.output)
+
+    # ---- a campaign matched by the target recorded in its findings, not just
+    # by the directory name.
+    by_target = tools_mod.execute("hunt_findings", {"scope": "quiet.test"}, cfg)
+    check("hunt_findings: a scope with no findings says so",
+          "none were confirmed" in by_target.output, by_target.output)
+
+    # ---- bad input is refused with a reason, not a traceback
+    bad = tools_mod.execute("hunt_findings", {"include": "everything"}, cfg)
+    check("hunt_findings: an unknown include is an error",
+          bad.is_error is True and "findings" in bad.output, bad.output)
+    missing = tools_mod.execute("hunt_findings", {"scope": "nope.test"}, cfg)
+    check("hunt_findings: an unknown scope names the known ones",
+          missing.is_error is False and "Known scopes" in missing.output,
+          missing.output)
+
+    # ---- the gate. The main agent gets it; a hunt agent must not.
+    main = Agent(_cfg(Path(tempfile.mkdtemp())))
+    hunter = Agent(_cfg(Path(tempfile.mkdtemp())), can_report=True,
+                   can_hunt_read=False)
+    main_tools = {t["name"] for t in main.tool_schemas()}
+    hunter_tools = {t["name"] for t in hunter.tool_schemas()}
+    check("hunt_findings: an ordinary session is offered it",
+          "hunt_findings" in main_tools)
+    check("hunt_findings: a hunt agent is NOT offered it",
+          "hunt_findings" not in hunter_tools, str(sorted(hunter_tools)))
+    denied = hunter._denied("hunt_findings")
+    check("hunt_findings: a hunt agent calling it is denied with a reason",
+          denied is not None and "independent" in denied, str(denied))
+    check("hunt_findings: report_finding is still hunt-only",
+          "report_finding" in hunter_tools and "report_finding" not in main_tools)
+
+    # The tool name and the store path are pinned here because tools.py cannot
+    # import hunt (hunt imports agent imports tools) — see tools._HUNTS_DIR.
+    check("hunt_findings: the store path matches hunt.case_dir",
+          hunt_mod.case_dir(cfg, "target.test").parent.name == tools_mod._HUNTS_DIR,
+          tools_mod._HUNTS_DIR)
+
+
 def test_finding_from_tool() -> None:
     """A tool's meta dict becomes a Finding, normalised, or nothing at all."""
     make = hunt_mod._finding_from_tool
@@ -2006,6 +2534,11 @@ async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
         test_reports(wd)
+        test_scope_naming(wd)
+        test_migrate_hunts(wd)
+        test_hunt_findings_tool(wd)
+        await test_campaign_notes(wd)
+        await test_plan_records_a_fallback(wd)
         await test_hunt_loop(wd)
         await test_contract_in_worker_prompts(wd)
         await test_live_reporting_mid_wave(wd)
@@ -2019,6 +2552,8 @@ async def main() -> int:
         await test_hunt_stops_midwave(wd)
         await test_hunt_summary_flag(wd)
         await test_recon_reports_live(wd)
+        await test_campaign_reaches_the_main_agent(wd)
+        await test_boot_migrates_hunts(wd)
         await test_recon_overlay(wd)
         await test_stop_hunt_reaches_the_loop(wd)
         await test_recon_overlay_fast_target(wd)

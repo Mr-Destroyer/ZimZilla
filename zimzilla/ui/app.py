@@ -630,6 +630,9 @@ class ZimZillaApp(App):
         self._hunt_stop = asyncio.Event()
         self._hunt_run = None
         self._hunt_summary_queued = False
+        #: The target of the campaign in flight, kept past the run object's
+        #: clearing so the closing notice can name it.
+        self._hunt_target = ""
         self._hunt_tokens: tuple[int, int, float] = (0, 0, 0.0)
         #: The findings window, while it is open. Held so `/findings` toggles it
         #: and so the hunt worker can push each new finding into it live.
@@ -777,6 +780,19 @@ class ZimZillaApp(App):
                 "out-of-scope.yaml (never touch). Nothing is armed or blocked.",
                 warn=True,
             )
+        # Fold any campaigns left in the old `<scope>-<stamp>` layout into one
+        # directory per scope. Done at boot, before anything can read the hunts
+        # store, so `/summary-hunt` and `/findings` see the merged layout from
+        # the first command. Idempotent, and cheap: it walks a directory of
+        # directories and moves files only when the old layout is still there.
+        try:
+            merged = hunt_mod.migrate_hunts(self.cfg)
+        except Exception:  # noqa: BLE001
+            merged = []
+        if merged:
+            self._sys_line(
+                f"merged {len(merged)} old hunt campaign(s) into one directory "
+                f"per scope under {Path(self.cfg.state_dir) / 'hunts'}", ok=True)
         inp = self.query_one("#input", Input)
         # Warm the Logfare catalog while the operator reads the banner, so the
         # first /model is current instead of showing the declared fallback. Only
@@ -2647,7 +2663,15 @@ class ZimZillaApp(App):
             self._sys_line(f"⚠ not in allow.yaml — {reason}", warn=True)
             self._sys_line("hunting anyway; out-of-scope hosts stay hard-blocked")
 
-        directory = hunt_mod.case_dir(self.cfg, target)
+        # The scope decides the directory, and a target that is not host-shaped
+        # is refused here rather than slugged into a misleading folder name.
+        # This used to accept anything: a sentence typed into the target field
+        # became a directory named after its first sixty characters.
+        try:
+            directory = hunt_mod.case_dir(self.cfg, target)
+        except ValueError as e:
+            self._sys_line(f"⚠ {e}", warn=True)
+            return
 
         t = Text()
         t.append("  ◈ HUNT      ", style=f"bold {p.accent}")
@@ -2695,8 +2719,11 @@ class ZimZillaApp(App):
         t.append("/mode zim", style=p.primary)
         t.append(" so the\n  agents follow your AGENTS.md doctrine.\n", style=p.dim)
         t.append("\n  evidence lands in ", style=p.dim)
-        t.append(f"{Path(self.cfg.state_dir) / 'hunts'}/<target>-<stamp>/\n",
+        t.append(f"{Path(self.cfg.state_dir) / 'hunts'}/<scope>/\n",
                  style=p.primary)
+        t.append("  one directory per scope, reused — findings, recon notes and\n",
+                 style=p.dim)
+        t.append("  each wave's plan accumulate there across campaigns\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
     def _cmd_stop_hunt(self, args) -> None:
@@ -2800,7 +2827,12 @@ class ZimZillaApp(App):
                 pass
 
     def _latest_hunt_dir(self) -> Path | None:
-        """The most recent campaign directory, or None."""
+        """The most recently written campaign directory, or None.
+
+        By mtime, not by name: the layout is one directory per scope now, so the
+        directory carries no timestamp and "most recent" has to be whichever was
+        written to last.
+        """
         root = Path(self.cfg.state_dir) / "hunts"
         if not root.is_dir():
             return None
@@ -2864,6 +2896,9 @@ class ZimZillaApp(App):
         # run_hunt rather than built there so there is exactly one of it.
         self._hunt_run = hunt_mod.HuntRun(
             target=target, directory=hunt_mod.case_dir(self.cfg, target))
+        # Kept for the campaign's notice to the main agent, which is built from
+        # the event at the end — by which point the run object is being cleared.
+        self._hunt_target = target
 
         counter = {"running": 0, "total": 0, "wave": 0, "done": 0}
         #: name -> colour, so a tool line, its prose and its result panel all
@@ -2940,7 +2975,14 @@ class ZimZillaApp(App):
                 text = (ev.get("text") or "").strip()
                 if text:
                     chat.write_block(R.agent_line("recon", text, p.accent, p))
-                self._sys_line("recon done — planning wave 1", ok=True)
+                # The recon notes are on disk, and the operator is told where:
+                # the campaign directory accumulates them, so "save the
+                # findings" has a real answer even before a wave reports.
+                saved = (ev.get("saved") or "").strip()
+                if saved:
+                    self._sys_line(f"recon done — notes in {saved}", ok=True)
+                else:
+                    self._sys_line("recon done — planning wave 1", ok=True)
 
             elif etype == "hunt_wave_start":
                 counter["wave"] = ev.get("wave", 0)
@@ -3092,6 +3134,7 @@ class ZimZillaApp(App):
                     f"hunt ended — {ev['wave']} wave(s), {ev['findings']} finding(s), "
                     f"{ev['saved']} report(s) in {ev['directory']}",
                     ok=True)
+                self._register_hunt(ev)
                 # The campaign is over; if the tracker is open it becomes a
                 # record of the run rather than a live view.
                 if self._findings_panel is not None:
@@ -3151,6 +3194,35 @@ class ZimZillaApp(App):
             self._sync_rails()
             self._set_rain(self.rain_on)
             self.query_one("#input", Input).focus()
+
+    def _register_hunt(self, ev: dict) -> None:
+        """Tell the main agent a campaign just finished, and where it landed.
+
+        A hunt runs on its own Agent instances, so the main agent sees none of
+        it. Without this, "save the findings" reached an agent with no idea a
+        hunt had happened — and it answered "nothing found" over a directory
+        full of evidence. The campaign directory and its counts go into the main
+        agent's context so the next turn already knows, whether or not the model
+        thinks to call ``hunt_findings``.
+        """
+        directory = ev.get("directory") or ""
+        if not directory:
+            return
+        findings = ev.get("findings", 0)
+        summary = (
+            f"[hunt] A /bug-hunt campaign just ended against {self._hunt_target or 'the target'}.\n"
+            f"directory: {directory}\n"
+            f"waves: {ev.get('wave', 0)} · findings: {findings} · "
+            f"reports saved: {ev.get('saved', 0)}\n"
+            "Everything the campaign recorded — the findings, the recon notes "
+            "and each wave's plan — is in that directory. Use the hunt_findings "
+            "tool, or read_file on a path under it, before saying nothing was "
+            "found."
+        )
+        try:
+            self.agent.notice(summary)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _open_wave(self, slot: dict, target: str, wave: int, size: int) -> None:
         """Raise the wave web for a new wave, replacing any that is still up.

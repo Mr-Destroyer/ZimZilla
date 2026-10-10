@@ -192,9 +192,13 @@ class Agent:
         permission_handler: PermissionHandler | None = None,
         tool_hook: ToolHook | None = None,
         can_report: bool = False,
+        can_hunt_read: bool = True,
     ) -> None:
         self.cfg = cfg
         self.messages: list[dict] = []
+        #: Facts buffered by ``notice``, folded into the next turn's user text.
+        #: Not appended to ``messages`` directly — see ``notice``.
+        self._notices: list[str] = []
         self.permission_handler = permission_handler
         # Awaited immediately before every tool executes. None for a normal
         # single-agent session — the hook is /team's serialisation point.
@@ -205,6 +209,13 @@ class Agent:
         # and go nowhere, which reads as the harness losing a finding. Off by
         # default and switched on by hunt._run_agent for the agents it owns.
         self.can_report = can_report
+        # Whether hunt_findings is advertised. On for an ordinary session, which
+        # needs it to answer "save the findings" against a campaign the main
+        # agent never saw. Off for a hunt agent: a wave brief is deliberately
+        # blind to the other agents' work, and handing one the whole campaign
+        # would undo that. hunt._run_agent switches it off for the agents it
+        # owns.
+        self.can_hunt_read = can_hunt_read
 
         # accounting
         self.session_input_tokens = 0
@@ -264,6 +275,8 @@ class Agent:
         deny = self._mode_policy().get("deny", set())
         if not self.can_report:
             deny = deny | tools_mod.HUNT_ONLY_TOOLS
+        if not self.can_hunt_read:
+            deny = deny | tools_mod.MAIN_ONLY_TOOLS
         return [t for t in tools_mod.TOOL_SCHEMAS if t["name"] not in deny]
 
     def _denied(self, name: str) -> str | None:
@@ -279,6 +292,11 @@ class Agent:
         # has nowhere to go.
         if name in tools_mod.HUNT_ONLY_TOOLS and not self.can_report:
             return f"the {name} tool is only available to a hunt agent"
+        # The mirror image: a hunt agent must not read the whole campaign, whose
+        # other waves it is meant to work independently of.
+        if name in tools_mod.MAIN_ONLY_TOOLS and not self.can_hunt_read:
+            return (f"the {name} tool is not available inside a hunt — your "
+                    "brief is deliberately independent of the other agents")
         return None
 
     # ---- history ----------------------------------------------------------
@@ -369,12 +387,45 @@ class Agent:
             return None
         return None
 
+    def notice(self, text: str) -> None:
+        """Put a fact in the agent's context without running a turn.
+
+        A hunt runs on its own Agent instances and the main agent sees none of
+        it, so when the operator says "save the findings" the main agent has no
+        idea a campaign happened. Buffering here means the next turn it runs
+        already knows the campaign directory and what it found — the tool can be
+        reached for, but this does not depend on the model choosing to call it.
+
+        Buffered rather than appended, and folded into the next turn's user text
+        by ``run_turn``. Appending a standalone user message would put two user
+        turns back to back, which the Anthropic API merges but a gateway behind
+        it may not — and this harness speaks to whatever ``ANTHROPIC_BASE_URL``
+        points at. Folding in leaves the message history exactly as it was.
+        """
+        if text.strip():
+            self._notices.append(text.strip())
+
+    def _drain_notices(self) -> str:
+        """Everything ``notice`` has buffered, as a block to lead a user turn."""
+        if not self._notices:
+            return ""
+        text = "\n\n".join(self._notices)
+        self._notices.clear()
+        return text
+
     # ---- main loop --------------------------------------------------------
     async def run_turn(self, user_text: str) -> AsyncIterator[dict]:
         self.turn_count += 1
         turn_in = 0
         turn_out = 0
         turn_cost = 0.0
+
+        # Any notice buffered since the last turn leads this one, so the model
+        # sees it before the instruction it applies to — and the history keeps
+        # the plain user/assistant alternation it had. See ``notice``.
+        notice = self._drain_notices()
+        if notice:
+            user_text = f"{notice}\n\n---\n\n{user_text}"
 
         self.messages.append({"role": "user", "content": user_text})
 

@@ -1,10 +1,15 @@
 """The tool layer: JSON schemas, permission previews and execution.
 
-Nine tools are exposed to the model: bash, read_file, write_file, edit_file,
-glob, grep, list_dir, search_web and web_fetch. Reads are auto-approved; writes
-and bash go through the permission gate in the UI. The network tools are not
-gated — they are bounded by the scope guard instead, so an out-of-scope host is
-refused no matter which mode is armed.
+The model is offered bash, read_file, write_file, edit_file, glob, grep,
+list_dir, search_web and web_fetch in an ordinary session. Reads are
+auto-approved; writes and bash go through the permission gate in the UI. The
+network tools are not gated — they are bounded by the scope guard instead, so an
+out-of-scope host is refused no matter which mode is armed.
+
+Two more are advertised conditionally, and the two conditions are opposites:
+``report_finding`` only inside a hunt (``Agent.can_report``), and
+``hunt_findings`` only outside one (``Agent.can_hunt_read``). See
+``HUNT_ONLY_TOOLS`` and ``MAIN_ONLY_TOOLS``.
 """
 
 from __future__ import annotations
@@ -224,6 +229,47 @@ TOOL_SCHEMAS: list[dict] = [
             "required": ["title", "severity", "evidence"],
         },
     },
+    {
+        # The read side of a campaign, for the MAIN agent. A hunt runs on its
+        # own Agent instances and the main agent sees none of it, so when the
+        # operator stopped a wave and said "save the findings", the main agent
+        # had no path to the campaign directory and answered "nothing found" —
+        # while recon had already written a high-severity finding to disk. This
+        # is that path: a read-only view of what the campaign actually
+        # recorded, so the command resolves against real artefacts.
+        #
+        # Withheld from a hunt agent by ``Agent.can_hunt_read``: a wave agent
+        # reading the whole campaign would be handed every other wave's work,
+        # which is the opposite of the independence the briefs are built on.
+        "name": "hunt_findings",
+        "description": (
+            "Read what a /bug-hunt campaign actually recorded on disk: the "
+            "findings it confirmed, the recon notes it wrote, and the plans "
+            "for each wave. Use this when the operator refers to a hunt's "
+            "findings — 'save the findings', 'summarise the campaign', 'what "
+            "did we find on <host>'. With no campaign named it reads the most "
+            "recent one. Always check this before saying nothing was found."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": "Host or domain the campaign ran against. "
+                                   "Omit for the most recent campaign.",
+                },
+                "include": {
+                    "type": "string",
+                    "enum": ["findings", "recon", "plans", "all"],
+                    "description": "Which part of the campaign to read. "
+                                   "'findings' (default) lists what was "
+                                   "confirmed; 'recon' is the mapping notes; "
+                                   "'plans' is what each wave was aimed at; "
+                                   "'all' is everything.",
+                },
+            },
+        },
+    },
 ]
 
 TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
@@ -236,6 +282,11 @@ GATED_TOOLS = {"bash", "write_file", "edit_file"}
 #: tracker to report into would let a model call a tool whose result goes
 #: nowhere, which reads as the harness losing the finding.
 HUNT_ONLY_TOOLS = {"report_finding"}
+
+#: The reverse: the tools only an ordinary session may call. ``hunt_findings``
+#: reads the whole campaign, which a wave agent must not see — its brief is
+#: deliberately blind to the other agents' work. See ``Agent.can_hunt_read``.
+MAIN_ONLY_TOOLS = {"hunt_findings"}
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
               ".pytest_cache", ".ruff_cache", "dist", "build", ".idea", ".tox"}
@@ -743,6 +794,174 @@ def _tool_report_finding(args: dict, cfg) -> ToolResult:
     )
 
 
+#: The campaign store, relative to state_dir. Kept as a literal here rather than
+#: imported from hunt: hunt imports agent, agent imports this module, so reading
+#: hunt's constant would close an import cycle. Pinned by a test instead — see
+#: test_hunt.py's "hunt_findings" suite.
+_HUNTS_DIR = "hunts"
+
+
+def _read_frontmatter(text: str) -> dict:
+    """The flat YAML frontmatter of a campaign artefact, as strings.
+
+    The same shape ``hunt._read_frontmatter`` writes and reads. Duplicated
+    deliberately — see ``_HUNTS_DIR`` — and only the handful of scalar fields
+    this tool prints.
+    """
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end < 0:
+        return {}
+    out: dict = {}
+    for line in text[3:end].splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _first_heading(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def _campaign_dirs(state_dir: Path) -> list[Path]:
+    """Every campaign directory, newest first.
+
+    Newest by mtime, because the layout is now one directory *per scope*: the
+    directory does not carry a timestamp, so "most recent campaign" has to be
+    the one most recently written to.
+    """
+    root = Path(state_dir) / _HUNTS_DIR
+    if not root.is_dir():
+        return []
+    dirs = [d for d in root.iterdir() if d.is_dir()]
+    return sorted(dirs, key=lambda d: d.stat().st_mtime, reverse=True)
+
+
+def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
+    """Read a campaign's findings, recon notes and plans off disk.
+
+    This is the main agent's window onto a hunt. A hunt runs on its own Agent
+    instances, so the main agent sees none of it — which is why an operator who
+    stopped a wave and said "save the findings" was told nothing was found while
+    a high-severity finding sat on disk. This reads what is actually there.
+
+    Read-only, and bounded: it prints the findings, the newest recon note and
+    the wave plans, each truncated, rather than handing back an entire campaign.
+    """
+    state_dir = Path(getattr(cfg, "state_dir", Path.home() / ".zimzilla"))
+    scope = _text(args.get("scope", "")).strip()
+    include = (_text(args.get("include", "")).strip().lower() or "findings")
+    if include not in ("findings", "recon", "plans", "all"):
+        return ToolResult(
+            f"hunt_findings: unknown include {include!r} — use findings, "
+            "recon, plans or all", is_error=True)
+
+    campaigns = _campaign_dirs(state_dir)
+    if not campaigns:
+        return ToolResult(
+            f"no /bug-hunt campaign has been recorded under "
+            f"{state_dir / _HUNTS_DIR}")
+
+    directory = None
+    if scope:
+        # Match on the directory's scope name and, failing that, on the target
+        # recorded inside its findings — the directory name is derived, but the
+        # frontmatter holds exactly what the operator typed.
+        want = scope.strip().lower()
+        for d in campaigns:
+            if d.name.lower() == want:
+                directory = d
+                break
+        if directory is None:
+            for d in campaigns:
+                for f in sorted((d / "findings").glob("*.md")):
+                    try:
+                        meta = _read_frontmatter(
+                            f.read_text(encoding="utf-8", errors="replace"))
+                    except OSError:
+                        continue
+                    if meta.get("target", "").strip().lower() == want:
+                        directory = d
+                        break
+                if directory is not None:
+                    break
+        if directory is None:
+            names = ", ".join(d.name for d in campaigns[:8])
+            return ToolResult(
+                f"no campaign for {scope!r}. Known scopes: {names}")
+    else:
+        directory = campaigns[0]
+
+    parts: list[str] = [f"campaign: {directory.name}  ({directory})"]
+
+    finding_files = sorted((directory / "findings").glob("*.md"))
+
+    if include in ("findings", "all"):
+        if not finding_files:
+            parts.append("\nFINDINGS: none were confirmed in this campaign.")
+        else:
+            parts.append(f"\nFINDINGS ({len(finding_files)}):")
+            for path in finding_files:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                meta = _read_frontmatter(text)
+                title = _first_heading(text) or path.stem
+                parts.append(
+                    f"\n- [{meta.get('severity', '?').upper()}] {title}\n"
+                    f"  wave {meta.get('wave', '?')} · "
+                    f"{meta.get('asset') or '(no asset)'} · "
+                    f"found by {meta.get('agent', '?')}\n"
+                    f"  file: {path}")
+
+    if include in ("recon", "all"):
+        notes = sorted(directory.glob("recon-*.md"))
+        if not notes:
+            parts.append(
+                "\nRECON: no recon notes on disk for this campaign — it was "
+                "run before recon was recorded, or recon produced nothing.")
+        else:
+            # Newest first, and only the newest in full: a scope can accumulate
+            # many recon notes and the model does not need all of them.
+            newest = notes[-1]
+            body = newest.read_text(encoding="utf-8", errors="replace")
+            body = body.split("\n---", 2)[-1] if body.startswith("---") else body
+            parts.append(
+                f"\nRECON ({len(notes)} note(s); newest {newest.name}):\n"
+                f"{_truncate(body.strip(), 4000)}")
+
+    if include in ("plans", "all"):
+        plans = sorted((directory / "plans").glob("wave-*.md"))
+        if not plans:
+            parts.append("\nPLANS: none recorded.")
+        else:
+            parts.append(f"\nPLANS ({len(plans)}):")
+            for path in plans:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                meta = _read_frontmatter(text)
+                fallback = meta.get("fell_back", "false").lower() == "true"
+                parts.append(
+                    f"- wave {meta.get('wave', '?')}: "
+                    f"{meta.get('agents', '?')} agents"
+                    + (" (fixed vector fallback)" if fallback else "")
+                    + f"  ·  {path}")
+
+    parts.append(
+        "\nRead a finding in full with read_file on its path. The campaign "
+        "directory also holds the recon notes and the wave plans.")
+    return ToolResult("\n".join(parts))
+
+
 _DISPATCH = {
     "bash": _tool_bash,
     "read_file": _tool_read_file,
@@ -754,6 +973,7 @@ _DISPATCH = {
     "search_web": _tool_web_search,
     "web_fetch": _tool_web_fetch,
     "report_finding": _tool_report_finding,
+    "hunt_findings": _tool_hunt_findings,
 }
 
 

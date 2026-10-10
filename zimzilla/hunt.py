@@ -644,16 +644,309 @@ def _finding_markdown(run: HuntRun, f: Finding) -> str:
     )
 
 
-def case_dir(cfg: Config, target: str) -> Path:
-    """Create and return this campaign's directory.
+#: A scope name longer than this is prose, not a hostname. The longest legal
+#: DNS name is 253 octets, but a name worth typing into `/bug-hunt` is nothing
+#: like that long, and the failure this guards is real: an operator typed a
+#: sentence into the target field and got a directory called
+#: ``bdgroup.com-the-recons-are-in-this-directory-pretty-much-you-can-...``.
+SCOPE_NAME_MAX = 80
 
-    ``<state_dir>/hunts/<slug>-<stamp>/`` — under state_dir, beside sessions and
-    osint cases rather than in whatever repo the operator happens to be in.
+
+def scope_slug(target: str) -> str:
+    """The scope name a target files under. Never empty.
+
+    A target is a host, a domain, a CIDR block or a URL — so the scope is
+    derived from it and reduced to one filesystem-safe label: a scheme and a
+    path are dropped, because ``https://dev.example.com/login`` and
+    ``dev.example.com`` are the same engagement and must not become two
+    directories.
+
+    Anything that does not reduce to something host-shaped is rejected rather
+    than truncated into a misleading name. A sentence in the target field is
+    an operator mistake, and a directory named after its first eighty
+    characters is a mistake preserved on disk; raising lets the caller say so.
     """
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    d = Path(cfg.state_dir) / "hunts" / f"{_slug(target)}-{stamp}"
+    text = str(target or "").strip()
+    if not text:
+        raise ValueError("a hunt needs a target")
+
+    # Strip a scheme and anything after the authority, so a URL files under
+    # its host. `//` starts the authority; a bare host has none.
+    text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+    text = text.split("/", 1)[0]
+    text = text.split("@")[-1]          # drop any userinfo
+    text = text.split(":", 1)[0]        # drop a port
+
+    if " " in text:
+        raise ValueError(
+            f"target contains spaces — {target[:60]!r}. /bug-hunt takes one "
+            "host or domain, not a description of what to do."
+        )
+
+    slug = _slug(text)
+    if not slug or slug == "finding":
+        raise ValueError(f"cannot make a scope name out of {target!r}")
+    if len(slug) > SCOPE_NAME_MAX:
+        raise ValueError(
+            f"target looks like a sentence, not a scope — {target[:60]!r}… "
+            f"({len(slug)} characters). /bug-hunt takes one host or domain."
+        )
+    return slug
+
+
+def case_dir(cfg: Config, target: str) -> Path:
+    """Create and return the campaign directory for *target*'s scope.
+
+    ``<state_dir>/hunts/<scope>/`` — under state_dir, beside sessions and osint
+    cases rather than in whatever repo the operator happens to be in.
+
+    **One directory per scope, reused.** This used to be ``<slug>-<stamp>``, so
+    every `/bug-hunt` on the same target made a new sibling directory and a
+    campaign against one host scattered itself across a dozen of them — recon
+    notes in one, findings in another, nothing that accumulated. The directory
+    is now the scope's, and the *artefacts* inside it carry the timestamps, so
+    hunting the same target twice adds to its history instead of starting over.
+    """
+    d = Path(cfg.state_dir) / "hunts" / scope_slug(target)
     (d / "findings").mkdir(parents=True, exist_ok=True)
+    (d / "plans").mkdir(parents=True, exist_ok=True)
     return d
+
+
+#: A legacy campaign directory: ``<scope>-<YYYYMMDD>-<HHMMSS>``. Matched on the
+#: tail so the scope itself may contain dashes and dots, which every hostname
+#: does. See ``migrate_hunts``.
+_LEGACY_DIR_RE = re.compile(r"^(?P<scope>.+)-(?P<stamp>\d{8}-\d{6})$")
+
+#: The marker that says a directory is already scope-shaped: ``case_dir`` always
+#: makes this, and the legacy ``<scope>-<stamp>`` layout never did.
+_SCOPE_MARKER = "plans"
+
+
+def _campaign_scope(directory: Path) -> str:
+    """The scope a campaign directory belongs under.
+
+    Read from the findings' own frontmatter ``target`` where there is one,
+    because the directory *name* is exactly what was wrong: a legacy directory
+    is named after whatever the operator typed, so the sentence
+    ``bdgroup.com-the-recons-are-in-this-directory-...`` is a name, not a scope.
+    The findings recorded the real target, so they decide where the campaign
+    files. Falls back to the directory's own name, which is correct for
+    everything written after the scope change.
+    """
+    for path in sorted((directory / "findings").glob("*.md")):
+        try:
+            target = _read_frontmatter(
+                path.read_text(encoding="utf-8", errors="replace")).get("target", "")
+        except OSError:
+            continue
+        if target:
+            try:
+                return scope_slug(target)
+            except ValueError:
+                # The finding recorded prose too. The directory name is all
+                # there is left to go on, and it is better than dropping the
+                # campaign — a wrong scope is recoverable by hand, a deleted
+                # campaign is not.
+                break
+    match = _LEGACY_DIR_RE.match(directory.name)
+    return (match.group("scope") if match else directory.name).lower()
+
+
+def migrate_hunts(cfg: Config) -> list[tuple[Path, Path]]:
+    """Fold legacy ``<scope>-<stamp>/`` campaigns into one directory per scope.
+
+    The old layout made a new sibling directory for every `/bug-hunt`, so a
+    single engagement scattered across a dozen of them — recon notes in one,
+    findings in another, nothing that accumulated — and a target typed as prose
+    became a directory named after its first eighty characters. This merges
+    those into ``<scope>/`` so every campaign on a host sits together.
+
+    A campaign is a directory under ``hunts/`` that has no ``plans/``: the
+    scope-shaped layout always makes one and the legacy layout never did. Files
+    move only when the destination does not already hold that name, so a
+    campaign migrated twice is a no-op and a genuinely different finding with
+    the same filename is kept rather than overwritten. Empty legacy directories
+    are removed; a non-empty one is left alone rather than guessed at.
+
+    Returns the ``(source, destination)`` pairs that moved.
+    """
+    root = Path(cfg.state_dir) / "hunts"
+    if not root.is_dir():
+        return []
+
+    moved: list[tuple[Path, Path]] = []
+    for directory in sorted(root.iterdir()):
+        if not directory.is_dir() or (directory / _SCOPE_MARKER).is_dir():
+            continue
+        scope = _campaign_scope(directory)
+        if scope == directory.name:
+            # Nothing to move it to — it is already its own scope, or its name
+            # is the best identity available. Give it the marker so the next
+            # call skips it.
+            (directory / _SCOPE_MARKER).mkdir(exist_ok=True)
+            continue
+
+        files = [p for p in sorted(directory.rglob("*")) if p.is_file()]
+        if not files:
+            # A campaign that recorded nothing — a `/bug-hunt` stopped before
+            # recon wrote anything. Removing it is the whole migration; making
+            # an empty scope directory for it would just add clutter, and
+            # reporting it as moved would be a lie.
+            try:
+                shutil.rmtree(directory)
+            except OSError:
+                pass
+            continue
+
+        dest = root / scope
+        (dest / "findings").mkdir(parents=True, exist_ok=True)
+        (dest / "plans").mkdir(parents=True, exist_ok=True)
+
+        landed = 0
+        for src in files:
+            target = dest / src.relative_to(directory)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                continue
+            try:
+                shutil.move(str(src), str(target))
+            except OSError:
+                continue
+            landed += 1
+
+        # Only remove what is actually empty, and only report what moved. A
+        # directory still holding a file — one whose name collided at the
+        # destination and was deliberately kept — stays on disk for the
+        # operator rather than being deleted on a guess, and is not announced
+        # as migrated, because it was not.
+        try:
+            if not [p for p in directory.rglob("*") if p.is_file()]:
+                shutil.rmtree(directory)
+        except OSError:
+            pass
+        if landed:
+            moved.append((directory, dest))
+    return moved
+
+
+def _stamp() -> str:
+    """A sortable timestamp for an artefact's name, e.g. ``20261010-025510``.
+
+    Filename-safe, local time, and lexicographically ordered, which is what lets
+    a campaign directory's artefacts sort into the order they were written. The
+    same shape `/osint` and `/phish` use for their case directories, so one
+    convention covers every dated thing this tool writes.
+    """
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def write_recon(run: HuntRun, text: str) -> Path | None:
+    """Write recon's report to ``<run.directory>/recon-<stamp>.md``.
+
+    Recon used to live only in ``run.recon`` — the attribute the planner reads
+    and the summary prompt quotes — so it died with the process. A campaign that
+    spent minutes mapping a target left no record of what it saw, and the
+    operator's `/summary-hunt` after a restart said "recon produced nothing"
+    while the recon itself had been the most informative part of the run. This
+    is the record: notes accumulate in the campaign directory, one file per
+    recon, so hunting the same scope twice keeps both.
+
+    Returns None when there is nothing to write, or the path when there is.
+    Best-effort like ``_save``: a campaign must not die because a file could not
+    be written, and the text is in the transcript either way.
+    """
+    if not text.strip():
+        return None
+    body = (
+        "---\n"
+        f"target: {run.target}\n"
+        "wave: 0\n"
+        f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+        "---\n\n"
+        f"# Recon — {run.target}\n\n"
+        f"{text.strip()}\n"
+    )
+    try:
+        run.directory.mkdir(parents=True, exist_ok=True)
+        path = _unique(run.directory / f"recon-{_stamp()}.md")
+        path.write_text(body, encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def write_plan(run: HuntRun, wave: int, roster: team_mod.Roster,
+               raw: str, fell_back: bool) -> Path | None:
+    """Write a wave's plan to ``<run.directory>/plans/wave-<n>-<stamp>.md``.
+
+    The roster the planner returned is the only statement of what a wave was
+    *supposed* to do, and it used to exist only as a UI event — gone the moment
+    the screen moved on. Keeping it is what makes a campaign legible afterwards:
+    why ten agents went where they went, and which briefs came back empty.
+
+    ``raw`` is the planner's own reply, written only when it could not be read
+    as a roster. That is the diagnostic case — the fixed matrix ran instead, and
+    what the model actually said is the only way to tell a malformed object from
+    an empty turn from a prompt that needs rewriting.
+    """
+    lines = [
+        "---",
+        f"target: {run.target}",
+        f"wave: {wave}",
+        f"agents: {len(roster.workers)}",
+        f"fell_back: {'true' if fell_back else 'false'}",
+        f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        "---",
+        "",
+        f"# Wave {wave} — {len(roster.workers)} agents",
+        "",
+        roster.summary or "(no summary given)",
+        "",
+        "## Roster",
+        "",
+    ]
+    for w in roster.workers:
+        owns = ", ".join(w.owns) if w.owns else "(not stated)"
+        lines += [f"### {w.name}", "", f"**Owns:** {owns}", "", w.brief, ""]
+    if fell_back:
+        lines += [
+            "## Planner reply",
+            "",
+            "The planner's reply could not be read as a roster, so the fixed "
+            "vector matrix ran in its place. What it actually said:",
+            "",
+            raw.strip() or "(the planner returned nothing)",
+            "",
+        ]
+    try:
+        plans = run.directory / "plans"
+        plans.mkdir(parents=True, exist_ok=True)
+        path = _unique(plans / f"wave-{wave}-{_stamp()}.md")
+        path.write_text("\n".join(lines), encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def _unique(path: Path) -> Path:
+    """*path*, or the first ``-2``, ``-3`` … variant that is free.
+
+    A second-resolution timestamp is not unique enough on its own: two artefacts
+    of the same kind can land in the same second — two agents reporting the same
+    title, a summary asked for twice — and the later write would silently
+    destroy the earlier one. Every artefact in a campaign directory goes through
+    here, because "one file per thing" is the whole point of keeping them.
+    """
+    if not path.exists():
+        return path
+    base = path.with_suffix("")
+    n = 2
+    while True:
+        candidate = base.with_name(f"{base.name}-{n}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1
 
 
 def write_report(run: HuntRun, f: Finding) -> Path:
@@ -665,12 +958,8 @@ def write_report(run: HuntRun, f: Finding) -> Path:
     evidence. A numeric suffix keeps every finding's report on disk, which is
     the whole point of writing them.
     """
-    base = run.directory / "findings" / f"wave-{f.wave}-{_slug(f.title)}"
-    path = base.with_suffix(".md")
-    n = 2
-    while path.exists():
-        path = base.with_name(f"{base.name}-{n}.md")
-        n += 1
+    base = run.directory / "findings" / f"wave-{f.wave}-{_slug(f.title)}.md"
+    path = _unique(base)
     path.write_text(_finding_markdown(run, f), encoding="utf-8")
     return path
 
@@ -688,7 +977,13 @@ def write_summary(cfg: Config, run: HuntRun, text: str) -> Path:
     outlives the run, the same one `/osint` archives into. The copy is
     best-effort: the report exists in the campaign directory regardless, so a
     failed archive must not raise into the UI.
+
+    Both names carry a timestamp. The campaign directory belongs to the *scope*
+    and is reused, so a fixed ``summary.md`` would have a second campaign on the
+    same host silently overwrite the first one's report — the exact loss this
+    layout exists to stop.
     """
+    stamp = _stamp()
     body = (
         "---\n"
         f"target: {run.target}\n"
@@ -698,11 +993,14 @@ def write_summary(cfg: Config, run: HuntRun, text: str) -> Path:
         "---\n\n"
         f"{text}\n"
     )
-    local = run.directory / "summary.md"
+    local = _unique(run.directory / f"summary-{stamp}.md")
     local.write_text(body, encoding="utf-8")
 
+    # The archive copy takes the same suffix as the local one, so the two files
+    # for one report read as a pair rather than as two different reports.
+    suffix = local.stem[len("summary-"):]
     dest_dir = reports_dir(cfg)
-    dest = dest_dir / f"hunt-{run.directory.name}.md"
+    dest = _unique(dest_dir / f"hunt-{run.directory.name}-{suffix}.md")
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local, dest)
@@ -798,9 +1096,12 @@ async def _run_agent(
     # the operator's AGENTS.md doctrine with every tool armed.
     #
     # can_report arms report_finding for this agent. It is a hunt agent, so it
-    # has a tracker to report into; nothing outside a hunt does.
+    # has a tracker to report into; nothing outside a hunt does. can_hunt_read is
+    # the other way round: this agent must not read the campaign it is part of,
+    # because its brief is deliberately independent of the other agents'.
     agent_cfg = dataclasses.replace(cfg)
-    worker = agent_factory(agent_cfg, tool_hook=tool_hook, can_report=True)
+    worker = agent_factory(agent_cfg, tool_hook=tool_hook, can_report=True,
+                           can_hunt_read=False)
 
     await on_event({"type": "hunt_agent_start", "name": spec.name, "index": index,
                     "brief": spec.brief})
@@ -1058,12 +1359,17 @@ async def run_hunt(
     # can_report, so recon's report_finding calls publish live like a wave
     # agent's. The final-text harvest below still runs: it catches a recon that
     # reported in its closing JSON but never called the tool.
-    recon_agent = agent_factory(dataclasses.replace(cfg), can_report=True)
+    recon_agent = agent_factory(dataclasses.replace(cfg), can_report=True,
+                                can_hunt_read=False)
     run.recon = await _collect_text_live(
         recon_agent, RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT),
         on_event, run=run,
     )
-    await on_event({"type": "hunt_recon_done", "text": run.recon})
+    # Written before the event, so the path can ride on it: the UI has the
+    # campaign directory, but only the module knows what the file is called.
+    recon_path = write_recon(run, run.recon)
+    await on_event({"type": "hunt_recon_done", "text": run.recon,
+                    "saved": str(recon_path) if recon_path else ""})
 
     # A recon run can itself turn up something — an exposed debug endpoint, a
     # stack trace in an error page. Harvest it before the first wave, or the
@@ -1080,8 +1386,12 @@ async def run_hunt(
         await on_event({"type": "hunt_wave_start", "wave": wave, "size": wave_size})
 
         # Plan. Read-only, so the planner cannot start doing the work itself —
-        # the same reason team.py forces its planner to plan mode.
-        planner = agent_factory(dataclasses.replace(cfg, mode="plan"))
+        # the same reason team.py forces its planner to plan mode. It is handed
+        # the recon and the findings in its prompt, so it must not also read the
+        # campaign directory: that would put the raw artefacts in front of it
+        # alongside the digest, which is the same information twice.
+        planner = agent_factory(dataclasses.replace(cfg, mode="plan"),
+                                can_hunt_read=False)
         plan_prompt = WAVE_PLANNER_PROMPT.format(
             target=target,
             wave_size=wave_size,
@@ -1107,6 +1417,10 @@ async def run_hunt(
         fell_back = roster is None or not roster.workers
         if fell_back:
             roster = fallback_roster(wave, wave_size)
+
+        # The plan lands on disk as it is announced, so a campaign's plans
+        # accumulate beside its findings instead of dying with the event stream.
+        write_plan(run, wave, roster, plan_text, fell_back)
 
         await on_event({
             "type": "hunt_plan", "wave": wave,
@@ -1280,14 +1594,44 @@ def load_run(directory: Path) -> HuntRun | None:
             remediation=_section(text, "Remediation"),
         ))
 
-    if not findings:
+    # Recon comes back too, from the newest notes file. Without this a summary
+    # asked for after a restart quoted "recon produced nothing" over a recon
+    # that had mapped the whole target — the recon is usually the most
+    # informative part of the run, and it is now on disk to be read back.
+    recon = ""
+    for path in sorted(directory.glob("recon-*.md"), reverse=True):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # Drop the frontmatter, then the `# Recon — <target>` heading, which the
+        # summary prompt already supplies from the target.
+        body = text.split("\n---", 2)[-1] if text.startswith("---") else text
+        body = body.strip()
+        if body.startswith("# "):
+            body = body.split("\n", 1)[-1]
+        recon = body.strip()
+        break
+
+    # The plans are read back as the wave history, so a recovered summary can
+    # say what each wave was aimed at rather than only what it found.
+    waves = [f"(recovered from {directory})"]
+    for path in sorted((directory / "plans").glob("wave-*.md")):
+        meta = _read_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+        wave = _as_int(meta.get("wave"), 0)
+        agents = _as_int(meta.get("agents"), 0)
+        fell_back = meta.get("fell_back", "false").strip().lower() == "true"
+        waves.append(
+            f"wave {wave}: {agents} agents"
+            + (" (fixed vector fallback)" if fell_back else "")
+        )
+
+    if not findings and not recon:
         return None
 
     return HuntRun(
         target=directory.name,
         directory=directory,
+        recon=recon,
         findings=findings,
-        waves=[f"(recovered from {directory})"],
+        waves=waves,
     )
 
 
