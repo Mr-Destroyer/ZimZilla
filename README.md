@@ -431,7 +431,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
-| `/bug-hunt <target>` | recon, then waves of 10 agents until stopped |
+| `/bug-hunt [--fresh] <target>` | recon (reused if already done), then waves of 10 agents until stopped |
 | `/stop-hunt` | end a running hunt |
 | `/summary-hunt` | write the hunt report |
 | `/findings` | the finding tracker — every bug found, worst first |
@@ -577,6 +577,30 @@ what the first one turned up rather than repeating it.
   ◈ recon    mapping the surface
   ◈ wave 1   10 agents
   ◈ findings 2 critical · 1 high
+```
+
+**A second hunt on the same scope skips the recon.** The case directory belongs
+to the scope and is reused, so a repeat `/bug-hunt` finds the earlier campaign's
+notes sitting there, plans against them, and goes straight to wave 1 instead of
+spending minutes remapping a target that has not moved. The findings earlier
+campaigns confirmed are carried into the tracker — so the planner aims at what
+is still open rather than re-deriving it — and marked as carried, so they are
+never counted as this campaign's haul. The planner is told the map is
+second-hand and to re-check an asset before briefing an agent on it.
+
+```
+/bug-hunt target.com
+
+  ◈ recon    reusing notes from recon-20261001-142210.md (9d old) — no remap
+  ◈ wave 1   10 agents
+```
+
+When the target *has* moved, `--fresh` forces the mapping phase back on. It
+reads on either side of the target:
+
+```
+/bug-hunt --fresh target.com
+/bug-hunt target.com --fresh
 ```
 
 **The wave web.** When a wave launches, the screen becomes a web: ten panes,

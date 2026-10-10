@@ -2764,17 +2764,27 @@ class ZimZillaApp(App):
 
     # ---- /bug-hunt --------------------------------------------------------
     def _cmd_bug_hunt(self, args) -> None:
-        """/bug-hunt <target> — recon, then waves of 10 agents until stopped.
+        """/bug-hunt [--fresh] <target> — recon, then waves of 10 until stopped.
 
         The campaign is a loop, not a turn: recon maps the target, a read-only
         planner writes ten briefs, all ten run at once, their findings feed the
         next planner, and it repeats until /stop-hunt. See zimzilla/hunt.py.
+
+        A target that already has recon on disk reuses it and goes straight to
+        planning — ``--fresh`` forces the mapping phase anyway, for a target
+        that has changed since the notes were written.
         """
-        if not args:
+        # `--fresh` may sit either side of the target, because both read
+        # naturally and an operator who has to remember which is which will get
+        # it wrong. Stripped before the target is joined, so a stray flag never
+        # reaches scope_slug and becomes part of a directory name.
+        fresh = any(a in ("--fresh", "-f") for a in args)
+        rest = [a for a in args if a not in ("--fresh", "-f")]
+        if not rest:
             self._hunt_usage()
             return
 
-        target = " ".join(args).strip()
+        target = " ".join(rest).strip()
 
         if self.busy:
             self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
@@ -2800,9 +2810,26 @@ class ZimZillaApp(App):
             self._sys_line(f"⚠ {e}", warn=True)
             return
 
+        # What recon the campaign will actually run. Probed here rather than
+        # only reported once the campaign starts, because "we already have this
+        # mapped" is the fact that decides whether the operator waits minutes or
+        # gets briefs immediately — and they should know before, not after.
+        reused = None if fresh else hunt_mod.find_recon(directory)
+
         t = Text()
         t.append("  ◈ HUNT      ", style=f"bold {p.accent}")
         t.append(f"{target}\n", style=f"bold {p.primary}")
+        t.append("  ◈ RECON     ", style=f"bold {p.accent}")
+        if fresh:
+            t.append("--fresh — remapping the target\n", style=p.primary)
+        elif reused is not None:
+            t.append(
+                f"reusing notes from {reused.path.name} "
+                f"({reused.age_days}d old) — no remap\n",
+                style=p.primary,
+            )
+        else:
+            t.append("mapping the surface\n", style=p.primary)
         t.append("  ◈ WAVE      ", style=f"bold {p.accent}")
         t.append(f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent\n", style=p.primary)
         t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
@@ -2826,7 +2853,7 @@ class ZimZillaApp(App):
         if pane is not None:
             pane.show_hunt(target, hunt_mod.HUNT_WAVE_SIZE)
 
-        self._run_hunt(target)
+        self._run_hunt(target, fresh=fresh)
 
     def _hunt_usage(self) -> None:
         p = self.palette
@@ -2834,6 +2861,8 @@ class ZimZillaApp(App):
         t.append("  BUG HUNT\n\n", style=f"bold {p.accent}")
         t.append("  /bug-hunt <target>   ", style=f"bold {p.primary}")
         t.append("recon, then waves of 10 agents until you stop it\n", style=p.dim)
+        t.append("  /bug-hunt --fresh <target>  ", style=f"bold {p.primary}")
+        t.append("remap even if recon is already on disk\n", style=p.dim)
         t.append("  /stop-hunt           ", style=f"bold {p.primary}")
         t.append("end the campaign and print what it found\n", style=p.dim)
         t.append("  /summary-hunt        ", style=f"bold {p.primary}")
@@ -3008,12 +3037,15 @@ class ZimZillaApp(App):
             self.query_one("#input", Input).focus()
 
     @work(exclusive=True)
-    async def _run_hunt(self, target: str) -> None:
+    async def _run_hunt(self, target: str, *, fresh: bool = False) -> None:
         """The campaign worker: recon, then waves until /stop-hunt.
 
         Shaped like _run_team — busy flag, an on_event sink, a spinner, and a
         finally that restores idle state — but the loop inside lives in
         zimzilla/hunt.py so it can be tested without a terminal.
+
+        ``fresh`` is forwarded to ``run_hunt``: it forces the mapping phase even
+        when the scope already has recon on disk. See ``_cmd_bug_hunt``.
         """
         p = self.palette
         chat = self.query_one(ChatPane)
@@ -3062,6 +3094,13 @@ class ZimZillaApp(App):
         #: but a separate slot, because the two are never up at the same time and
         #: one being replaced must not take the other's identity with it.
         web: dict = {"screen": None}
+        #: Findings carried in from an earlier campaign, held from the skip
+        #: event until the first wave's web is up. There is no tracker rail
+        #: before a wave starts, so seeding the pane is the only way the
+        #: operator sees them — and a tracker that opened empty over a scope
+        #: with twelve known bugs would read as though nothing had ever been
+        #: found. Consumed once, by the first wave.
+        seed: dict = {"findings": []}
 
         async def on_event(ev: dict) -> None:
             if self._cancelled:
@@ -3116,7 +3155,23 @@ class ZimZillaApp(App):
                         pass
                 return
 
-            if etype == "hunt_recon_start":
+            if etype == "hunt_recon_skipped":
+                # The scope was already mapped by an earlier campaign, so no
+                # recon runs and no recon window goes up. The carried findings
+                # are held for the first wave's web, which is where the tracker
+                # can actually show them — there is no rail up yet.
+                carried = ev.get("findings") or []
+                seed["findings"] = carried
+                days = ev.get("age_days", 0)
+                age = "today" if days == 0 else f"{days}d old"
+                self._sys_line(
+                    f"recon already done — reusing notes ({age}), "
+                    f"planning from {len(carried)} earlier finding(s)",
+                    ok=True)
+                self._sys_line(f"  {ev.get('path', '')}")
+                bar.set_activity("hunt: planning", busy=True)
+
+            elif etype == "hunt_recon_start":
                 self._sys_line("recon — mapping the target…")
                 bar.set_activity("hunt: recon", busy=True)
                 # can_focus is False, so this screen never takes the keyboard
@@ -3164,6 +3219,20 @@ class ZimZillaApp(App):
                 # roster lands — pushing on the plan instead would leave the
                 # first agents' starts arriving at a screen that is not there.
                 self._open_wave(web, target, counter["wave"], counter["total"])
+                # Seed the tracker with what earlier campaigns confirmed, so the
+                # rail opens showing the whole picture rather than filling in
+                # only as this campaign reports. Consumed once — later waves
+                # already have their own tracker state.
+                if seed["findings"]:
+                    screen = web["screen"]
+                    if screen is not None:
+                        try:
+                            for f in seed["findings"]:
+                                screen.note({"type": "hunt_finding",
+                                             "finding": f})
+                        except Exception:
+                            pass
+                    seed["findings"] = []
 
             elif etype == "hunt_plan":
                 if ev.get("fell_back"):
@@ -3311,6 +3380,7 @@ class ZimZillaApp(App):
                 stop=self._hunt_stop,
                 summary_flag=lambda: self._hunt_summary_queued,
                 run=self._hunt_run,
+                fresh=fresh,
             )
             # A summary asked for but never delivered — the hunt was stopped
             # between the request and a wave boundary. Offer it now rather than

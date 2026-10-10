@@ -199,7 +199,7 @@ TARGET: {target}
 WHAT IS KNOWN
 -------------
 {recon}
-
+{recon_note}
 WHAT HAS ALREADY BEEN FOUND
 ---------------------------
 {findings}
@@ -242,6 +242,20 @@ Reply with ONE JSON object and nothing else:
                "owns": ["the asset or vector it owns"]}}]}}
 
 {contract}
+"""
+
+#: Inserted into the planner prompt when the recon above was inherited from an
+#: earlier campaign rather than run now. The planner has read-only tools and is
+#: told to check a hypothesis before briefing an agent on it, so the honest move
+#: is to say the map may be out of date and let it re-verify what it is about to
+#: build on — a target that has moved under a stale map sends a whole wave at
+#: assets that no longer exist.
+RECON_INHERITED_NOTE = """\
+
+NOTE: the mapping above was NOT taken now. It is the recon recorded for this
+scope by an earlier campaign, {age_days} day(s) ago. Treat it as a starting
+point, not as ground truth: before you brief an agent on an asset, check that
+the asset is still there and still answers. The surface may have changed.
 """
 
 #: Appended to the planner prompt for one retry, after a reply that could not be
@@ -454,6 +468,13 @@ class Finding:
     summary: str = ""
     evidence: str = ""
     remediation: str = ""
+    #: True for a finding an earlier campaign confirmed and this one loaded to
+    #: seed its tracker. Carried findings are shown and fed to the planner, but
+    #: they are not this campaign's work: the closing counts exclude them and
+    #: the digest marks them. Kept as a field rather than inferred from `wave`,
+    #: because a carried finding keeps the wave number it was found in, which
+    #: collides with this campaign's own early waves.
+    carried: bool = False
 
     @property
     def saved(self) -> bool:
@@ -473,6 +494,21 @@ class HuntRun:
     findings: list[Finding] = field(default_factory=list)
     waves: list[str] = field(default_factory=list)
     started: float = field(default_factory=time.time)
+    #: Where ``recon`` came from when a repeat hunt reused notes already on
+    #: disk, and how old they were in seconds. Both None when this campaign ran
+    #: its own recon — which is what lets the UI tell the two apart and say so
+    #: rather than presenting an inherited map as a fresh one.
+    recon_source: Path | None = None
+    recon_age: float | None = None
+    #: How many findings were already on disk when this campaign opened. The
+    #: tracker is seeded with them, so the campaign's own tally is
+    #: ``len(findings) - recon_carried`` and its counts stay honest.
+    recon_carried: int = 0
+
+    @property
+    def reused_recon(self) -> bool:
+        """Whether this campaign inherited its recon rather than mapping."""
+        return self.recon_source is not None
 
     def digest(self) -> str:
         """Every finding so far, as the next planner sees it.
@@ -480,13 +516,21 @@ class HuntRun:
         Deliberately terse: the planner needs to know what is closed so it can
         aim elsewhere, not to re-read the evidence. The full text lives in the
         report files.
+
+        Findings carried in from an earlier campaign are marked as such, so a
+        planner does not read a bug confirmed weeks ago as one this campaign
+        just closed — the distinction decides whether a brief that re-tests it
+        is redundant or overdue.
         """
         if not self.findings:
             return "(nothing confirmed yet)"
         lines = []
         for f in self.ranked():
             asset = f" @ {f.asset}" if f.asset else ""
-            lines.append(f"- [{f.severity}] {f.title}{asset} — {f.summary}".rstrip())
+            line = f"- [{f.severity}] {f.title}{asset} — {f.summary}".rstrip()
+            if f.carried:
+                line += "  (carried from an earlier campaign)"
+            lines.append(line)
         return "\n".join(lines)
 
     def wave_digest(self) -> str:
@@ -1413,6 +1457,7 @@ async def run_hunt(
     concurrency: int = HUNT_CONCURRENCY,
     summary_flag: Callable[[], bool] | None = None,
     run: HuntRun | None = None,
+    fresh: bool = False,
 ) -> HuntRun:
     """Recon, then waves until stopped. Returns the run for the closing report.
 
@@ -1428,39 +1473,92 @@ async def run_hunt(
     one it has already published, so ``/stop-hunt`` and ``/summary-hunt`` have
     something to act on *while the campaign is running* — this function returns
     only when the campaign is over, which is far too late to be told to stop.
+
+    ``fresh`` forces the recon phase even when the scope already has notes on
+    disk. Without it a repeat hunt reuses them and goes straight to planning —
+    see ``find_recon``. It is the operator's escape hatch for a target that has
+    actually changed since the map was drawn.
     """
     if run is None:
         run = HuntRun(target=target, directory=case_dir(cfg, target))
     if stop is not None:
         run.stop = stop
 
-    # ---- recon. Runs in the session's own mode, not read-only: mapping a live
-    # target needs the shell and the network tools, and a recon phase that
-    # cannot scan is not recon. The prompt is what bounds it to reconnaissance,
-    # not the mode.
-    await on_event({"type": "hunt_recon_start", "target": target,
-                    "directory": str(run.directory)})
-    # can_report, so recon's report_finding calls publish live like a wave
-    # agent's. The final-text harvest below still runs: it catches a recon that
-    # reported in its closing JSON but never called the tool.
-    recon_agent = agent_factory(dataclasses.replace(cfg), can_report=True,
-                                can_hunt_read=False)
-    run.recon = await _collect_text_live(
-        recon_agent, RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT),
-        on_event, run=run,
-    )
-    # Written before the event, so the path can ride on it: the UI has the
-    # campaign directory, but only the module knows what the file is called.
-    recon_path = write_recon(run, run.recon)
-    await on_event({"type": "hunt_recon_done", "text": run.recon,
-                    "saved": str(recon_path) if recon_path else ""})
+    # ---- recon, or the recon we already have.
+    #
+    # The campaign directory is the scope's and is reused, so a second
+    # `/bug-hunt` on the same target finds the first run's notes sitting there.
+    # Remapping a target that has not moved costs minutes of wall-clock and a
+    # wave's worth of tokens before the first brief is written, so a repeat run
+    # plans against the notes on disk instead. `fresh` is the operator's
+    # override — `/bug-hunt --fresh` — for when the target *has* moved.
+    note = None if fresh else find_recon(run.directory)
+    if note is not None:
+        run.recon = note.text
+        run.recon_source = note.path
+        run.recon_age = note.age
+    else:
+        # Runs in the session's own mode, not read-only: mapping a live target
+        # needs the shell and the network tools, and a recon phase that cannot
+        # scan is not recon. The prompt is what bounds it to reconnaissance,
+        # not the mode.
+        await on_event({"type": "hunt_recon_start", "target": target,
+                        "directory": str(run.directory)})
+        # can_report, so recon's report_finding calls publish live like a wave
+        # agent's. The final-text harvest below still runs: it catches a recon
+        # that reported in its closing JSON but never called the tool.
+        recon_agent = agent_factory(dataclasses.replace(cfg), can_report=True,
+                                    can_hunt_read=False)
+        run.recon = await _collect_text_live(
+            recon_agent,
+            RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT),
+            on_event, run=run,
+        )
+        # Written before the event, so the path can ride on it: the UI has the
+        # campaign directory, but only the module knows what the file is called.
+        recon_path = write_recon(run, run.recon)
+        await on_event({"type": "hunt_recon_done", "text": run.recon,
+                        "saved": str(recon_path) if recon_path else ""})
 
-    # A recon run can itself turn up something — an exposed debug endpoint, a
-    # stack trace in an error page. Harvest it before the first wave, or the
-    # planner starts out blind to what recon already knew. Anything recon
-    # already published through the tool is deduplicated away here.
-    for f in parse_findings(run.recon, wave=0, agent="recon"):
-        await _report_live(run, f, on_event)
+        # A recon run can itself turn up something — an exposed debug endpoint,
+        # a stack trace in an error page. Harvest it before the first wave, or
+        # the planner starts out blind to what recon already knew. Anything
+        # recon already published through the tool is deduplicated away here.
+        for f in parse_findings(run.recon, wave=0, agent="recon"):
+            await _report_live(run, f, on_event)
+
+    # ---- seed the tracker from what earlier campaigns already confirmed.
+    #
+    # Whatever happened above — reused the map, or drew a fresh one — the bugs
+    # this scope has already had are still open until someone closes them, and
+    # the planner should aim at what is left rather than re-deriving it. The
+    # seeding runs *after* recon so a bug this campaign re-confirmed is its own
+    # (the dedupe keeps the first, and recon's came first). `--fresh` seeds too:
+    # it carries no *map* — that is what fresh means — but the bugs earlier
+    # campaigns confirmed are still open, and still not this campaign's. The
+    # `carried` flag is what keeps every count honest, since the tracker is now
+    # taller than what this run actually did.
+    prior = load_run(run.directory)
+    if prior is not None:
+        for f in prior.findings:
+            f.carried = True
+            run.add_finding(f)
+    run.recon_carried = sum(1 for f in run.findings if f.carried)
+
+    # The UI is told the map was inherited — and how old it is — before the
+    # first brief is written. There is no recon window to open, so without this
+    # event the operator would see nothing at all between the banner and wave 1.
+    if note is not None:
+        await on_event({
+            "type": "hunt_recon_skipped", "target": target,
+            "path": str(note.path),
+            "age_days": note.age_days,
+            "carried": run.recon_carried,
+            # The carried findings themselves, so the tracker can open with them
+            # on the rail rather than filling in only as this campaign reports.
+            # They are already in the run, so they are not announced as new.
+            "findings": [_finding_dict(f) for f in run.ranked()],
+        })
 
     # ---- waves, until the operator stops it.
     while not run.stop.is_set():
@@ -1480,6 +1578,11 @@ async def run_hunt(
             target=target,
             wave_size=wave_size,
             recon=run.recon or "(recon produced nothing)",
+            recon_note=(
+                RECON_INHERITED_NOTE.format(
+                    age_days=int((run.recon_age or 0) // 86400))
+                if run.reused_recon else ""
+            ),
             findings=run.digest(),
             waves=run.wave_digest(),
             contract=FINDING_CONTRACT,
@@ -1605,10 +1708,17 @@ async def run_hunt(
             await on_event({"type": "hunt_summary_done", "path": str(path),
                             "text": text, "wave": wave})
 
+    # The tracker holds carried findings too, so the closing counts are split:
+    # `findings`/`saved` are what *this* campaign did, and `carried` is what it
+    # inherited. Reporting the tracker's total as the campaign's haul would
+    # claim bugs this run never found. Keyed off the flag rather than a count,
+    # so it stays right however dedupe interleaved the two.
+    own = [f for f in run.findings if not f.carried]
     await on_event({
         "type": "hunt_end", "wave": run.wave,
-        "findings": len(run.findings),
-        "saved": sum(1 for f in run.findings if f.saved),
+        "findings": len(own),
+        "saved": sum(1 for f in own if f.saved),
+        "carried": len(run.findings) - len(own),
         "directory": str(run.directory),
     })
     return run
@@ -1660,6 +1770,79 @@ def summary_prompt(run: HuntRun) -> str:
     )
 
 
+@dataclass
+class ReconNote:
+    """Recon already on disk for a scope, as a repeat hunt finds it.
+
+    ``text`` is the recon body with its frontmatter and heading stripped, ready
+    to hand straight to a planner or a summary — the same reduction ``load_run``
+    makes. ``age`` is seconds since the file was written, which is what the UI
+    quotes so the operator can judge whether the map is still worth trusting.
+    """
+
+    text: str
+    path: Path
+    age: float
+
+    @property
+    def age_days(self) -> int:
+        """Whole days since the recon was written, for the operator's notice."""
+        return int(self.age // 86400)
+
+
+def _recon_body(text: str) -> str:
+    """Strip a recon file's frontmatter and heading, leaving the notes.
+
+    Shared by ``find_recon`` and ``load_run`` so a reused recon and a recovered
+    summary read back identically — they are the same file read for two reasons,
+    and a second parser would drift from the first.
+    """
+    body = text.split("\n---", 2)[-1] if text.startswith("---") else text
+    body = body.strip()
+    # A heading with nothing under it is not a map — strip the heading and the
+    # empty body is the answer. The ``in`` guard matters: splitting a lone
+    # "# Recon" on its newline would hand back the heading itself, and a
+    # caller would take it for content.
+    if body.startswith("# ") and "\n" in body:
+        body = body.split("\n", 1)[1]
+    elif body.startswith("# "):
+        body = ""
+    return body.strip()
+
+
+def find_recon(directory: Path) -> ReconNote | None:
+    """The newest recon already recorded for a scope, or None.
+
+    This is what makes a repeat `/bug-hunt` skip the recon phase: the campaign
+    directory is the scope's and is reused, so a second run finds the first
+    run's notes sitting there and can plan a wave against them instead of
+    spending minutes remapping a target that has not moved.
+
+    Newest by filename, not mtime — ``recon-<stamp>.md`` sorts by the timestamp
+    it carries, and the same convention already orders a campaign's artefacts.
+    Returns None when the directory holds no recon, or holds only an empty one;
+    an empty recon is not something to plan against, and re-running is the
+    honest answer.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob("recon-*.md"), reverse=True):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = _recon_body(text)
+        if not body:
+            continue
+        try:
+            age = max(0.0, time.time() - path.stat().st_mtime)
+        except OSError:
+            age = 0.0
+        return ReconNote(text=body, path=path, age=age)
+    return None
+
+
 def load_run(directory: Path) -> HuntRun | None:
     """Rebuild a run from an archived campaign directory.
 
@@ -1692,16 +1875,9 @@ def load_run(directory: Path) -> HuntRun | None:
     # that had mapped the whole target — the recon is usually the most
     # informative part of the run, and it is now on disk to be read back.
     recon = ""
-    for path in sorted(directory.glob("recon-*.md"), reverse=True):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        # Drop the frontmatter, then the `# Recon — <target>` heading, which the
-        # summary prompt already supplies from the target.
-        body = text.split("\n---", 2)[-1] if text.startswith("---") else text
-        body = body.strip()
-        if body.startswith("# "):
-            body = body.split("\n", 1)[-1]
-        recon = body.strip()
-        break
+    note = find_recon(directory)
+    if note is not None:
+        recon = note.text
 
     # The plans are read back as the wave history, so a recovered summary can
     # say what each wave was aimed at rather than only what it found.

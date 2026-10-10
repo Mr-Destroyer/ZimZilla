@@ -52,6 +52,21 @@ def _cfg(workdir: Path, **kw) -> Config:
                            base_url="http://localhost:4001", **kw)
 
 
+def _state(wd: Path, name: str) -> Path:
+    """A private ``state_dir`` for one test, under the shared workdir.
+
+    Every test used to share ``wd/"state"``, which was harmless while a campaign
+    was purely in-memory — but the store is persistent by design now: a repeat
+    ``/bug-hunt`` on a scope reuses the recon and findings already on disk. With
+    one shared store, the second test to hunt ``x.test`` inherited the first's
+    recon and skipped its own, so tests were measuring each other.
+
+    One directory per test restores the isolation the tests were written
+    assuming, and keeps it however much state a campaign comes to keep.
+    """
+    return wd / "state" / name
+
+
 class _Blk:
     def __init__(self, **k):
         self.__dict__.update(k)
@@ -169,7 +184,7 @@ def test_planner_fallback_path() -> None:
 
 def test_reports(wd: Path) -> None:
     cfg = _cfg(wd)
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_reports")
     run = hunt_mod.HuntRun(target="example.test", wave=2,
                            directory=hunt_mod.case_dir(cfg, "example.test"))
 
@@ -389,7 +404,7 @@ async def test_hunt_loop(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_loop")
 
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -472,7 +487,7 @@ def test_scope_naming(wd: Path) -> None:
     # One directory per scope, reused: a second campaign against the same host
     # adds to the first's history rather than starting a sibling.
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_scope_naming")
     first = hunt_mod.case_dir(cfg, "https://mail.lerevecraze.com/login")
     second = hunt_mod.case_dir(cfg, "mail.lerevecraze.com")
     check("scope: the same host reuses one directory", first == second, str(first))
@@ -504,7 +519,7 @@ async def test_campaign_notes(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_campaign_notes")
 
     run = await hunt_mod.run_hunt(
         cfg, "notes.test", on_event=_recorder(events, stop),
@@ -582,6 +597,185 @@ async def test_campaign_notes(wd: Path) -> None:
           only is not None and only.findings == [])
 
 
+async def test_repeat_hunt_reuses_recon(wd: Path) -> None:
+    """A second `/bug-hunt` on a scope plans against the first run's recon.
+
+    Remapping a target that has not moved costs minutes of wall-clock and a
+    wave's worth of tokens before the first brief is written. The campaign
+    directory is the scope's and is reused, so a repeat run finds the earlier
+    notes sitting there — and must skip the recon phase, carry the earlier
+    findings into the tracker, and tell the planner its map is second-hand.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "auth", "brief": "test auth", "owns": ["auth"]}]}')
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = _state(wd, "test_repeat_hunt_reuses_recon")
+
+    # ---- run 1: a normal campaign, which leaves recon and a finding on disk.
+    first = _hunt_factory({
+        "rosters": [roster], "planner_calls": 0, "prompts": [],
+        "recon_final": "nginx on 443, a login form at /login",
+        "final": _finding_json("username enumeration", asset="dev.x.test"),
+    })
+    stop = asyncio.Event()
+    run1 = await hunt_mod.run_hunt(
+        cfg, "repeat.test", on_event=_recorder([], stop),
+        agent_factory=first, stop=stop, wave_size=1, concurrency=1,
+    )
+    check("repeat: the first campaign really mapped the target",
+          "nginx" in run1.recon, run1.recon[:60])
+    check("repeat: the first campaign left a finding on disk",
+          len(run1.findings) == 1, str(len(run1.findings)))
+
+    # ---- run 2: the same scope, no --fresh. Recon must not run.
+    events: list[dict] = []
+    second_script = {
+        "rosters": [roster], "planner_calls": 0, "prompts": [],
+        # A distinct recon text, so if recon *did* run this is what the run
+        # would carry — the assertion below can then tell reuse from a remap.
+        "recon_final": "REMAP HAPPENED",
+        "final": _finding_json("xss in search", asset="dev.x.test"),
+    }
+    second = _hunt_factory(second_script)
+    stop2 = asyncio.Event()
+    run2 = await hunt_mod.run_hunt(
+        cfg, "repeat.test", on_event=_recorder(events, stop2),
+        agent_factory=second, stop=stop2, wave_size=1, concurrency=1,
+    )
+
+    kinds = [e["type"] for e in events]
+    check("repeat: recon is skipped, not re-run",
+          "hunt_recon_skipped" in kinds and "hunt_recon_start" not in kinds,
+          str(kinds[:4]))
+    # The planner is a zim-mode agent too, so the count is of *non-planner*
+    # agents: without recon that is the one worker and nothing else.
+    check("repeat: no recon agent was built — one worker, no mapper",
+          sum(1 for a in second.built if a.cfg.mode != "plan") == 1,
+          str([a.cfg.mode for a in second.built]))
+    check("repeat: the inherited recon is the earlier one, not a remap",
+          "nginx" in run2.recon and "REMAP HAPPENED" not in run2.recon,
+          run2.recon[:60])
+    check("repeat: the run records where the recon came from",
+          run2.reused_recon is True and run2.recon_source is not None
+          and run2.recon_source.name.startswith("recon-"),
+          str(run2.recon_source))
+
+    # ---- the earlier finding is carried into this campaign's tracker, and
+    # marked so it cannot be read as this campaign's haul.
+    carried = [f for f in run2.findings if f.carried]
+    check("repeat: the earlier finding is carried into the tracker",
+          len(carried) == 1 and carried[0].title == "username enumeration",
+          str([f.title for f in carried]))
+    check("repeat: the carried count is recorded on the run",
+          run2.recon_carried == 1, str(run2.recon_carried))
+    check("repeat: the skip event carries the carried findings for the rail",
+          any(e["type"] == "hunt_recon_skipped" and e.get("carried") == 1
+              and any("username enumeration" in f["title"]
+                      for f in e.get("findings", []))
+              for e in events))
+    check("repeat: the skip event names the notes file it reused",
+          any(e["type"] == "hunt_recon_skipped"
+              and e.get("path", "").endswith(".md") for e in events))
+
+    # ---- the closing count splits carried from own, so the campaign does not
+    # claim bugs it never found.
+    end = [e for e in events if e["type"] == "hunt_end"]
+    check("repeat: the closing count reports only this campaign's findings",
+          end and end[0]["findings"] == 1 and end[0]["carried"] == 1,
+          str(end[0] if end else None))
+
+    # ---- the planner is told the map is second-hand. `script["prompts"]`
+    # collects every planner prompt in order, so the assertion is against what
+    # the model was actually handed rather than a prompt rebuilt here.
+    plan_prompt = second_script["prompts"][-1]
+    check("repeat: the planner is told the recon was not taken now",
+          "was NOT taken now" in plan_prompt, plan_prompt[-400:])
+    check("repeat: the planner sees the carried finding as carried",
+          "carried from an earlier campaign" in plan_prompt,
+          plan_prompt[:400])
+
+    # ---- and --fresh forces the mapping phase back on.
+    fresh_events: list[dict] = []
+    third = _hunt_factory({
+        "rosters": [roster], "planner_calls": 0, "prompts": [],
+        "recon_final": "REMAP HAPPENED", "final": _finding_json("y"),
+    })
+    stop3 = asyncio.Event()
+    run3 = await hunt_mod.run_hunt(
+        cfg, "repeat.test", on_event=_recorder(fresh_events, stop3),
+        agent_factory=third, stop=stop3, wave_size=1, concurrency=1,
+        fresh=True,
+    )
+    kinds3 = [e["type"] for e in fresh_events]
+    check("repeat: --fresh remaps rather than reusing",
+          "hunt_recon_start" in kinds3 and "hunt_recon_skipped" not in kinds3,
+          str(kinds3[:4]))
+    check("repeat: --fresh builds a recon agent again",
+          sum(1 for a in third.built if a.cfg.mode != "plan") == 2,
+          str([a.cfg.mode for a in third.built]))
+    check("repeat: --fresh takes the new recon",
+          "REMAP HAPPENED" in run3.recon, run3.recon[:60])
+    # --fresh draws its own map — that is what fresh means — but the bugs
+    # earlier campaigns confirmed are still open, so the tracker is seeded with
+    # them and they stay marked carried: this campaign found "y", not those.
+    check("repeat: --fresh reuses no map",
+          run3.recon_source is None and run3.reused_recon is False,
+          str(run3.recon_source))
+    check("repeat: a fresh remap still seeds the tracker from disk",
+          any(f.title == "username enumeration" for f in run3.findings),
+          str([f.title for f in run3.findings]))
+    check("repeat: the seeded findings stay marked carried",
+          run3.recon_carried == 2
+          and all(f.carried for f in run3.findings
+                  if f.title == "username enumeration"),
+          str(run3.recon_carried))
+
+
+def test_find_recon_reads_the_newest(wd: Path) -> None:
+    """``find_recon`` picks the newest notes, and ignores an empty one.
+
+    Newest by filename, not mtime: ``recon-<stamp>.md`` sorts by the timestamp
+    it carries. An empty recon is not something to plan against — re-running is
+    the honest answer — so it must not be picked up as if it were a map.
+    """
+    d = wd / "recon-probe"
+    d.mkdir(parents=True, exist_ok=True)
+
+    check("find: a directory with no recon yields None",
+          hunt_mod.find_recon(d) is None)
+    check("find: a directory that does not exist yields None",
+          hunt_mod.find_recon(wd / "nope") is None)
+
+    older = d / "recon-20260101-000000.md"
+    older.write_text(
+        "---\ntarget: x.test\nwave: 0\n---\n\n# Recon\n\nfirst map\n")
+    newer = d / "recon-20260202-000000.md"
+    newer.write_text(
+        "---\ntarget: x.test\nwave: 0\n---\n\n# Recon\n\nsecond map\n")
+
+    note = hunt_mod.find_recon(d)
+    check("find: the newest recon is chosen",
+          note is not None and "second map" in note.text,
+          note.text if note else "")
+    check("find: the frontmatter is stripped", note is not None
+          and not note.text.startswith("---") and "target:" not in note.text)
+    check("find: the heading is stripped", note is not None
+          and not note.text.startswith("#"), note.text if note else "")
+    check("find: the path is carried for the operator's notice",
+          note is not None and note.path == newer)
+    check("find: the age is a non-negative number of seconds",
+          note is not None and note.age >= 0.0)
+
+    # An empty newest recon falls through to the one with content, rather than
+    # being returned as an empty map.
+    (d / "recon-20260303-000000.md").write_text(
+        "---\ntarget: x.test\nwave: 0\n---\n\n# Recon\n\n")
+    note = hunt_mod.find_recon(d)
+    check("find: an empty newest recon falls through to the last real one",
+          note is not None and "second map" in note.text,
+          note.text if note else "")
+
+
 async def test_plan_records_a_fallback(wd: Path) -> None:
     """A planner whose reply could not be read keeps what it actually said.
 
@@ -601,7 +795,7 @@ async def test_plan_records_a_fallback(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_plan_records_a_fallback")
 
     run = await hunt_mod.run_hunt(
         cfg, "fallback.test", on_event=_recorder(events, stop),
@@ -641,7 +835,7 @@ def test_migrate_hunts(wd: Path) -> None:
     what was wrong, since a prose target became a name.
     """
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_migrate_hunts")
     root = cfg.state_dir / "hunts"
     root.mkdir(parents=True, exist_ok=True)
 
@@ -741,7 +935,7 @@ async def test_hunt_replans_from_findings(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_replans_from_findings")
 
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop, after=2),
@@ -778,7 +972,7 @@ async def test_hunt_fallback_wave(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_fallback_wave")
 
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -821,7 +1015,7 @@ async def test_brief_context(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_brief_context")
 
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -878,7 +1072,7 @@ async def test_planner_retry(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_planner_retry")
 
     await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -911,7 +1105,7 @@ async def test_planner_fallback_shows_raw(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_planner_fallback_shows_raw")
 
     await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -943,7 +1137,7 @@ async def test_hunt_result_event_carries_args(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_result_event_carries_args")
 
     await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -1008,7 +1202,7 @@ async def test_hunt_stops_midwave(wd: Path) -> None:
         stop.set()
 
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_stops_midwave")
     task = asyncio.create_task(stopper())
 
     import time as _time
@@ -1053,7 +1247,7 @@ async def test_hunt_summary_flag(wd: Path) -> None:
             stop.set()
 
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_summary_flag")
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=on_event, agent_factory=factory,
         stop=stop, wave_size=1, concurrency=1,
@@ -1229,7 +1423,7 @@ async def test_boot_migrates_hunts(wd: Path) -> None:
     first lookup after an upgrade reads a half-migrated store.
     """
     cfg = _cfg(wd, boot_rain=False)
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_boot_migrates_hunts")
     _legacy_campaign(cfg.state_dir / "hunts", "legacy.test-20261009-010101",
                      target="legacy.test", finding="a.md")
 
@@ -1270,7 +1464,7 @@ async def test_campaign_reaches_the_main_agent(wd: Path) -> None:
     the model choosing to call anything.
     """
     cfg = _cfg(wd, boot_rain=False)
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_campaign_reaches_the_main_agent")
     app = ZimZillaApp(cfg)
 
     async with app.run_test(size=(110, 40)) as pilot:
@@ -1371,7 +1565,7 @@ async def test_recon_reports_live(wd: Path) -> None:
 
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_recon_reports_live")
 
     await hunt_mod.run_hunt(cfg, "x.test", on_event=on_event,
                             agent_factory=factory, stop=stop,
@@ -2002,7 +2196,7 @@ async def test_contract_in_worker_prompts(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_contract_in_worker_prompts")
 
     await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -2107,7 +2301,7 @@ def test_hunt_findings_tool(wd: Path) -> None:
     that already held a high-severity finding. This tool is that path.
     """
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_hunt_findings_tool")
 
     # Nothing has run yet: the tool must say so, not invent a campaign. On its
     # own pristine store, since the tests above share this workdir and have
@@ -2291,7 +2485,7 @@ async def test_live_reporting_mid_wave(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_live_reporting_mid_wave")
 
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -2360,7 +2554,7 @@ async def test_live_reporting_is_per_agent(wd: Path) -> None:
     events: list[dict] = []
     stop = asyncio.Event()
     cfg = _cfg(wd, mode="zim")
-    cfg.state_dir = wd / "state"
+    cfg.state_dir = _state(wd, "test_live_reporting_is_per_agent")
 
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop),
@@ -2541,6 +2735,125 @@ async def test_findings_command(wd: Path) -> None:
               str(panel._body())[:120] if panel else "")
         check("findings: an archived panel is not marked live",
               panel is not None and panel.live is False)
+
+
+async def test_bug_hunt_reuses_recon_from_the_ui(wd: Path) -> None:
+    """`/bug-hunt` on a mapped scope says so up front and skips the remap.
+
+    The operator should learn that the campaign is reusing notes — and how old
+    they are — *before* the first brief is written, not by noticing the recon
+    window never appeared. `--fresh` is the escape hatch and must be readable
+    from either side of the target.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = wd / "bug-hunt-reuse-state"
+
+    # Recon already on disk for this scope, as a prior campaign would leave it.
+    directory = hunt_mod.case_dir(cfg, "mapped.test")
+    (directory / "findings").mkdir(parents=True, exist_ok=True)
+    hunt_mod.write_recon(
+        hunt_mod.HuntRun(target="mapped.test", directory=directory),
+        "nginx on 443, a login form at /login")
+
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "p", "brief": "b", "owns": ["p"]}]}')
+
+    def build_app() -> ZimZillaApp:
+        """An app whose campaign stops itself after its first wave.
+
+        A campaign is a loop that runs until stopped, so a test that just
+        starts one leaves it running — and a free-running hunt writes findings
+        and plans into the shared scope directory, which the *next* app in this
+        test then reads as prior state. Stopping from inside the event stream is
+        the same idiom the transcript tests use: `/stop-hunt` sets the flag and
+        the loop notices at the next wave boundary.
+        """
+        a = ZimZillaApp(_cfg(wd, boot_rain=False))
+        a.cfg.state_dir = cfg.state_dir
+        real = _hunt_factory(
+            {"rosters": [roster], "planner_calls": 0, "prompts": [],
+             "recon_final": "REMAP HAPPENED", "final": "none"})
+
+        def factory(c, **kw):
+            agent = real(c, **kw)
+            stream = agent._stream_once
+            calls = {"n": 0}
+
+            async def stopping_stream():
+                calls["n"] += 1
+                if calls["n"] == 2 and a._hunt_run is not None:
+                    a._handle_command("/stop-hunt")
+                async for ev in stream():
+                    yield ev
+
+            agent._stream_once = stopping_stream
+            return agent
+
+        factory.built = real.built
+        a._team_agent_factory = factory
+        return a
+
+    app = build_app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        # Typed, not called directly: the flag has to survive argument parsing,
+        # and `--fresh` may sit either side of the target.
+        app._handle_command("/bug-hunt mapped.test")
+        await pilot.pause()
+        await pilot.pause()
+
+        text = _transcript_text(app)
+        check("ui reuse: the notice says the notes are being reused",
+              "reusing notes" in text, text[-260:])
+        check("ui reuse: the notice is shown before the campaign's recon runs",
+              "mapping the surface" not in text, text[-260:])
+        check("ui reuse: no recon window was pushed",
+              not isinstance(app.screen, ReconOverlay), str(app.screen))
+
+        for _ in range(80):
+            await pilot.pause()
+            if not app.busy:
+                break
+        await pilot.pause()
+        check("ui reuse: the campaign stopped cleanly", app.busy is False)
+
+    # ---- --fresh, read from the *left* of the target.
+    app2 = build_app()
+    async with app2.run_test(size=(120, 40)) as pilot:
+        app2.pop_screen()
+        await pilot.pause()
+        app2._handle_command("/bug-hunt --fresh mapped.test")
+        await pilot.pause()
+        text = _transcript_text(app2)
+        check("ui reuse: --fresh before the target forces a remap",
+              "remapping the target" in text and "reusing notes" not in text,
+              text[-260:])
+        for _ in range(80):
+            await pilot.pause()
+            if not app2.busy:
+                break
+        await pilot.pause()
+
+    # ---- and from the right, because both read naturally.
+    app3 = build_app()
+    async with app3.run_test(size=(120, 40)) as pilot:
+        app3.pop_screen()
+        await pilot.pause()
+        app3._handle_command("/bug-hunt mapped.test --fresh")
+        await pilot.pause()
+        text = _transcript_text(app3)
+        check("ui reuse: --fresh after the target forces a remap too",
+              "remapping the target" in text and "reusing notes" not in text,
+              text[-260:])
+        check("ui reuse: the flag does not leak into the scope directory",
+              "fresh" not in directory.name, directory.name)
+        for _ in range(80):
+            await pilot.pause()
+            if not app3.busy:
+                break
+        await pilot.pause()
 
 
 # ---------------------------------------------------------------------------
@@ -3063,6 +3376,8 @@ async def main() -> int:
         test_migrate_hunts(wd)
         test_hunt_findings_tool(wd)
         await test_campaign_notes(wd)
+        await test_repeat_hunt_reuses_recon(wd)
+        test_find_recon_reads_the_newest(wd)
         await test_plan_records_a_fallback(wd)
         await test_hunt_loop(wd)
         await test_contract_in_worker_prompts(wd)
@@ -3091,6 +3406,7 @@ async def main() -> int:
         await test_loop_rail_shows_hack_during_hunt(wd)
         await test_busy_gate(wd)
         await test_findings_command(wd)
+        await test_bug_hunt_reuses_recon_from_the_ui(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
