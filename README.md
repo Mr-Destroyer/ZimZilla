@@ -432,6 +432,8 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
 | `/bug-hunt [--fresh] [--wave N] <target>` | recon (reused if already done), then **one** wave of 10 agents |
+| `/ad [--fresh] [--wave N] [--lockout N] [--arm] <domain> --ack <domain>` | Active Directory campaign — gated and interlocked |
+| `/ad tools` | reprint the AD tool probe |
 | `/stop-hunt` | end a running hunt |
 | `/summary-hunt` | the hunt report — what each wave did |
 | `/report-bug-hunt` | evidence-only report — every wave, raw evidence, no remediation |
@@ -684,6 +686,115 @@ directory. It makes no model call: the document is exactly what was recorded.
 
 ---
 
+## Active Directory
+
+`/ad` runs the same campaign engine as `/bug-hunt`, aimed at a domain. Recon
+maps the DCs and the functional level, then it runs **one** wave of ten agents
+against the unauthenticated surface — the part that is genuinely independent —
+and stops, so you read what it found and decide the next wave yourself. Wave 2
+is planned against what wave 1 obtained: a foothold, a hash, a writable
+attribute. That is the difference from a web hunt, where every brief stands
+alone.
+
+AD is also the one command here that can **lock a client's workforce out**. A
+bug in `/bug-hunt` fails to find a bug. A bug in `/ad` locks every account in an
+OU at 09:00 on a Monday. So `/ad` is built differently in two places, and both
+are enforced in code rather than asked for in a prompt.
+
+**It is gated, and the gate is the domain itself.** `/ad` refuses to start
+unless you type the domain back:
+
+```
+/ad corp.local
+
+  ⚠ /ad is gated. Confirm the domain by typing it back:
+
+  ⚠   /ad corp.local --ack corp.local
+```
+
+`--ack` must equal the domain after normalisation — `CORP.Local.` and
+`corp.local` are the same acknowledgement, `wrong.local` is not. The point is
+not ceremony: it is that an AD campaign is not something to arrive at by
+autocompleting a target you half-remember, and typing the domain is the moment
+you check it is the right one.
+
+```
+/ad corp.local --ack corp.local
+
+  ◈ DOMAIN    corp.local
+  ◈ RECON     mapping the domain — DCs, functional level, surface
+  ◈ TOOLS     24/36 present  ·  absent: smbmap, enum4linux-ng, nxc, certipy, …
+  ◈ DEGRADED  coercion, ldap-anon — no tooling on this host; those vectors are
+              skipped and will be reported as skipped
+  ◈ INTERLOCK locks at 5  ·  4 credential attempt(s) permitted  ·  1/s, burst 4
+  ◈ WRITES    read-only — ACL changes, password resets and relay writes are
+              refused (--arm to permit)
+  ◈ WAVE      wave 1 — 10 agents, all concurrent, then it stops
+  ◈ EVIDENCE  ~/.zimzilla/hunts/ad-corp.local
+```
+
+**The interlock is arithmetic, not a promise.** Before the campaign starts it
+prints the ceiling it will enforce: a domain that locks at five bad passwords
+gets **four** credential attempts across the whole campaign, not per agent and
+not per wave. A shared throttle paces the wave — one command a second, four at
+once — and a circuit breaker counts every credential-bearing command and refuses
+all of them once the budget is spent. The refusal is loud, it lands in the
+transcript and in the wave panes, and the run continues: the agent reads *why*
+it was refused and finds another way in. A campaign that spends nothing says so
+too, because "no refusal" and "the interlock was not watching" should not look
+alike.
+
+The counting is deliberately asymmetric. A command is treated as a credential
+attempt **unless it is definitely not one** — over-counting costs budget you can
+raise with `--lockout`, and under-counting is how an account gets locked. The
+read-only techniques that cannot lock anything are recognised by name, so a null
+session, an anonymous LDAP bind and an AS-REP roast are free, and `nmap -p 445`
+is a port, not a password.
+
+Writes are refused outright and spend no budget: ACL changes, password resets,
+ADCS template and CA modification, relay writes, `--delete`. `--arm` permits
+them, for an engagement that has authorised them in writing.
+
+**It probes the box and degrades honestly.** Thirty-six tools are catalogued and
+each is checked with `shutil.which` before the campaign starts. A vector whose
+tooling is entirely absent is named as **skipped** rather than briefed to an
+agent who cannot run it — so a run on a box without `certipy` reports "ADCS was
+not assessed" instead of a wave of agents reporting nothing found. The recon
+prompt is built with that same probe result, so the model is told what it has.
+`/ad tools` reprints it on demand.
+
+**Vectors.** Wave 1 is unauthenticated: AS-REP roasting, Kerberoasting, null
+sessions, anonymous LDAP, SMB signing, ADCS enrollment reachability, domain and
+user enumeration, GPP cpassword, LAPS read. The authenticated families —
+ACL paths, delegation, ADCS ESC, DCSync rights, trust abuse, coercion, relay,
+host sprawl, scheduled tasks, unquoted paths — are planned in later waves
+against what the earlier ones obtained.
+
+**The campaign directory is `hunts/ad-<domain>/`**, beside the web campaigns
+under the same root, so `/findings`, `/summary-hunt` and `/report-bug-hunt` read
+it with no changes. The `ad-` prefix is what stops a domain you hunt both ways
+from sharing one directory.
+
+```
+/ad corp.local --ack corp.local --lockout 5
+/ad corp.local --ack corp.local --wave 2
+/ad corp.local --ack corp.local --arm
+```
+
+`--lockout N` is the threshold you have *confirmed* — recon reports the real
+policy verbatim, and the default of 5 is the legacy Windows value, chosen
+because being wrong low costs a re-run and being wrong high costs a locked-out
+workforce. `--wave N`, `--fresh` and one-wave-per-invocation behave exactly as
+they do for `/bug-hunt`.
+
+> **Authorised use only.** `/ad` is for a domain you own, a consented audit, or
+> a declared engagement with a known lockout policy. The gate and the interlock
+> reduce the risk of a mistake; they cannot verify authorisation, and the
+> default lockout is a guess until recon confirms it. Confirm the policy with
+> the client before wave 1, not after.
+
+---
+
 ## Phish
 
 `/phish` clones a login page, serves it locally, opens a public tunnel if a
@@ -746,7 +857,8 @@ zimzilla/                     the package
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
-  hunt.py                     /bug-hunt — the wave loop, per-wave dirs, reports
+  hunt.py                     the campaign engine — wave loop, per-wave dirs, reports
+  ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan palettes
   termbg.py                   asks the terminal for its own background
@@ -767,7 +879,8 @@ tests/                        the test suite
 
 ```bash
 python tests/test_phase4.py        # from the checkout's venv
-python tests/test_hunt.py          # /bug-hunt — the wave loop, per-wave layout, reports
+python tests/test_hunt.py          # the campaign engine — wave loop, per-wave layout, reports
+python tests/test_ad.py            # /ad — the gate, the interlock, the tool probe
 python tests/test_web.py           # the wave web — geometry and the tracker
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_update.py        # self-update — real git, throwaway repos
@@ -779,6 +892,16 @@ python tests/test_requirements.py  # guard: litellm stays out of the harness ven
 through the real loop with a stubbed model, including the boot migration — a
 campaign in the old flat layout is reorganised and read back, and a wave that
 was deliberately re-run is checked to count as one wave rather than three.
+
+`test_ad.py` needs no domain, no model and no network: the interlock's decision
+surface is a pure function of the command string, so the whole safety property
+is tested by writing commands down — a table of them, each asserted for whether
+it counts against the budget and whether it is refused as a write. The breaker
+is driven directly to confirm it trips at `lockout - 1` and refuses thereafter,
+and the tool probe runs against a stubbed `PATH` so the result does not depend
+on what is installed on the machine running the tests. The scope cases use the
+eight AD command forms the guard could not previously see — impacket's
+`domain/user:pass@host`, a UNC path, `ldap://` — each of which must now block.
 
 Stubs the model and drives the interface directly, so it needs no network and
 no credentials. `test_update.py` runs real `git` against repositories it

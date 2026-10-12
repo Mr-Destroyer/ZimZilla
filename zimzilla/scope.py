@@ -50,6 +50,25 @@ NETWORK_TOOLS = {
     "httpx", "httprobe", "nuclei", "whatweb", "wpscan", "smbclient",
     "redis-cli", "mongo", "psql", "mysql", "telnet", "openssl", "arjun",
     "katana", "gau", "waybackurls", "dalfox", "commix", "xsser",
+    # Active Directory. Every one of these names a host — a DC, a member
+    # server, a CA — in its arguments, and most of them in the impacket
+    # `domain/user:pass@host` form rather than as a bare hostname. Without
+    # them here `command_uses_network_tool` returns False, bare hostnames are
+    # never extracted, and an out-of-scope DC is reachable through the whole
+    # AD toolchain while the guard reports nothing. `ldapsearch` was the only
+    # one the guard could already see, and only via an `ldap://` URL.
+    "nxc", "netexec", "crackmapexec", "certipy", "bloodhound-python",
+    "rusthound", "ldapsearch", "ldapmodify", "ldapadd", "kerbrute",
+    "rpcclient", "smbmap", "enum4linux", "enum4linux-ng", "windapsearch",
+    "gpp-decrypt", "mitm6", "responder", "ntlmrelayx.py",
+    # The impacket scripts, by both their bare name and the `impacket-`
+    # console-script form the distro packages install.
+    "psexec.py", "wmiexec.py", "smbexec.py", "atexec.py", "dcomexec.py",
+    "secretsdump.py", "GetUserSPNs.py", "GetNPUsers.py", "GetADUsers.py",
+    "lookupsid.py", "samrdump.py", "rpcdump.py", "reg.py", "mssqlclient.py",
+    "impacket-psexec", "impacket-wmiexec", "impacket-secretsdump",
+    "impacket-GetUserSPNs", "impacket-GetNPUsers", "impacket-lookupsid",
+    "impacket-samrdump", "impacket-rpcdump", "impacket-ntlmrelayx",
 }
 
 # Shell tokens that are never targets.
@@ -99,6 +118,22 @@ def _strip_substitutions(command: str) -> str:
 _FLAG_RE = re.compile(r"^--?[A-Za-z]")
 _VERSIONISH_RE = re.compile(r"^\d+(\.\d+)*$")
 
+# Impacket's canonical target syntax is `[domain/]user[:password]@host`, and a
+# Windows UNC path is `\\host\share` (also written `//host/share`). Both carry a
+# `/`, a `\` or an `@` by construction, so the "skip obvious filenames" rule
+# below used to discard them before hostname matching was ever reached — which
+# meant a DC named the impacket way was invisible to the deny-list even with the
+# tool in NETWORK_TOOLS and the suffix in _NEVER_A_FILE_EXT_TLDS. These two
+# forms are peeled off *before* that rule runs. The host part of each is
+# syntactically explicit, like a URL's, so both are always treated as targets
+# rather than gated behind the network-context test.
+_AT_HOST_RE = re.compile(r"@([a-zA-Z0-9_.\-]+)\.?$")
+_UNC_RE = re.compile(r"^[\\/]{2}([a-zA-Z0-9_.\-]+)")
+# The `domain/` half of impacket's target syntax. Requires a dot, so a path like
+# `src/app.py` — where the left side is a bare directory name — cannot match. An
+# AD domain is always dotted; a directory usually is not.
+_IMPACKET_DOMAIN_RE = re.compile(r"^([a-zA-Z0-9_\-]+(?:\.[a-zA-Z0-9_\-]+)+)/")
+
 # A bare dotted token (``evil.com``) is ambiguous: it may be a hostname or a
 # filename (``report.json``). To avoid hard-blocking ordinary commands, a bare
 # hostname only counts as a target when EITHER the command runs a known network
@@ -112,6 +147,13 @@ _NEVER_A_FILE_EXT_TLDS = {
     "br", "ch", "es", "fi", "gr", "hk", "id", "ie", "il", "it", "kr",
     "mx", "my", "no", "nz", "ph", "pl", "pt", "ro", "se", "sg", "tr",
     "tw", "ua", "vn", "za",
+    # Internal AD suffixes. An on-prem domain is almost never a public TLD —
+    # it is `corp.local`, `ad.internal`, `lab.lan` — so without these a DC
+    # hostname never clears the file-extension test and the deny-list cannot
+    # see it. None of these is a plausible file extension, which is the bar
+    # this set has to clear: `foo.local` is a host, `foo.json` is not.
+    "local", "internal", "corp", "lan", "intranet", "home", "ad", "ds",
+    "loc", "dom",
 }
 
 # Shell metacharacters that split a command into independently-executed pieces.
@@ -405,6 +447,34 @@ class Scope:
                     targets.append(h)
                 continue
 
+            # Impacket target syntax: `corp.local/j.doe:Passw0rd@dc01.corp.local`.
+            # Both halves are targets and both are explicit, so this runs before
+            # the filename rule that would otherwise eat the token for its `/`.
+            # The domain half matters as much as the host: a deny-list names the
+            # domain, and `-dc-ip` frequently carries an address the operator
+            # never wrote down anywhere else.
+            m = _IMPACKET_DOMAIN_RE.match(tok)
+            if m:
+                targets.append(m.group(1))
+            # `@host` ends the target: `j.doe@corp.local` has a domain on the
+            # left that is a *username*, not a host, so only the tail counts.
+            m = _AT_HOST_RE.search(tok)
+            if m:
+                targets.append(m.group(1))
+                continue
+            # A domain half with no `@host` after it — `corp.local/j.doe:Pass`.
+            # Already recorded above, and it carries a `/`, so stop here rather
+            # than letting the filename rule below reconsider it.
+            if _IMPACKET_DOMAIN_RE.match(tok):
+                continue
+
+            # UNC path: `//dc01.corp.local/SYSVOL` or `\\dc01\SYSVOL`. The host
+            # is the first component, and a UNC path is never a filename.
+            m = _UNC_RE.match(tok)
+            if m:
+                targets.append(m.group(1))
+                continue
+
             if _HOSTNAME_RE.match(tok) and not _VERSIONISH_RE.match(tok):
                 # `evil.com.` is the same host as `evil.com`; strip the root dot
                 # before the tail/TLD checks so the FQDN form can't slip through.
@@ -414,6 +484,8 @@ class Scope:
                     continue
                 # Skip obvious filenames: has a directory part, starts with a
                 # path marker, or the tail is a file extension rather than a TLD.
+                # The impacket and UNC forms were peeled off above, so a `/` here
+                # really is a directory separator and not a target delimiter.
                 if "/" in tok or "\\" in tok or tok.startswith("."):
                     continue
                 if network_context or tail in _NEVER_A_FILE_EXT_TLDS:

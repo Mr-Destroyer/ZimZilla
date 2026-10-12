@@ -19,6 +19,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from .. import ad as ad_mod
 from .. import hunt as hunt_mod
 from .. import logfare as lf_mod
 from .. import osint as osint_mod
@@ -1491,6 +1492,12 @@ class ZimZillaApp(App):
         # closing report is never written. The command says "stop the wave
         # first", which is the advice that actually works.
         "report-bug-hunt",
+        # `ad` is here for `/ad tools` alone — "what does this box actually
+        # have" is worth answering while ten agents are working, and the probe
+        # starts no turn. `/ad <domain>` refuses itself when busy, so letting
+        # the command through the gate cannot start a second campaign; see
+        # `_cmd_ad`.
+        "ad",
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
@@ -1517,6 +1524,7 @@ class ZimZillaApp(App):
             "osint": lambda a: self._cmd_osint(a),
             "phish": lambda a: self._cmd_phish(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
+            "ad": lambda a: self._cmd_ad(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
@@ -1568,6 +1576,8 @@ class ZimZillaApp(App):
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
             ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
             ("/bug-hunt <target> --wave N", "run wave N specifically"),
+            ("/ad <domain> --ack <domain>", "AD campaign — gated, interlocks on"),
+            ("/ad tools", "what AD tooling this host actually has"),
             ("/stop-hunt", "end a running hunt       (works while busy)"),
             ("/summary-hunt", "the hunt report          (works while busy)"),
             ("/report-bug-hunt", "evidence-only report, every wave"),
@@ -2960,6 +2970,306 @@ class ZimZillaApp(App):
         t.append("  says what each wave aimed at and what it found\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
+    # ---- /ad ---------------------------------------------------------------
+    def _cmd_ad(self, args) -> None:
+        """/ad <domain> --ack <domain> — an Active Directory campaign.
+
+        `/bug-hunt` with a different doctrine and a safety interlock, and one
+        gate in front of it. The gate is the operator typing the domain back:
+        not a security control, a speed bump that makes "I am about to run
+        credential attacks against *this* domain" something they had to say.
+        Everything about why is in zimzilla/ad.py.
+
+        ``--wave N``, ``--fresh`` and the rest of the flag handling are
+        `/bug-hunt`'s, parsed the same way, because they mean the same thing —
+        the wave model is the engine's and the doctrine does not change it.
+        ``--lockout N`` is AD's alone: it is the number the interlock is built
+        from, and getting it wrong is the one mistake here that costs a client
+        their Monday.
+        """
+        p = self.palette
+
+        # `/ad tools` — the probe on demand. Answers while busy, because "what
+        # does this box actually have" is worth asking mid-campaign and starts
+        # no turn. Checked before anything else so it needs no target.
+        if args and args[0].lower() == "tools":
+            self._cmd_ad_tools()
+            return
+
+        # --fresh/-f is a bare flag, so it is filtered rather than parsed.
+        fresh = any(a in ("--fresh", "-f") for a in args)
+        rest = [a for a in args if a not in ("--fresh", "-f")]
+
+        # --arm is the opt-in to the destructive verbs. Off unless asked for,
+        # and named in the banner either way so an armed run is never invisible.
+        armed = any(a in ("--arm",) for a in args)
+        rest = [a for a in rest if a != "--arm"]
+
+        # The value-taking flags, parsed together: each consumes the token after
+        # it, and every malformed form is refused here rather than becoming part
+        # of the domain string. `--ack` is the exception — its value is the
+        # domain itself, so it is captured rather than validated as a number.
+        wave_number: int | None = None
+        lockout = ad_mod.DEFAULT_LOCKOUT
+        ack: str | None = None
+        stripped: list[str] = []
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            name = arg.partition("=")[0]
+            if name in ("--wave", "--lockout", "--ack"):
+                value = arg.partition("=")[2] if "=" in arg else (
+                    rest[i + 1] if i + 1 < len(rest) else "")
+                if "=" not in arg:
+                    i += 1  # consume the value too
+                if not value:
+                    self._sys_line(f"{name} needs a value, e.g. "
+                                   f"/ad corp.local {name} "
+                                   f"{'3' if name != '--ack' else 'corp.local'}",
+                                   warn=True)
+                    return
+                if name == "--ack":
+                    ack = value
+                elif not value.isdigit() or int(value) < 1:
+                    if name == "--wave":
+                        self._sys_line(
+                            f"⚠ --wave takes a wave number of 1 or more, not "
+                            f"{value!r}. Wave 0 is recon — it has no briefs to "
+                            "run.", warn=True)
+                    else:
+                        self._sys_line(
+                            f"⚠ --lockout takes a whole number of attempts, "
+                            f"not {value!r} — the count after which the domain "
+                            "locks an account.", warn=True)
+                    return
+                elif name == "--wave":
+                    wave_number = int(value)
+                else:
+                    lockout = int(value)
+            else:
+                stripped.append(arg)
+            i += 1
+        rest = stripped
+
+        if not rest:
+            self._ad_usage()
+            return
+
+        # The domain is one token, not a sentence: `validate_target` is what
+        # says so, and it is also what normalises the case and the trailing dot
+        # the ack is compared against.
+        try:
+            domain = ad_mod.validate_target(" ".join(rest))
+        except ValueError as e:
+            self._sys_line(f"⚠ {e}", warn=True)
+            return
+
+        # The gate. A missing ack and a wrong ack are refused identically — the
+        # message is the line to run, either way, and saying which half was
+        # wrong would only help someone guessing.
+        if ack is None or ack.strip().lower().rstrip(".") != domain:
+            self._sys_line(
+                f"⚠ /ad is gated. Confirm the domain by typing it back:", warn=True)
+            self._sys_line(f"  {ad_mod.refusal(domain)}", warn=True)
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        # The probe runs here, once, and its result goes three places: this
+        # banner, the recon prompt the agents are given, and the list of
+        # vectors that are out of scope for the run. That is the "detect and
+        # degrade" decision — a vector whose tooling is absent is skipped and
+        # *named as skipped*, rather than sending an agent after a binary that
+        # is not on the box.
+        probes = ad_mod.probe_tools()
+
+        # Warn but proceed, exactly as `/bug-hunt` does: AGENTS.md treats any
+        # target the operator declares as authorised, and the deny-list still
+        # hard-blocks mid-campaign.
+        allowed, reason = self.agent.scope.allows(domain)
+        if not allowed:
+            self._sys_line(f"⚠ not in allow.yaml — {reason}", warn=True)
+            self._sys_line("running anyway; out-of-scope hosts stay hard-blocked")
+
+        try:
+            directory = hunt_mod.case_dir(self.cfg, domain, ad_mod.AD_KIND)
+        except ValueError as e:
+            self._sys_line(f"⚠ {e}", warn=True)
+            return
+
+        reused = None if fresh else hunt_mod.find_recon(directory)
+
+        present = [q for q in probes if q.present]
+        missing = [q for q in probes if not q.present]
+        skipped = ad_mod.unavailable_vectors(probes)
+
+        t = Text()
+        t.append("  ◈ DOMAIN    ", style=f"bold {p.accent}")
+        t.append(f"{domain}\n", style=f"bold {p.primary}")
+        t.append("  ◈ RECON     ", style=f"bold {p.accent}")
+        if fresh:
+            t.append("--fresh — remapping the domain\n", style=p.primary)
+        elif reused is not None:
+            t.append(
+                f"reusing notes from {reused.path.name} "
+                f"({reused.age_days}d old) — no remap\n",
+                style=p.primary,
+            )
+        else:
+            t.append("mapping the domain — DCs, functional level, surface\n",
+                     style=p.primary)
+        t.append("  ◈ TOOLS     ", style=f"bold {p.accent}")
+        t.append(f"{len(present)}/{len(probes)} present", style=p.primary)
+        if missing:
+            t.append(f"  ·  absent: {', '.join(q.name for q in missing)}",
+                     style=p.dim)
+        t.append("\n", style=p.dim)
+        if skipped:
+            t.append("  ◈ DEGRADED  ", style=f"bold {p.amber}")
+            t.append(
+                f"{', '.join(skipped)} — no tooling on this host; those vectors "
+                "are skipped and will be reported as skipped\n", style=p.dim)
+        # The interlock's settings, stated before the run rather than discovered
+        # by hitting them. `limit` is the number the operator can actually
+        # spend, which is lockout - 1 — the distinction between "the domain
+        # locks at five" and "you get four" is the whole point of the class.
+        t.append("  ◈ INTERLOCK ", style=f"bold {p.accent}")
+        t.append(
+            f"locks at {lockout}  ·  {max(1, lockout - 1)} credential "
+            f"attempt(s) permitted  ·  {ad_mod.DEFAULT_RATE:g}/s, "
+            f"burst {ad_mod.DEFAULT_BURST}\n", style=p.primary)
+        t.append("  ◈ WRITES    ", style=f"bold {p.accent}")
+        if armed:
+            t.append("ARMED — destructive commands are permitted this run\n",
+                     style=f"bold {p.amber}")
+        else:
+            t.append(
+                "read-only — ACL changes, password resets and relay writes are "
+                "refused (--arm to permit)\n", style=p.primary)
+        running = wave_number or hunt_mod.next_wave_number(directory)
+        t.append("  ◈ WAVE      ", style=f"bold {p.accent}")
+        t.append(f"wave {running} — ", style=f"bold {p.primary}")
+        t.append(
+            f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent, then it stops\n"
+            if wave_number is None else
+            f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent\n",
+            style=p.primary,
+        )
+        t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
+        t.append(str(directory) + "\n", style=p.dim)
+        t.append("  ◈ NOTICE    ", style=f"bold {p.amber}")
+        t.append(
+            "authorised use only — a domain you own, a consented audit, or a "
+            "declared engagement with a known lockout policy\n",
+            style=p.dim,
+        )
+        t.append("  · ", style=p.dim)
+        t.append("/stop-hunt", style=p.primary)
+        t.append(" ends the wave   ·   ", style=p.dim)
+        t.append("/summary-hunt", style=p.primary)
+        t.append(" writes the report   ·   ", style=p.dim)
+        t.append("/findings", style=p.primary)
+        t.append(" shows the tracker   ·   ", style=p.dim)
+        t.append("/ad tools", style=p.primary)
+        t.append(" re-probes the tooling\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+        pane = self._zim_pane()
+        if pane is not None:
+            pane.show_hunt(domain, hunt_mod.HUNT_WAVE_SIZE)
+
+        self._run_ad(domain, probes=probes, fresh=fresh,
+                     wave_number=wave_number, lockout=lockout, armed=armed)
+
+    def _cmd_ad_tools(self) -> None:
+        """`/ad tools` — what the AD toolchain looks like on this host.
+
+        The same probe the campaign runs, on demand: an operator about to plan
+        around certipy wants to know whether certipy is here *before* the run,
+        and one who has just installed it wants to confirm the campaign will
+        now see it.
+        """
+        p = self.palette
+        probes = ad_mod.probe_tools()
+        present = [q for q in probes if q.present]
+        missing = [q for q in probes if not q.present]
+        skipped = ad_mod.unavailable_vectors(probes)
+
+        t = Text()
+        t.append("  AD TOOLING\n\n", style=f"bold {p.accent}")
+        t.append(f"  {len(present)}/{len(probes)} present\n\n", style=p.primary)
+        t.append("  PRESENT\n", style=f"bold {p.accent}")
+        for q in present:
+            t.append(f"  ✔ {q.name:<22}", style=p.primary)
+            t.append(f"{q.vector}\n", style=p.dim)
+        if not present:
+            t.append("  (none)\n", style=p.dim)
+        if missing:
+            t.append("\n  ABSENT\n", style=f"bold {p.accent}")
+            for q in missing:
+                t.append(f"  ✘ {q.name:<22}", style=p.amber)
+                t.append(f"{q.hint}\n", style=p.dim)
+        t.append("\n  ", style=p.dim)
+        if skipped:
+            t.append("SKIPPED VECTORS  ", style=f"bold {p.amber}")
+            t.append(
+                f"{', '.join(skipped)} — every tool for these is absent, so a "
+                "campaign would report them as skipped rather than run them\n",
+                style=p.dim)
+        else:
+            t.append("SKIPPED VECTORS  ", style=f"bold {p.accent}")
+            t.append("none — every vector has at least one tool\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    def _ad_usage(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  ACTIVE DIRECTORY\n\n", style=f"bold {p.accent}")
+        t.append("  /ad <domain> --ack <domain>  ", style=f"bold {p.primary}")
+        t.append("recon, then one wave of AD vectors, then stop\n", style=p.dim)
+        t.append("  /ad <domain> --ack <domain> --wave N  ", style=f"bold {p.primary}")
+        t.append("run wave N specifically\n", style=p.dim)
+        t.append("  /ad <domain> --ack <domain> --lockout N  ",
+                 style=f"bold {p.primary}")
+        t.append("how many bad passwords lock an account (default 5)\n", style=p.dim)
+        t.append("  /ad <domain> --ack <domain> --fresh  ", style=f"bold {p.primary}")
+        t.append("remap even if recon is already on disk\n", style=p.dim)
+        t.append("  /ad <domain> --ack <domain> --arm  ", style=f"bold {p.primary}")
+        t.append("permit destructive commands (off by default)\n", style=p.dim)
+        t.append("  /ad tools            ", style=f"bold {p.primary}")
+        t.append("what AD tooling this host actually has\n", style=p.dim)
+        t.append("\n  The gate is the domain typed back. It is not a security\n",
+                 style=p.dim)
+        t.append("  control — it makes the target something you had to say.\n\n",
+                 style=p.dim)
+        t.append("  The interlock is arithmetic, not a promise: one shared\n",
+                 style=p.dim)
+        t.append("  throttle, a hard attempt counter, and a breaker that trips\n",
+                 style=p.dim)
+        t.append("  at ", style=p.dim)
+        t.append("lockout - 1", style=p.primary)
+        t.append(" and refuses every credential-bearing\n", style=p.dim)
+        t.append("  command after it. Writes to the directory are refused\n",
+                 style=p.dim)
+        t.append("  outright unless you pass ", style=p.dim)
+        t.append("--arm", style=p.primary)
+        t.append(".\n\n", style=p.dim)
+        t.append("  Wave 1 is the unauthenticated surface — null sessions,\n",
+                 style=p.dim)
+        t.append("  AS-REP roasting, anonymous LDAP, SMB signing, ADCS\n",
+                 style=p.dim)
+        t.append("  reachability. Later waves are planned against what it got.\n",
+                 style=p.dim)
+        t.append("  Evidence lands in ", style=p.dim)
+        t.append(f"{Path(self.cfg.state_dir) / 'hunts'}/ad-<domain>/\n",
+                 style=p.primary)
+        t.append("  Run it under ", style=p.dim)
+        t.append("/mode zim", style=p.primary)
+        t.append(" so the agents follow your AGENTS.md doctrine.\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
     def on_wave_overlay_stop_requested(
             self, event: WaveOverlay.StopRequested) -> None:
         """``ctrl+x`` in the wave view — the same thing ``/stop-hunt`` does.
@@ -3165,7 +3475,9 @@ class ZimZillaApp(App):
 
     @work(exclusive=True)
     async def _run_hunt(self, target: str, *, fresh: bool = False,
-                        wave_number: int | None = None) -> None:
+                        wave_number: int | None = None,
+                        kind: "hunt_mod.CampaignKind | None" = None,
+                        on_finish=None) -> None:
         """The campaign worker: recon, then one wave.
 
         Shaped like _run_team — busy flag, an on_event sink, a spinner, and a
@@ -3176,6 +3488,20 @@ class ZimZillaApp(App):
         when the scope already has recon on disk. ``wave_number`` names the wave
         to run; None means the next one the scope has not run yet. See
         ``_cmd_bug_hunt``.
+
+        ``kind`` selects the doctrine; None is ``HUNT_KIND``, `/bug-hunt`
+        exactly as it shipped. ``/ad`` is a *call* into this same worker rather
+        than a copy of it, because the recon overlay, the wave web, the tracker
+        rail, the stop flag and the closing report are the engine's and none of
+        them are doctrine-specific. What it adds is one sink of its own, over
+        the same event stream — see ``_run_ad``.
+
+        ``on_finish`` is called once the campaign is over, from inside this
+        worker's own ``finally``. It is how `/ad` reports what the interlock
+        did: this method is ``@work``-decorated, so it returns a Worker and
+        *not* a coroutine, and a caller who wrapped the call in their own
+        ``try/finally`` would fire it the instant the worker was scheduled —
+        long before a single agent ran.
         """
         p = self.palette
         chat = self.query_one(ChatPane)
@@ -3194,8 +3520,13 @@ class ZimZillaApp(App):
         # this once did, left both commands looking at None for the entire hunt
         # and quietly refusing to do anything. The run object is handed to
         # run_hunt rather than built there so there is exactly one of it.
+        # `kind` is resolved here rather than at the call site so the directory
+        # the run is published with is the same one `run_hunt` will use. With
+        # it, an AD campaign's directory carries the `ad-` prefix from the
+        # moment `/stop-hunt` can first see it.
         self._hunt_run = hunt_mod.HuntRun(
-            target=target, directory=hunt_mod.case_dir(self.cfg, target))
+            target=target,
+            directory=hunt_mod.case_dir(self.cfg, target, kind))
         # Kept for the campaign's notice to the main agent, which is built from
         # the event at the end — by which point the run object is being cleared.
         self._hunt_target = target
@@ -3520,6 +3851,7 @@ class ZimZillaApp(App):
                 run=self._hunt_run,
                 fresh=fresh,
                 wave_number=wave_number,
+                kind=kind,
             )
             # A summary asked for but never delivered — the hunt was stopped
             # between the request and a wave boundary. Offer it now rather than
@@ -3563,6 +3895,100 @@ class ZimZillaApp(App):
             self._sync_rails()
             self._set_rain(self.rain_on)
             self.query_one("#input", Input).focus()
+            # Last, and inside the finally, so it runs on a campaign that
+            # crashed exactly as it does on one that finished. The callback owns
+            # its own exceptions: a reporting seam that took the app down over a
+            # formatting error would be worse than the silence it replaced.
+            if on_finish is not None:
+                try:
+                    on_finish()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _run_ad(self, domain: str, *, probes, fresh: bool = False,
+                wave_number: int | None = None,
+                lockout: int = ad_mod.DEFAULT_LOCKOUT,
+                armed: bool = False) -> None:
+        """`/ad` — build the doctrine, then run the campaign engine on it.
+
+        A thin wrapper over ``_run_hunt``, and deliberately so: recon, the wave
+        web, the tracker rail, the stop flag and the closing report are the
+        engine's. What `/ad` adds is the interlock and one extra sink.
+
+        The sink is the reason this is a method rather than three lines at the
+        call site. ``on_refuse`` is called from *inside* the tool hook — that is
+        to say, on the campaign's own coroutine, at the moment a command was
+        refused, before the agent is handed the refusal text. It can therefore
+        write the line to the transcript the instant the breaker trips, rather
+        than the operator inferring it from a wave that went quiet. It writes
+        straight to the ChatPane rather than through a message, which is safe
+        here for the same reason the whole ``on_event`` sink is: this runs on
+        the app's own task, and every other writer to that pane does too.
+
+        **A fresh ``ad_kind()`` per campaign, never the module-level
+        ``AD_KIND``.** The interlock holds a throttle and an attempt counter,
+        and those belong to one run: a shared kind would carry the first
+        campaign's spent budget into the second and refuse it early.
+        """
+        p = self.palette
+        chat = self.query_one(ChatPane)
+
+        # The breaker's own state, read back for the closing line. Held here
+        # rather than on the app because it is this campaign's, and a second
+        # `/ad` must start from zero.
+        spent = {"n": 0, "tripped": False, "lockout": lockout, "limit": max(1, lockout - 1)}
+
+        def on_refuse(verdict, command: str) -> None:
+            """The interlock refused a command. Say so, in the transcript.
+
+            The agent is about to be handed the same refusal as a tool error
+            and will adapt, so this is for the *operator*: a refusal is the
+            interlock doing its job, and it must be visible at the moment it
+            happens. Ten agents interleave, and a wave that quietly stopped
+            trying would otherwise be indistinguishable from one that finished.
+            """
+            if verdict.destructive:
+                head = "write refused"
+            else:
+                head = "credential attempt refused"
+            t = Text()
+            t.append("  ⛔ ", style=f"bold {p.red}")
+            t.append(f"{head} — ", style=f"bold {p.red}")
+            t.append(f"{verdict.reason}\n", style=p.amber)
+            t.append("     ", style=p.dim)
+            t.append(command.strip()[:160], style=p.dim)
+            t.append("\n", style=p.dim)
+            chat.write_block(t)
+
+        def report_refusal(verdict, command: str) -> None:
+            """Record it for the closing line, then say it."""
+            if not verdict.destructive:
+                spent["n"] += 1
+            on_refuse(verdict, command)
+
+        kind = ad_mod.ad_kind(
+            lockout=lockout, armed=armed, probes=probes,
+            on_refuse=report_refusal,
+        )
+
+        def on_finish() -> None:
+            """The campaign is over — say what the interlock did.
+
+            Including "nothing", because a run that never touched the budget is
+            a fact worth stating: it is the difference between an
+            unauthenticated sweep and a campaign that spent its four attempts.
+            """
+            if spent["n"] == 0:
+                self._sys_line(
+                    f"interlock: no credential attempt was refused — the "
+                    f"budget of {spent['limit']} went unspent", ok=True)
+            else:
+                self._sys_line(
+                    f"interlock: {spent['n']} credential command(s) refused "
+                    f"against a lockout of {spent['lockout']}", warn=True)
+
+        self._run_hunt(domain, fresh=fresh, wave_number=wave_number,
+                       kind=kind, on_finish=on_finish)
 
     def _register_hunt(self, ev: dict) -> None:
         """Tell the main agent a campaign just finished, and where it landed.
@@ -3578,8 +4004,12 @@ class ZimZillaApp(App):
         if not directory:
             return
         findings = ev.get("findings", 0)
+        # Named from the campaign's own doctrine rather than hardcoded: the main
+        # agent is told what was run, and an AD campaign described as
+        # `/bug-hunt` would have it look in the wrong directory.
+        command = ev.get("command") or "bug-hunt"
         summary = (
-            f"[hunt] A /bug-hunt campaign just ended against {self._hunt_target or 'the target'}.\n"
+            f"[hunt] A /{command} campaign just ended against {self._hunt_target or 'the target'}.\n"
             f"directory: {directory}\n"
             f"waves: {ev.get('wave', 0)} · findings: {findings} · "
             f"reports saved: {ev.get('saved', 0)}\n"
@@ -3713,6 +4143,7 @@ class ZimZillaApp(App):
             ("/osint", "open-source recon on a target", "osint"),
             ("/phish", "clone a login page and harvest creds", "phish"),
             ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
+            ("/ad", "Active Directory campaign — gated and interlocked", "ad"),
             ("/stop-hunt", "end a running hunt", "stop-hunt"),
             ("/summary-hunt", "the hunt report — what each wave did", "summary-hunt"),
             ("/report-bug-hunt", "evidence-only report, every wave", "report-bug-hunt"),

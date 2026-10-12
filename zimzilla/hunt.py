@@ -52,6 +52,7 @@ import json
 import re
 import shutil
 import time
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -402,17 +403,69 @@ HUNT_VECTORS: list[tuple[str, str, str]] = [
 ]
 
 
-def fallback_roster(wave: int, wave_size: int = HUNT_WAVE_SIZE) -> team_mod.Roster:
+def fallback_roster(wave: int, wave_size: int = HUNT_WAVE_SIZE,
+                    kind: "CampaignKind | None" = None) -> team_mod.Roster:
     """A fixed matrix roster, used when the planner's reply cannot be read."""
+    vectors = (kind.vectors if kind is not None and kind.vectors else HUNT_VECTORS)
     workers = [
         team_mod.WorkerSpec(name=name, brief=brief, owns=[owns])
-        for name, brief, owns in HUNT_VECTORS[:wave_size]
+        for name, brief, owns in vectors[:wave_size]
     ]
     return team_mod.Roster(
         summary=f"planner reply unreadable — falling back to the fixed vector "
                 f"matrix for wave {wave}",
         workers=workers,
     )
+
+
+# ---------------------------------------------------------------------------
+# Campaign kinds
+# ---------------------------------------------------------------------------
+# Everything about an engagement that is NOT the engine: the prompts, the
+# fallback vectors, the directory prefix, and the interlock that guards the
+# tools. `run_hunt` below is the loop — recon, plan, run, harvest, report — and
+# it is identical for every kind. `/ad` is a second *doctrine*, not a second
+# engine, so it is expressed as one of these rather than as a fork of the loop.
+#
+# The defaults reproduce today's `/bug-hunt` exactly: `HUNT_KIND` carries the
+# module constants verbatim, so a caller that passes no kind gets byte-identical
+# prompts and the same campaign directory it has always had. That equivalence is
+# asserted in test_hunt.py rather than assumed, because it is the property that
+# makes the whole refactor safe.
+
+
+@dataclass(frozen=True)
+class CampaignKind:
+    """One doctrine the campaign engine can run."""
+
+    #: Short name, written into each plan's frontmatter so a campaign read back
+    #: off disk knows which doctrine produced it.
+    name: str = "hunt"
+    #: The slash command that starts this doctrine, without the leading slash.
+    #: Used wherever a message has to tell the operator what to run — a refusal
+    #: that says ``/bug-hunt corp.local`` over an AD campaign sends them to the
+    #: wrong command, and the wrong command here means a *different campaign
+    #: directory*, so they would find an empty scope and conclude the run was
+    #: lost.
+    command: str = "bug-hunt"
+    #: Prepended to the scope slug when naming the campaign directory. Empty for
+    #: `/bug-hunt`, so its directories are unchanged; `ad-` for AD, so an AD
+    #: campaign on `corp.local` and a web hunt on `corp.local` cannot collide.
+    dir_prefix: str = ""
+    recon_prompt: str = RECON_PROMPT
+    planner_prompt: str = WAVE_PLANNER_PROMPT
+    contract: str = FINDING_CONTRACT
+    summary_prompt: str = SUMMARY_PROMPT
+    #: Fallback roster vectors. Empty means use `HUNT_VECTORS`.
+    vectors: tuple = ()
+    #: A tool hook run immediately before every tool call, alongside the write
+    #: lock. This is where `/ad` installs its throttle and circuit breaker. None
+    #: for every existing caller, which is what makes the seam free.
+    interlock: Callable[[str, dict], object] | None = None
+
+
+#: The default kind: `/bug-hunt`, exactly as it shipped.
+HUNT_KIND = CampaignKind()
 
 
 #: How much of the recon report is prepended to every worker brief. Generous,
@@ -528,6 +581,10 @@ class HuntRun:
     directory: Path
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     wave: int = 0
+    #: Which doctrine produced this campaign — "hunt" or "ad". Read back from
+    #: the plan frontmatter by ``load_run``, and defaulted to "hunt" for every
+    #: campaign written before the field existed, which is all of them.
+    kind: str = "hunt"
     recon: str = ""
     findings: list[Finding] = field(default_factory=list)
     waves: list[str] = field(default_factory=list)
@@ -812,11 +869,11 @@ def scope_slug(target: str) -> str:
     return slug
 
 
-def case_dir(cfg: Config, target: str) -> Path:
+def case_dir(cfg: Config, target: str, kind: "CampaignKind | None" = None) -> Path:
     """Create and return the campaign directory for *target*'s scope.
 
-    ``<state_dir>/hunts/<scope>/`` — under state_dir, beside sessions and osint
-    cases rather than in whatever repo the operator happens to be in.
+    ``<state_dir>/hunts/<prefix><scope>/`` — under state_dir, beside sessions
+    and osint cases rather than in whatever repo the operator happens to be in.
 
     **One directory per scope, reused.** This used to be ``<slug>-<stamp>``, so
     every `/bug-hunt` on the same target made a new sibling directory and a
@@ -824,6 +881,13 @@ def case_dir(cfg: Config, target: str) -> Path:
     notes in one, findings in another, nothing that accumulated. The directory
     is now the scope's, and the *artefacts* inside it carry the timestamps, so
     hunting the same target twice adds to its history instead of starting over.
+
+    ``kind.dir_prefix`` keeps two doctrines apart on a target that is both a
+    website and a domain: an AD campaign on ``corp.local`` lands in
+    ``hunts/ad-corp.local/`` while a web hunt on the same name keeps
+    ``hunts/corp.local/``. Without it they would share one directory, and an AD
+    campaign would inherit a web hunt's recon as its own map of a domain
+    controller.
 
     **Nothing is created but the directory itself.** It used to make
     ``findings/`` and ``plans/`` up front, which meant a `/bug-hunt` stopped
@@ -834,7 +898,8 @@ def case_dir(cfg: Config, target: str) -> Path:
     wave directories are created by ``write_plan`` and ``write_report`` as the
     waves actually run. See ``is_scope_shaped`` for what replaced the marker.
     """
-    d = Path(cfg.state_dir) / "hunts" / scope_slug(target)
+    prefix = kind.dir_prefix if kind is not None else ""
+    d = Path(cfg.state_dir) / "hunts" / f"{prefix}{scope_slug(target)}"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -1232,6 +1297,11 @@ def write_plan(run: HuntRun, wave: int, roster: team_mod.Roster,
         f"wave: {wave}",
         f"agents: {len(roster.workers)}",
         f"fell_back: {'true' if fell_back else 'false'}",
+        # Which doctrine produced this plan. Read back by ``load_run`` so a
+        # campaign knows what it is; written on every plan so a campaign whose
+        # waves were produced by different kinds (impossible today, but the
+        # field is the record) still reports the latest honestly.
+        f"kind: {run.kind}",
         f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
         "---",
         "",
@@ -1643,6 +1713,32 @@ async def _run_agent(
     return result
 
 
+def _chain_hooks(*hooks):
+    """Compose tool hooks into one, outermost first. ``None`` entries are skipped.
+
+    A tool hook is an async context manager factory, and two of them have to be
+    able to run around the same call: `/team`'s write lock and `/ad`'s
+    interlock. ``contextlib.AsyncExitStack`` is what makes nesting them a
+    three-line function rather than a new class — and, importantly, it unwinds
+    in reverse, so the interlock releases its throttle only after the write lock
+    has let go.
+    """
+    live = [h for h in hooks if h is not None]
+    if not live:
+        return None
+    if len(live) == 1:
+        return live[0]
+
+    @asynccontextmanager
+    async def _both(name: str, args: dict):
+        async with AsyncExitStack() as stack:
+            for h in live:
+                await stack.enter_async_context(h(name, args))
+            yield
+
+    return _both
+
+
 async def _run_wave(
     specs: list[team_mod.WorkerSpec],
     cfg: Config,
@@ -1655,6 +1751,7 @@ async def _run_wave(
     contract: str = "",
     wave: int = 0,
     run: HuntRun | None = None,
+    interlock=None,
 ) -> list[team_mod.WorkerResult]:
     """Run one wave concurrently, racing the stop signal.
 
@@ -1664,9 +1761,15 @@ async def _run_wave(
     checked before it: `/stop-hunt` cancels the in-flight agents instead of
     waiting out the slowest one, which is the difference between stopping a hunt
     and waiting for it.
+
+    ``interlock`` is the campaign kind's own tool hook, run around every call
+    alongside the write lock. It is the same object for all ten workers, which
+    is the point: `/ad`'s throttle and attempt counter have to be shared, or ten
+    parallel agents each get their own budget and the whole wave sprays ten
+    times what the operator authorised.
     """
     sem = asyncio.Semaphore(max(1, concurrency))
-    hook = team_mod._write_lock_hook(asyncio.Lock())
+    hook = _chain_hooks(interlock, team_mod._write_lock_hook(asyncio.Lock()))
 
     async def _one(index: int, spec: team_mod.WorkerSpec):
         async with sem:
@@ -1847,6 +1950,7 @@ async def run_hunt(
     fresh: bool = False,
     wave_number: int | None = None,
     max_waves: int = 1,
+    kind: CampaignKind | None = None,
 ) -> HuntRun:
     """Recon, then wave(s). Returns the run for the closing report.
 
@@ -1882,11 +1986,18 @@ async def run_hunt(
     disk. Without it a repeat hunt reuses them and goes straight to planning —
     see ``find_recon``. It is the operator's escape hatch for a target that has
     actually changed since the map was drawn.
+
+    ``kind`` selects the doctrine: the prompts, the fallback vectors, the
+    campaign directory's prefix, and the tool interlock. ``None`` means
+    ``HUNT_KIND`` — `/bug-hunt` exactly as it shipped — so every existing caller
+    is unaffected. `/ad` passes its own.
     """
+    kind = kind or HUNT_KIND
     if run is None:
-        run = HuntRun(target=target, directory=case_dir(cfg, target))
+        run = HuntRun(target=target, directory=case_dir(cfg, target, kind))
     if stop is not None:
         run.stop = stop
+    run.kind = kind.name
 
     # The wave to run. `run.wave` is set to one *below* it, because the loop
     # increments before it plans — so the counter the UI and the artefacts see
@@ -1910,10 +2021,10 @@ async def run_hunt(
                 f"wave {wave_number} has nothing to follow: this scope has run "
                 f"up to wave {highest}. A wave is planned against the one before "
                 f"it, so run wave {highest + 1} first — plain "
-                f"`/bug-hunt {run.target}` does exactly that."
+                f"`/{kind.command} {run.target}` does exactly that."
             ) if highest else (
                 f"wave {wave_number} has nothing to follow: this scope has not "
-                f"run a wave yet. Start with `/bug-hunt {run.target}`."
+                f"run a wave yet. Start with `/{kind.command} {run.target}`."
             ),
         })
         return run
@@ -1941,11 +2052,16 @@ async def run_hunt(
         # can_report, so recon's report_finding calls publish live like a wave
         # agent's. The final-text harvest below still runs: it catches a recon
         # that reported in its closing JSON but never called the tool.
+        # The interlock rides on recon too. Recon is where a null session or an
+        # AS-REP roast happens, so it is exactly the phase that must not be
+        # allowed to spray — an unthrottled recon turn is the one place a
+        # campaign could lock out a domain before a single brief was written.
         recon_agent = agent_factory(dataclasses.replace(cfg), can_report=True,
-                                    can_hunt_read=False)
+                                    can_hunt_read=False,
+                                    tool_hook=kind.interlock)
         run.recon = await _collect_text_live(
             recon_agent,
-            RECON_PROMPT.format(target=target, contract=FINDING_CONTRACT),
+            kind.recon_prompt.format(target=target, contract=kind.contract),
             on_event, run=run,
         )
         # Written before the event, so the path can ride on it: the UI has the
@@ -2010,8 +2126,8 @@ async def run_hunt(
         # campaign directory: that would put the raw artefacts in front of it
         # alongside the digest, which is the same information twice.
         planner = agent_factory(dataclasses.replace(cfg, mode="plan"),
-                                can_hunt_read=False)
-        plan_prompt = WAVE_PLANNER_PROMPT.format(
+                                can_hunt_read=False, tool_hook=kind.interlock)
+        plan_prompt = kind.planner_prompt.format(
             target=target,
             wave_size=wave_size,
             recon=run.recon or "(recon produced nothing)",
@@ -2022,7 +2138,7 @@ async def run_hunt(
             ),
             findings=run.digest(),
             waves=run.wave_digest(),
-            contract=FINDING_CONTRACT,
+            contract=kind.contract,
         )
         # Reported live, not collected silently. This turn is a real model call
         # over the whole recon, every finding so far and the wave history — tens
@@ -2049,7 +2165,7 @@ async def run_hunt(
 
         fell_back = roster is None or not roster.workers
         if fell_back:
-            roster = fallback_roster(wave, wave_size)
+            roster = fallback_roster(wave, wave_size, kind)
 
         # The plan lands on disk as it is announced, so a campaign's plans
         # accumulate beside its findings instead of dying with the event stream.
@@ -2082,8 +2198,9 @@ async def run_hunt(
             on_event=on_event, agent_factory=agent_factory,
             stop=run.stop, concurrency=concurrency,
             context=brief_context(run),
-            contract=FINDING_CONTRACT,
+            contract=kind.contract,
             wave=wave, run=run,
+            interlock=kind.interlock,
         )
 
         # ---- harvest. Most findings already reached the tracker through
@@ -2144,7 +2261,7 @@ async def run_hunt(
         # streaming, so it cannot corrupt the transcript.
         if summary_flag is not None and summary_flag():
             text = await _collect_text(agent_factory(dataclasses.replace(cfg)),
-                                       summary_prompt(run))
+                                       summary_prompt(run, kind))
             path = write_summary(cfg, run, text)
             await on_event({"type": "hunt_summary_done", "path": str(path),
                             "text": text, "wave": wave})
@@ -2161,6 +2278,9 @@ async def run_hunt(
         "saved": sum(1 for f in own if f.saved),
         "carried": len(run.findings) - len(own),
         "directory": str(run.directory),
+        # Which command ran it, so the UI's notice to the main agent names the
+        # campaign that actually happened rather than assuming `/bug-hunt`.
+        "command": kind.command,
     })
     return run
 
@@ -2186,8 +2306,16 @@ def _save(run: HuntRun, f: Finding) -> str:
         return ""
 
 
-def summary_prompt(run: HuntRun) -> str:
-    """The closing brief: everything the run knows, for the final report."""
+def summary_prompt(run: HuntRun, kind: "CampaignKind | None" = None) -> str:
+    """The closing brief: everything the run knows, for the final report.
+
+    ``kind`` selects the prompt template. ``None`` means ``HUNT_KIND`` — the
+    default, and what every existing caller gets — so `/bug-hunt`'s report is
+    byte-identical to what it shipped. `/ad` passes ``AD_KIND``, whose template
+    asks for the AD-specific framing: what the domain's exposure is, and which
+    attack paths were proven rather than merely indicated.
+    """
+    kind = kind or HUNT_KIND
     if run.findings:
         blocks = []
         for f in run.ranked():
@@ -2203,7 +2331,7 @@ def summary_prompt(run: HuntRun) -> str:
     else:
         findings = "(no findings were confirmed)"
 
-    return SUMMARY_PROMPT.format(
+    return kind.summary_prompt.format(
         target=run.target,
         waves=run.wave_digest(),
         recon=run.recon or "(recon produced nothing)",
@@ -2338,6 +2466,11 @@ def load_run(directory: Path) -> HuntRun | None:
     # order picks the oldest. `_plan_seq` reads that counter back out, so the
     # pair is a total order that matches the order the plans were written in.
     best: dict[int, tuple[tuple[str, int], WaveRecord]] = {}
+    #: The doctrine, taken from the newest plan that names one. Defaulted below
+    #: to "hunt" so every campaign written before the field existed — which is
+    #: every campaign on disk today — reads back as the web hunt it was.
+    kind = ""
+    kind_order: tuple[str, int] = ("", 0)
     for path in _plan_files(directory):
         text = path.read_text(encoding="utf-8", errors="replace")
         meta = _read_frontmatter(text)
@@ -2355,6 +2488,8 @@ def load_run(directory: Path) -> HuntRun | None:
         seen = best.get(record.number)
         if seen is None or order >= seen[0]:
             best[record.number] = (order, record)
+        if meta.get("kind", "").strip() and order >= kind_order:
+            kind, kind_order = meta["kind"].strip(), order
     records = [best[n][1] for n in sorted(best)]
 
     # How many findings each wave actually produced, so a recovered digest can
@@ -2383,6 +2518,7 @@ def load_run(directory: Path) -> HuntRun | None:
         findings=findings,
         waves=waves,
         wave_records=records,
+        kind=kind or "hunt",
         # So `--wave` on a recovered campaign continues its numbering rather
         # than restarting at 1 and overwriting what is on disk. The highest wave
         # anything on disk names, plan or finding.

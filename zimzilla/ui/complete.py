@@ -44,6 +44,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/osint", "open-source recon on a target"),
     ("/phish", "clone a login page and harvest creds"),
     ("/bug-hunt", "recon, then one wave of 10 agents"),
+    ("/ad", "Active Directory campaign — gated and interlocked"),
     ("/stop-hunt", "end a running hunt"),
     ("/summary-hunt", "the hunt report — what each wave did"),
     ("/report-bug-hunt", "evidence-only report, every wave"),
@@ -160,6 +161,12 @@ class CompletionPopup(VerticalScroll):
                     "theme": THEME_NAMES,
                     "osint": OSINT_KIND_ORDER,
                     "phish": ["stop", "status"],
+                    # Only `tools` — the rest of `/ad`'s arguments are flags,
+                    # and the target is a domain the operator has to type
+                    # anyway. Offering the flags here would put a `--ack` in
+                    # the popup that cannot be accepted without the domain it
+                    # is a confirmation of.
+                    "ad": ["tools"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

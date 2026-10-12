@@ -170,6 +170,84 @@ def test_fallback() -> None:
           f"{hunt_mod.HUNT_CONCURRENCY} vs {hunt_mod.HUNT_WAVE_SIZE}")
 
 
+def test_campaign_kind(wd: Path) -> None:
+    """The doctrine seam: `/ad` is data, not a fork of the engine.
+
+    Two things have to hold or the seam is a lie. First, ``HUNT_KIND`` must be
+    *exactly* today's constants — a default that differs in any byte is a
+    behaviour change smuggled in under a refactor, and the 552 tests around this
+    one would be measuring a different program. Second, a kind's own fields must
+    actually reach the places the engine uses them: the directory, the plan's
+    frontmatter, the fallback roster.
+    """
+    k = hunt_mod.HUNT_KIND
+    check("kind: the default is named hunt", k.name == "hunt", k.name)
+    check("kind: the default carries no directory prefix", k.dir_prefix == "",
+          repr(k.dir_prefix))
+    check("kind: the default prompts are the module constants, byte for byte",
+          k.recon_prompt == hunt_mod.RECON_PROMPT
+          and k.planner_prompt == hunt_mod.WAVE_PLANNER_PROMPT
+          and k.contract == hunt_mod.FINDING_CONTRACT
+          and k.summary_prompt == hunt_mod.SUMMARY_PROMPT)
+    check("kind: the default declares no vectors and no interlock",
+          k.vectors == () and k.interlock is None)
+    check("kind: the default falls back to HUNT_VECTORS",
+          [w.owns for w in hunt_mod.fallback_roster(1, 3, k).workers]
+          == [[v[2]] for v in hunt_mod.HUNT_VECTORS[:3]])
+
+    # A kind's own vectors win, and its prefix separates the directory. This is
+    # the whole reason `/ad corp.local` and `/bug-hunt corp.local` can coexist.
+    adish = hunt_mod.CampaignKind(
+        name="ad", dir_prefix="ad-",
+        vectors=(("asrep", "roast AS-REP", "asrep-roast"),))
+    cfg = _cfg(wd)
+    cfg.state_dir = _state(wd, "test_campaign_kind")
+    check("kind: a prefix is honoured by case_dir",
+          hunt_mod.case_dir(cfg, "corp.local", adish).name == "ad-corp.local",
+          hunt_mod.case_dir(cfg, "corp.local", adish).name)
+    check("kind: the unprefixed default is unchanged",
+          hunt_mod.case_dir(cfg, "corp.local").name == "corp.local",
+          hunt_mod.case_dir(cfg, "corp.local").name)
+    check("kind: both live under the one hunts root, so /findings sees them",
+          hunt_mod.case_dir(cfg, "corp.local", adish).parent
+          == hunt_mod.case_dir(cfg, "corp.local").parent
+          and hunt_mod.case_dir(cfg, "corp.local").parent.name
+          == tools_mod._HUNTS_DIR)
+    check("kind: a kind's own vectors are used when it has them",
+          [w.owns for w in hunt_mod.fallback_roster(1, 1, adish).workers]
+          == [["asrep-roast"]])
+
+    # The kind has to survive a round trip through disk, because a second
+    # invocation of `/ad` reads the campaign back and must know what it is.
+    run = hunt_mod.HuntRun(target="corp.local",
+                           directory=hunt_mod.case_dir(cfg, "corp.local", adish),
+                           kind="ad")
+    hunt_mod.write_plan(run, 1, team_mod.Roster(summary="s", workers=[]), "", True)
+    back = hunt_mod.load_run(run.directory)
+    check("kind: it round-trips through write_plan -> load_run",
+          back is not None and back.kind == "ad",
+          back.kind if back else "(no run)")
+
+    # And every campaign written before the field existed is a web hunt.
+    old = hunt_mod.HuntRun(target="old.test",
+                           directory=hunt_mod.case_dir(cfg, "old.test"))
+    hunt_mod.write_plan(old, 1, team_mod.Roster(summary="s", workers=[]), "", True)
+    plan = next(iter(hunt_mod._plan_files(old.directory)))
+    plan.write_text(re.sub(r"^kind:.*\n", "", plan.read_text(), flags=re.M))
+    back_old = hunt_mod.load_run(old.directory)
+    check("kind: a plan with no kind line reads back as hunt",
+          back_old is not None and back_old.kind == "hunt",
+          back_old.kind if back_old else "(no run)")
+
+    # The hook combinator is what lets an interlock ride alongside the write
+    # lock. With nothing to chain it must vanish entirely, not become a no-op
+    # wrapper — that is what makes `interlock=None` provably free.
+    check("kind: chaining nothing yields nothing",
+          hunt_mod._chain_hooks(None, None) is None)
+    check("kind: chaining one hook yields that hook",
+          hunt_mod._chain_hooks(None, "h") == "h")
+
+
 def test_planner_fallback_path() -> None:
     """A planner that rambles must not cost the wave."""
     check("planner: garbage parses to None",
@@ -2687,6 +2765,7 @@ async def test_busy_gate(wd: Path) -> None:
     dispatch_names = {
         "help", "clear", "mode", "model", "cost", "scope", "rain", "theme",
         "save", "load", "compact", "team", "osint", "phish", "bug-hunt",
+        "ad",
         "stop-hunt", "summary-hunt", "report-bug-hunt", "findings",
         "zim-logfare", "zim-tokenjuice", "zim-source", "zim-tokenharbour",
         "tokenharbour-api-setup", "tokenharbour-models", "logfare-models",
@@ -4231,6 +4310,7 @@ async def main() -> int:
         test_evidence_report(wd)
         test_rerun_wave_is_one_wave(wd)
         test_scope_naming(wd)
+        test_campaign_kind(wd)
         test_migrate_hunts(wd)
         test_hunt_findings_tool(wd)
         await test_campaign_notes(wd)

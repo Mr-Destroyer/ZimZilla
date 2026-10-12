@@ -387,6 +387,45 @@ def _scope_semantics(wd: Path) -> None:
     check("no deny file means no command is ever refused",
           not Scope.load(allow_f, None).check_command("curl https://evil.example.com/"))
 
+    # ---- Active Directory syntax ------------------------------------------
+    # The AD toolchain names its target in forms the token scan used to discard
+    # before hostname matching: `domain/user:pass@host` carries a `/` and an
+    # `@`, a UNC path carries `//`, and an on-prem suffix (`.local`) is not a
+    # public TLD. Every one of these was reachable while the deny-list named
+    # the domain. Kept as a table because the value is in the *coverage*: one
+    # passing case proves nothing about the next tool's spelling.
+    ad_deny = wd / "ad-deny.yaml"
+    ad_deny.write_text("domain:\n  - corp.local\n")
+    ad = Scope.load(None, ad_deny)
+    for cmd in (
+        "smbclient -L //dc01.corp.local -N",
+        "GetUserSPNs.py corp.local/j.doe:Pass -dc-ip 10.10.10.5 -request",
+        "secretsdump.py corp.local/j.doe:Pass@dc01.corp.local",
+        "nxc smb dc01.corp.local -u j.doe -p Pass --kerberoasting",
+        "certipy find -u j.doe@corp.local -dc-ip 10.10.10.5",
+        "ldapsearch -H ldap://dc01.corp.local -x -b 'dc=corp,dc=local'",
+        "rpcclient -U '' -N dc01.corp.local",
+        "bloodhound-python -d corp.local -ns 10.10.10.5",
+        "smbclient //dc01.corp.local/SYSVOL -N",
+        "smbclient " + "\\\\" + "dc01.corp.local" + "\\" + "SYSVOL -N",
+        "secretsdump.py -just-dc corp.local/admin@10.10.10.5",
+        "psexec.py corp.local/j.doe:Pass@dc01.corp.local cmd.exe",
+    ):
+        check(f"AD command is refused: {cmd.split()[0]}", bool(ad.check_command(cmd)))
+
+    # The domain half of impacket's syntax is a target on its own: it is what
+    # the deny-list names, and the DC's address often appears nowhere else.
+    check("impacket domain half is a target",
+          "corp.local" in ad.extract_targets("GetUserSPNs.py corp.local/j.doe:Pass"))
+
+    # And the fix must not turn ordinary paths into targets: `/` is a directory
+    # separator in every non-AD command, and a false block is worse than a miss
+    # because it stops work that was in scope.
+    for cmd in ("cat src/app.py", "cp src/main.py dist/main.py",
+                "tar czf backup.tar.gz src/", "mkdir -p a/b/c",
+                "grep -r foo ./logs/app.log", "cat report.json"):
+        check(f"path is not a target: {cmd}", not ad.check_command(cmd))
+
     # ---- singular/plural/legacy keys --------------------------------------
     singular = wd / "singular.yaml"
     singular.write_text("domain:\n  - one.example.com\nip:\n  - 10.0.0.1\ncidr:\n  - 10.1.0.0/16\n")
