@@ -920,6 +920,18 @@ class ZimZillaApp(App):
             self._sys_line(
                 f"merged {len(merged)} old hunt campaign(s) into one directory "
                 f"per scope under {Path(self.cfg.state_dir) / 'hunts'}", ok=True)
+        # Then file each campaign's flat `findings/` and `plans/` into the
+        # per-wave directories. Runs after the merge, because a legacy campaign
+        # has to be inside its scope before it can be reorganised. Also
+        # idempotent: a second boot finds no flat directories and does nothing.
+        try:
+            refiled = hunt_mod.reorganise_waves(self.cfg)
+        except Exception:  # noqa: BLE001
+            refiled = []
+        if refiled:
+            self._sys_line(
+                f"filed {len(refiled)} hunt artefact(s) into per-wave "
+                "directories", ok=True)
         inp = self.query_one("#input", Input)
         # Warm the Logfare catalog while the operator reads the banner, so the
         # first /model is current instead of showing the declared fallback. Only
@@ -1471,6 +1483,14 @@ class ZimZillaApp(App):
     BUSY_OK = frozenset({
         "help", "cost", "scope", "mode", "model",
         "stop-hunt", "summary-hunt", "findings", "exit", "quit",
+        # `report-bug-hunt` is here so its *own* refusal is the one the operator
+        # reads. It cannot run mid-wave — a report built from half a wave
+        # under-counts — but the gate's generic "harness is busy" points at
+        # Ctrl+C, which for a hunt is the blunt key: it cancels the workers
+        # rather than setting the stop flag, so the wave never unwinds and the
+        # closing report is never written. The command says "stop the wave
+        # first", which is the advice that actually works.
+        "report-bug-hunt",
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
@@ -1500,6 +1520,7 @@ class ZimZillaApp(App):
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
+            "report-bug-hunt": lambda a: self._cmd_report_bug_hunt(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
@@ -1545,9 +1566,11 @@ class ZimZillaApp(App):
             ("/team <task>", "fan the task out across parallel agents"),
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
-            ("/bug-hunt <target>", "recon, then waves of 10 agents until stopped"),
+            ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
+            ("/bug-hunt <target> --wave N", "run wave N specifically"),
             ("/stop-hunt", "end a running hunt       (works while busy)"),
-            ("/summary-hunt", "write the hunt report    (works while busy)"),
+            ("/summary-hunt", "the hunt report          (works while busy)"),
+            ("/report-bug-hunt", "evidence-only report, every wave"),
             ("/findings", "the finding tracker      (works while busy)"),
             ("/exit", "leave the harness        (Ctrl+D also works)"),
         ]
@@ -2764,22 +2787,58 @@ class ZimZillaApp(App):
 
     # ---- /bug-hunt --------------------------------------------------------
     def _cmd_bug_hunt(self, args) -> None:
-        """/bug-hunt [--fresh] <target> — recon, then waves of 10 until stopped.
+        """/bug-hunt [--fresh] [--wave N] <target> — recon, then one wave.
 
-        The campaign is a loop, not a turn: recon maps the target, a read-only
-        planner writes ten briefs, all ten run at once, their findings feed the
-        next planner, and it repeats until /stop-hunt. See zimzilla/hunt.py.
+        Recon maps the target (or reuses notes already on disk), a read-only
+        planner writes ten briefs, all ten run at once, their findings land in
+        the wave's own directory — and the command stops there. Whether there is
+        another wave is the operator's call, which is the point: a campaign that
+        planned wave 2 straight after wave 1 found a critical was spending
+        tokens on work nobody asked for and could not decline. See
+        zimzilla/hunt.py.
 
-        A target that already has recon on disk reuses it and goes straight to
-        planning — ``--fresh`` forces the mapping phase anyway, for a target
-        that has changed since the notes were written.
+        ``--wave N`` runs wave N specifically; without it the next wave the
+        scope has not run yet. ``--fresh`` forces the mapping phase even when
+        recon is on disk, for a target that has changed since the notes were
+        written.
         """
-        # `--fresh` may sit either side of the target, because both read
+        # The flags may sit either side of the target, because both read
         # naturally and an operator who has to remember which is which will get
         # it wrong. Stripped before the target is joined, so a stray flag never
         # reaches scope_slug and becomes part of a directory name.
         fresh = any(a in ("--fresh", "-f") for a in args)
         rest = [a for a in args if a not in ("--fresh", "-f")]
+
+        # --wave takes a value, so it is parsed rather than filtered: the flag
+        # and the number after it are both consumed, and every malformed form
+        # is refused here rather than becoming part of the target string.
+        wave_number: int | None = None
+        stripped: list[str] = []
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg == "--wave" or arg.startswith("--wave="):
+                value = arg.partition("=")[2] if "=" in arg else (
+                    rest[i + 1] if i + 1 < len(rest) else "")
+                if "=" not in arg:
+                    i += 1  # consume the value too
+                if not value:
+                    self._sys_line(
+                        "--wave needs a number, e.g. /bug-hunt x.com --wave 2",
+                        warn=True)
+                    return
+                if not value.isdigit() or int(value) < 1:
+                    self._sys_line(
+                        f"⚠ --wave takes a wave number of 1 or more, not "
+                        f"{value!r}. Wave 0 is recon — it has no briefs to "
+                        "run.", warn=True)
+                    return
+                wave_number = int(value)
+            else:
+                stripped.append(arg)
+            i += 1
+        rest = stripped
+
         if not rest:
             self._hunt_usage()
             return
@@ -2830,8 +2889,19 @@ class ZimZillaApp(App):
             )
         else:
             t.append("mapping the surface\n", style=p.primary)
+        # The wave that will actually run. Without --wave it is the next one the
+        # scope has not run, which for a repeat hunt is not 1 — and an operator
+        # who cannot see the number cannot tell whether they are continuing a
+        # campaign or overwriting it.
+        running = wave_number or hunt_mod.next_wave_number(directory)
         t.append("  ◈ WAVE      ", style=f"bold {p.accent}")
-        t.append(f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent\n", style=p.primary)
+        t.append(f"wave {running} — ", style=f"bold {p.primary}")
+        t.append(
+            f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent, then it stops\n"
+            if wave_number is None else
+            f"{hunt_mod.HUNT_WAVE_SIZE} agents, all concurrent\n",
+            style=p.primary,
+        )
         t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
         t.append(str(directory) + "\n", style=p.dim)
         t.append("  ◈ NOTICE    ", style=f"bold {p.amber}")
@@ -2842,9 +2912,11 @@ class ZimZillaApp(App):
         )
         t.append("  · ", style=p.dim)
         t.append("/stop-hunt", style=p.primary)
-        t.append(" ends the campaign   ·   ", style=p.dim)
+        t.append(" ends the wave   ·   ", style=p.dim)
         t.append("/summary-hunt", style=p.primary)
         t.append(" writes the report   ·   ", style=p.dim)
+        t.append("/report-bug-hunt", style=p.primary)
+        t.append(" evidence only   ·   ", style=p.dim)
         t.append("/findings", style=p.primary)
         t.append(" shows the tracker\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
@@ -2853,20 +2925,24 @@ class ZimZillaApp(App):
         if pane is not None:
             pane.show_hunt(target, hunt_mod.HUNT_WAVE_SIZE)
 
-        self._run_hunt(target, fresh=fresh)
+        self._run_hunt(target, fresh=fresh, wave_number=wave_number)
 
     def _hunt_usage(self) -> None:
         p = self.palette
         t = Text()
         t.append("  BUG HUNT\n\n", style=f"bold {p.accent}")
         t.append("  /bug-hunt <target>   ", style=f"bold {p.primary}")
-        t.append("recon, then waves of 10 agents until you stop it\n", style=p.dim)
+        t.append("recon, then the next wave of 10 agents, then stop\n", style=p.dim)
+        t.append("  /bug-hunt <target> --wave N  ", style=f"bold {p.primary}")
+        t.append("run wave N specifically (wave 1 first)\n", style=p.dim)
         t.append("  /bug-hunt --fresh <target>  ", style=f"bold {p.primary}")
         t.append("remap even if recon is already on disk\n", style=p.dim)
         t.append("  /stop-hunt           ", style=f"bold {p.primary}")
-        t.append("end the campaign and print what it found\n", style=p.dim)
+        t.append("end the wave and print what it found\n", style=p.dim)
         t.append("  /summary-hunt        ", style=f"bold {p.primary}")
-        t.append("write the closing report (works mid-hunt)\n", style=p.dim)
+        t.append("the report — what each wave did (works mid-wave)\n", style=p.dim)
+        t.append("  /report-bug-hunt     ", style=f"bold {p.primary}")
+        t.append("evidence only, every wave, no narrative\n", style=p.dim)
         t.append("  /findings            ", style=f"bold {p.primary}")
         t.append("the tracker — every bug found, worst first\n", style=p.dim)
         t.append("\n  Each wave: the planner reads what every earlier wave found and\n",
@@ -2877,9 +2953,11 @@ class ZimZillaApp(App):
         t.append("\n  evidence lands in ", style=p.dim)
         t.append(f"{Path(self.cfg.state_dir) / 'hunts'}/<scope>/\n",
                  style=p.primary)
-        t.append("  one directory per scope, reused — findings, recon notes and\n",
+        t.append("  one directory per scope, reused, and one directory per wave:\n",
                  style=p.dim)
-        t.append("  each wave's plan accumulate there across campaigns\n", style=p.dim)
+        t.append("  wave-N/plan.md and wave-N/findings/ sit together, so the tree\n",
+                 style=p.dim)
+        t.append("  says what each wave aimed at and what it found\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
     def on_wave_overlay_stop_requested(
@@ -2968,6 +3046,55 @@ class ZimZillaApp(App):
     def _findings_closed(self, _result=None) -> None:
         self._findings_panel = None
 
+    def _cmd_report_bug_hunt(self, args) -> None:
+        """/report-bug-hunt — the evidence-only report, every wave.
+
+        No model call: the report is assembled from what was recorded, so
+        nothing in it is a paraphrase of evidence. That is the difference from
+        `/summary-hunt`, which is a written narrative with remediation and is
+        the right document for a different reader.
+
+        Refused while the harness is busy, because the live run's findings are
+        still arriving and a report built from half a wave is a report that
+        under-counts. The archived campaign is read instead — the same path
+        `/summary-hunt` uses with no hunt live.
+        """
+        if self.busy:
+            self._sys_line(
+                "harness is busy — /stop-hunt the wave first, then write the "
+                "report", warn=True)
+            return
+
+        latest = self._latest_hunt_dir()
+        if latest is None:
+            self._sys_line("no hunt has run in this session yet", warn=True)
+            return
+        run = hunt_mod.load_run(latest)
+        if run is None or not run.findings:
+            self._sys_line(f"no findings archived in {latest}", warn=True)
+            return
+
+        try:
+            path = hunt_mod.write_evidence_report(self.cfg, run)
+        except OSError as e:
+            self._sys_line(f"⚠ could not write the report — {e}", warn=True)
+            return
+        if path is None:
+            self._sys_line("nothing to report", warn=True)
+            return
+
+        p = self.palette
+        t = Text()
+        t.append("  ◈ REPORT    ", style=f"bold {p.accent}")
+        t.append(f"{len(run.findings)} finding(s), "
+                 f"{len(run.wave_records) or run.wave} wave(s)\n",
+                 style=f"bold {p.primary}")
+        t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
+        t.append(str(path) + "\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        self._sys_line("evidence only — no remediation, no narrative; "
+                       "/summary-hunt writes the other report", ok=True)
+
     def _refresh_findings(self) -> None:
         """Repaint the open tracker from the live run, if there is one.
 
@@ -3037,15 +3164,18 @@ class ZimZillaApp(App):
             self.query_one("#input", Input).focus()
 
     @work(exclusive=True)
-    async def _run_hunt(self, target: str, *, fresh: bool = False) -> None:
-        """The campaign worker: recon, then waves until /stop-hunt.
+    async def _run_hunt(self, target: str, *, fresh: bool = False,
+                        wave_number: int | None = None) -> None:
+        """The campaign worker: recon, then one wave.
 
         Shaped like _run_team — busy flag, an on_event sink, a spinner, and a
         finally that restores idle state — but the loop inside lives in
         zimzilla/hunt.py so it can be tested without a terminal.
 
         ``fresh`` is forwarded to ``run_hunt``: it forces the mapping phase even
-        when the scope already has recon on disk. See ``_cmd_bug_hunt``.
+        when the scope already has recon on disk. ``wave_number`` names the wave
+        to run; None means the next one the scope has not run yet. See
+        ``_cmd_bug_hunt``.
         """
         p = self.palette
         chat = self.query_one(ChatPane)
@@ -3170,6 +3300,14 @@ class ZimZillaApp(App):
                     ok=True)
                 self._sys_line(f"  {ev.get('path', '')}")
                 bar.set_activity("hunt: planning", busy=True)
+
+            elif etype == "hunt_refused":
+                # A wave with nothing to follow. `run_hunt` decided it, and this
+                # is the one place the reason can be shown — the refusal happens
+                # before recon, so there is no overlay to close and no wave to
+                # unwind. Just the operator and the line telling them what to run.
+                self._sys_line(f"⚠ {ev.get('message', 'refused')}", warn=True)
+                bar.set_activity("idle", busy=False)
 
             elif etype == "hunt_recon_start":
                 self._sys_line("recon — mapping the target…")
@@ -3381,6 +3519,7 @@ class ZimZillaApp(App):
                 summary_flag=lambda: self._hunt_summary_queued,
                 run=self._hunt_run,
                 fresh=fresh,
+                wave_number=wave_number,
             )
             # A summary asked for but never delivered — the hunt was stopped
             # between the request and a wave boundary. Offer it now rather than
@@ -3573,9 +3712,10 @@ class ZimZillaApp(App):
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
             ("/phish", "clone a login page and harvest creds", "phish"),
-            ("/bug-hunt", "recon, then waves of 10 agents until stopped", "bug-hunt"),
+            ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
             ("/stop-hunt", "end a running hunt", "stop-hunt"),
-            ("/summary-hunt", "write the hunt report", "summary-hunt"),
+            ("/summary-hunt", "the hunt report — what each wave did", "summary-hunt"),
+            ("/report-bug-hunt", "evidence-only report, every wave", "report-bug-hunt"),
             ("/findings", "the hunt finding tracker", "findings"),
             ("/clear", "wipe transcript and history", "clear"),
             ("/exit", "leave the harness", "exit"),

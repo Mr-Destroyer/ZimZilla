@@ -881,6 +881,48 @@ def _scope_name(target: str) -> str:
     return text.lower()
 
 
+#: A wave directory: ``wave-0``, ``wave-1``, … Duplicated from ``hunt`` for the
+#: same import-cycle reason as ``_scope_name``.
+_WAVE_DIR_RE = re.compile(r"^wave-(\d+)$")
+
+
+def _finding_files(directory: Path) -> list[Path]:
+    """Every finding report in a campaign, in wave order then by name.
+
+    Both layouts, like ``hunt._finding_files``: ``wave-<n>/findings/*.md`` and
+    the flat ``findings/*.md`` of a campaign the boot migration has not reached
+    yet. Duplicated rather than imported — see ``_scope_name``.
+    """
+    out: list[Path] = []
+    for child in sorted(directory.iterdir()):
+        if child.is_dir() and _WAVE_DIR_RE.match(child.name):
+            out.extend(sorted((child / "findings").glob("*.md")))
+    flat = directory / "findings"
+    if flat.is_dir():
+        out.extend(sorted(flat.glob("*.md")))
+    return out
+
+
+def _plan_files(directory: Path) -> list[Path]:
+    """Every wave plan in a campaign, current layout and legacy alike."""
+    out: list[Path] = []
+    for child in sorted(directory.iterdir()):
+        if child.is_dir() and _WAVE_DIR_RE.match(child.name):
+            out.extend(sorted(child.glob("plan*.md")))
+    flat = directory / "plans"
+    if flat.is_dir():
+        out.extend(sorted(flat.glob("wave-*.md")))
+    return out
+
+
+#: Severity, worst first. Duplicated from ``hunt.VALID_SEVERITIES`` for the same
+#: reason as the enum above — ``hunt`` imports ``agent``, which imports this
+#: module, so the import cannot go the other way. The two are pinned together by
+#: test_hunt.py's "hunt_findings" suite.
+_SEVERITY_ORDER = {s: i for i, s in enumerate(
+    ("critical", "high", "medium", "low", "info"))}
+
+
 def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
     """Read a campaign's findings, recon notes and plans off disk.
 
@@ -920,7 +962,7 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
                 break
         if directory is None:
             for d in campaigns:
-                for f in sorted((d / "findings").glob("*.md")):
+                for f in _finding_files(d):
                     try:
                         meta = _read_frontmatter(
                             f.read_text(encoding="utf-8", errors="replace"))
@@ -940,26 +982,44 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
 
     parts: list[str] = [f"campaign: {directory.name}  ({directory})"]
 
-    finding_files = sorted((directory / "findings").glob("*.md"))
+    finding_files = _finding_files(directory)
 
     if include in ("findings", "all"):
         if not finding_files:
             parts.append("\nFINDINGS: none were confirmed in this campaign.")
         else:
-            parts.append(f"\nFINDINGS ({len(finding_files)}):")
+            # Worst first, the order `/findings` and the closing summary use. On
+            # disk the files sort by wave then name, which buries a campaign's
+            # one critical at position 20 of 43 — a reader skimming the list
+            # would have to scan all of it to find the thing that matters most.
+            # Ordered here rather than in `_finding_files` because that helper
+            # feeds the "read the newest campaign's frontmatter" probe too, where
+            # order is irrelevant and re-reading every file would not be.
+            rows: list[tuple[tuple[int, int, str], str]] = []
             for path in finding_files:
                 try:
                     text = path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 meta = _read_frontmatter(text)
-                title = _first_heading(text) or path.stem
-                parts.append(
-                    f"\n- [{meta.get('severity', '?').upper()}] {title}\n"
+                severity = _text(meta.get("severity", "")).strip().lower()
+                try:
+                    wave = int(str(meta.get("wave", "")).strip())
+                except (TypeError, ValueError):
+                    wave = 0
+                rows.append((
+                    (_SEVERITY_ORDER.get(severity, len(_SEVERITY_ORDER)),
+                     wave,
+                     _first_heading(text) or path.stem),
+                    f"\n- [{severity.upper() or '?'}] "
+                    f"{_first_heading(text) or path.stem}\n"
                     f"  wave {meta.get('wave', '?')} · "
                     f"{meta.get('asset') or '(no asset)'} · "
                     f"found by {meta.get('agent', '?')}\n"
-                    f"  file: {path}")
+                    f"  file: {path}"))
+            rows.sort(key=lambda r: r[0])
+            parts.append(f"\nFINDINGS ({len(rows)}), worst first:")
+            parts.extend(body for _, body in rows)
 
     if include in ("recon", "all"):
         notes = sorted(directory.glob("recon-*.md"))
@@ -978,7 +1038,7 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
                 f"{_truncate(body.strip(), 4000)}")
 
     if include in ("plans", "all"):
-        plans = sorted((directory / "plans").glob("wave-*.md"))
+        plans = _plan_files(directory)
         if not plans:
             parts.append("\nPLANS: none recorded.")
         else:

@@ -431,9 +431,10 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
-| `/bug-hunt [--fresh] <target>` | recon (reused if already done), then waves of 10 agents until stopped |
+| `/bug-hunt [--fresh] [--wave N] <target>` | recon (reused if already done), then **one** wave of 10 agents |
 | `/stop-hunt` | end a running hunt |
-| `/summary-hunt` | write the hunt report |
+| `/summary-hunt` | the hunt report — what each wave did |
+| `/report-bug-hunt` | evidence-only report — every wave, raw evidence, no remediation |
 | `/findings` | the finding tracker — every bug found, worst first |
 | `/clear` | wipe transcript and history |
 | `/exit` | leave |
@@ -566,10 +567,8 @@ environment; none are hard-coded.
 ## Bug hunt
 
 `/bug-hunt <target>` runs a campaign against a target you declare. Recon goes
-first — one agent maps what is reachable — and then it runs waves of ten agents,
-each with its own brief, all streaming at once. It keeps going until you stop
-it, re-planning each wave from what the last one found, so a second wave chases
-what the first one turned up rather than repeating it.
+first — one agent maps what is reachable — and then it runs **one** wave of ten
+agents, each with its own brief, all streaming at once. Then it stops.
 
 ```
 /bug-hunt target.com
@@ -579,20 +578,42 @@ what the first one turned up rather than repeating it.
   ◈ findings 2 critical · 1 high
 ```
 
-**A second hunt on the same scope skips the recon.** The case directory belongs
-to the scope and is reused, so a repeat `/bug-hunt` finds the earlier campaign's
-notes sitting there, plans against them, and goes straight to wave 1 instead of
-spending minutes remapping a target that has not moved. The findings earlier
-campaigns confirmed are carried into the tracker — so the planner aims at what
-is still open rather than re-deriving it — and marked as carried, so they are
-never counted as this campaign's haul. The planner is told the map is
-second-hand and to re-check an asset before briefing an agent on it.
+**One wave per invocation, and you decide the next one.** A wave costs ten
+agents' worth of tokens and can turn up a dozen findings; the harness has no way
+to know whether a second is worth it, and guessing wrong either wastes a wave or
+stops one you wanted. So it runs one and hands you back the prompt. Read what it
+found, then ask for another:
+
+```
+/bug-hunt target.com          # runs the next wave, then stops
+```
+
+**`--wave N` runs exactly that wave.** Wave 1 must exist before wave 2 — the
+planner reads the previous wave's findings to aim the next one, so the numbering
+is a history, not a label. Asking for a wave that has no predecessor is refused
+with that reason rather than silently starting from nothing. Wave 0 is recon and
+cannot be requested; `--fresh` is how you redo the mapping.
+
+```
+/bug-hunt target.com --wave 2
+/bug-hunt --wave=2 target.com
+```
+
+**A second hunt on the same scope skips the recon.** The campaign directory
+belongs to the scope and is reused, so a repeat `/bug-hunt` finds the earlier
+campaign's notes sitting there, plans against them, and goes straight to the
+next wave instead of spending minutes remapping a target that has not moved. The
+findings earlier waves confirmed are carried into the tracker — so the planner
+aims at what is still open rather than re-deriving it — and marked `(found in an
+earlier wave)`, so they are never counted as this wave's haul. The planner is
+told the map is second-hand and to re-check an asset before briefing an agent on
+it.
 
 ```
 /bug-hunt target.com
 
   ◈ recon    reusing notes from recon-20261001-142210.md (9d old) — no remap
-  ◈ wave 1   10 agents
+  ◈ wave 2   10 agents
 ```
 
 When the target *has* moved, `--fresh` forces the mapping phase back on. It
@@ -616,9 +637,45 @@ ZIM-TRACK fills in while the wave is still running. Type `/stop-hunt` at any
 point; a terminal too small for the web gets the same facts as a list instead.
 
 Findings are deduplicated by title and asset, so a bug three agents each
-rediscover reads as one. Critical, high and medium findings are written to the
-case directory as they land; low and info are tracked and shown but not saved.
-`/findings` shows the whole campaign worst-first, live or after the fact.
+rediscover reads as one. Every finding is written to disk as it lands, at every
+severity — an `info` that a later wave escalates is worth having, and a wave you
+stop halfway is worth keeping whole. `/findings` shows the whole campaign
+worst-first, live or after the fact.
+
+**The tree explains itself.** Each wave's artefacts go in their own directory —
+the plan the wave was aimed by, and the findings it produced, side by side:
+
+```
+~/.zimzilla/hunts/target.com/
+  recon-20261001-142210.md        ← recon notes, one file per recon
+  wave-0/findings/                ← what recon itself turned up
+  wave-1/
+    plan.md                       ← the roster: who went where, and why
+    findings/critical-sqli-in-id.md
+    findings/high-idor-api-users.md
+  wave-2/plan.md, findings/…
+  summary-20261001-160000.md      ← /summary-hunt output
+  report-20261001-170000.md       ← /report-bug-hunt output
+```
+
+A wave you deliberately re-run keeps every plan — `plan.md`, then `plan-2.md` —
+so the record of what each run aimed at survives. A campaign that ran before
+this layout existed is reorganised into it at boot: findings and plans are
+*moved* into their wave directories, never overwritten, and a file whose
+destination is already taken is left where it is rather than clobbered.
+
+`/summary-hunt` reads this tree back — the wave history, what each wave aimed
+at, and what it found — and works after a restart, on a campaign from an earlier
+session, or on one whose wave was stopped halfway.
+
+**`/report-bug-hunt` writes the evidence.** Where `/summary-hunt` is the
+narrative — what happened, and what to do about it — `/report-bug-hunt` is the
+raw record: a section per wave, and under it every finding with its asset, who
+found it, and its evidence reproduced **verbatim**, unedited. It deliberately
+omits remediation, because a report that mixes the finding with the fix is
+arguing rather than documenting. It is written beside the campaign and archived
+under `~/.zimzilla/reports/`, so the deliverable outlives the campaign
+directory. It makes no model call: the document is exactly what was recorded.
 
 > **Authorised use only.** `/bug-hunt` is for a target you are authorised to
 > test — your own estate, or a declared engagement. The command cannot verify
@@ -689,6 +746,7 @@ zimzilla/                     the package
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
+  hunt.py                     /bug-hunt — the wave loop, per-wave dirs, reports
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan palettes
   termbg.py                   asks the terminal for its own background
@@ -709,13 +767,18 @@ tests/                        the test suite
 
 ```bash
 python tests/test_phase4.py        # from the checkout's venv
-python tests/test_hunt.py          # /bug-hunt — the wave loop, live reporting, reports
+python tests/test_hunt.py          # /bug-hunt — the wave loop, per-wave layout, reports
 python tests/test_web.py           # the wave web — geometry and the tracker
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_update.py        # self-update — real git, throwaway repos
 python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv
 ```
+
+`test_hunt.py` builds campaigns in a throwaway state directory and runs them
+through the real loop with a stubbed model, including the boot migration — a
+campaign in the old flat layout is reorganised and read back, and a wave that
+was deliberately re-run is checked to count as one wave rather than three.
 
 Stubs the model and drives the interface directly, so it needs no network and
 no credentials. `test_update.py` runs real `git` against repositories it

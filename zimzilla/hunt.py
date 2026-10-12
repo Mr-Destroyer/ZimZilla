@@ -6,11 +6,17 @@ session improvises one pass and stops. `/bug-hunt` supplies the missing loop:
 
     recon -> plan a wave -> run the wave -> harvest findings -> replan
 
-and repeats until the operator says `/stop-hunt`.
+**One wave per invocation.** The loop is bounded (`max_waves`, default 1), so
+`/bug-hunt host` runs the next wave and stops; `/bug-hunt host --wave 3` runs
+wave 3. The operator decides whether there is a next wave, which is the whole
+point: a campaign that plans wave 2 straight after wave 1 found a critical is
+spending tokens on work nobody asked for and nobody can decline. `/stop-hunt`
+still lands mid-wave — the wave races the `stop` event, so stopping cancels the
+agents rather than waiting out the slowest one.
 
 The shape is deliberately `/team`'s. A read-only planner reads what is known,
 emits a JSON roster of independent briefs, the briefs run concurrently, and the
-results come back as structured text. Three things are different:
+results come back as structured text. Two things are different:
 
 *   **The planner sees the findings so far.** `WAVE_PLANNER_PROMPT` carries every
     finding from every earlier wave, so wave N+1 is aimed at what wave N did not
@@ -18,10 +24,10 @@ results come back as structured text. Three things are different:
     whole point of the command; without it this is just `/team` with a bigger
     roster.
 
-*   **The loop does not end on its own.** There is no wave cap and no cost cap —
-    the operator owns the stop. `stop` is an `asyncio.Event` the UI sets from
-    `/stop-hunt`, and a wave races it so a stop lands mid-wave instead of after
-    the slowest worker.
+*   **The campaign directory is the scope's, and its waves are directories.** A
+    wave's plan and its findings land together in `<campaign>/wave-<n>/`, so the
+    tree says what each wave aimed at and what it found without anyone reading
+    frontmatter. Recon sits at the top level beside them, one file per recon.
 
 *   **Workers are told to report in JSON.** Every brief ends with the same
     finding contract, and `parse_findings` reads it back off the worker's final
@@ -60,10 +66,6 @@ HUNT_WAVE_SIZE = 10
 #: Workers in flight at any instant. Equal to the wave size by design: the
 #: operator asked for all ten to run simultaneously.
 HUNT_CONCURRENCY = 10
-
-#: Severities worth a report file. Anything quieter is still surfaced in the
-#: transcript and fed to the next planner, but it does not earn an artefact.
-SAVE_SEVERITIES = {"critical", "high", "medium"}
 
 #: How long a turn's event stream may go quiet before the prose produced so far
 #: is flushed to the UI anyway. The planner's turn runs for tens of seconds over
@@ -468,18 +470,54 @@ class Finding:
     summary: str = ""
     evidence: str = ""
     remediation: str = ""
-    #: True for a finding an earlier campaign confirmed and this one loaded to
-    #: seed its tracker. Carried findings are shown and fed to the planner, but
-    #: they are not this campaign's work: the closing counts exclude them and
-    #: the digest marks them. Kept as a field rather than inferred from `wave`,
-    #: because a carried finding keeps the wave number it was found in, which
-    #: collides with this campaign's own early waves.
+    #: True for a finding earlier work confirmed and this run loaded to seed its
+    #: tracker — a prior campaign's, or a prior wave's. Carried findings are
+    #: shown and fed to the planner, but they are not this run's work: the
+    #: closing counts exclude them and the digest marks them. Kept as a field
+    #: rather than inferred from `wave`, because a carried finding keeps the wave
+    #: number it was found in, which collides with this run's own waves.
     carried: bool = False
 
     @property
     def saved(self) -> bool:
-        """Whether this earns a report file."""
-        return self.severity in SAVE_SEVERITIES
+        """Whether this earns a report file.
+
+        Always true. This used to gate on ``SAVE_SEVERITIES`` — critical, high
+        and medium earned an artefact and low/info did not — but a low finding
+        that never reached disk died with the process, and the operator's own
+        `/report-bug-hunt` cannot cite evidence that was never written down. The
+        severity is in the file's name and its frontmatter, so filtering the
+        quiet ones is a read-time decision now rather than a write-time one.
+
+        Kept as a property rather than dropped, because it is the seam a
+        threshold would go back into, and `_save` and `hunt_end` read it.
+        """
+        return True
+
+
+@dataclass
+class WaveRecord:
+    """What one wave was, as its plan recorded it.
+
+    Read back from ``wave-<n>/plan.md`` by ``load_run``. ``waves`` is the
+    one-line-per-wave history the planner reads and the summary quotes; this is
+    the structured form behind it, so the wave view and the evidence report can
+    say what a wave aimed at without re-parsing a string.
+    """
+
+    number: int
+    agents: int = 0
+    fell_back: bool = False
+    summary: str = ""
+    stamp: str = ""
+
+    def line(self, found: int = 0) -> str:
+        """The one-line digest, in the shape ``HuntRun.waves`` has always used."""
+        return (
+            f"wave {self.number}: {self.agents} agents, "
+            f"{found} finding(s)"
+            + (" (fixed vector fallback)" if self.fell_back else "")
+        )
 
 
 @dataclass
@@ -493,6 +531,10 @@ class HuntRun:
     recon: str = ""
     findings: list[Finding] = field(default_factory=list)
     waves: list[str] = field(default_factory=list)
+    #: What each wave was, read back from its plan. Populated by ``load_run``;
+    #: a live run fills ``waves`` as it goes and leaves this empty until the
+    #: campaign is reloaded, because the report is built from an archived run.
+    wave_records: list[WaveRecord] = field(default_factory=list)
     started: float = field(default_factory=time.time)
     #: Where ``recon`` came from when a repeat hunt reused notes already on
     #: disk, and how old they were in seconds. Both None when this campaign ran
@@ -517,10 +559,14 @@ class HuntRun:
         aim elsewhere, not to re-read the evidence. The full text lives in the
         report files.
 
-        Findings carried in from an earlier campaign are marked as such, so a
-        planner does not read a bug confirmed weeks ago as one this campaign
-        just closed — the distinction decides whether a brief that re-tests it
-        is redundant or overdue.
+        Findings carried in from earlier work are marked as such, so a planner
+        does not read a bug confirmed weeks ago as one this campaign just
+        closed — the distinction decides whether a brief that re-tests it is
+        redundant or overdue. The label says "earlier wave" rather than "earlier
+        campaign" because the campaign is now the scope's whole history: a
+        second `/bug-hunt` runs one wave on top of the waves already there, so
+        what a wave inherits may be from last week's campaign or from yesterday's
+        wave, and to the planner those are the same thing.
         """
         if not self.findings:
             return "(nothing confirmed yet)"
@@ -529,7 +575,7 @@ class HuntRun:
             asset = f" @ {f.asset}" if f.asset else ""
             line = f"- [{f.severity}] {f.title}{asset} — {f.summary}".rstrip()
             if f.carried:
-                line += "  (carried from an earlier campaign)"
+                line += "  (found in an earlier wave)"
             lines.append(line)
         return "\n".join(lines)
 
@@ -778,10 +824,18 @@ def case_dir(cfg: Config, target: str) -> Path:
     notes in one, findings in another, nothing that accumulated. The directory
     is now the scope's, and the *artefacts* inside it carry the timestamps, so
     hunting the same target twice adds to its history instead of starting over.
+
+    **Nothing is created but the directory itself.** It used to make
+    ``findings/`` and ``plans/`` up front, which meant a `/bug-hunt` stopped
+    before its first brief left an empty campaign behind and — more to the point
+    — those two directories were the marker ``migrate_hunts`` used to recognise
+    a scope-shaped campaign. The layout is now one directory per wave
+    (``wave-<n>/findings/`` and ``wave-<n>/plan.md``, see ``wave_dir``), so the
+    wave directories are created by ``write_plan`` and ``write_report`` as the
+    waves actually run. See ``is_scope_shaped`` for what replaced the marker.
     """
     d = Path(cfg.state_dir) / "hunts" / scope_slug(target)
-    (d / "findings").mkdir(parents=True, exist_ok=True)
-    (d / "plans").mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -790,9 +844,122 @@ def case_dir(cfg: Config, target: str) -> Path:
 #: does. See ``migrate_hunts``.
 _LEGACY_DIR_RE = re.compile(r"^(?P<scope>.+)-(?P<stamp>\d{8}-\d{6})$")
 
-#: The marker that says a directory is already scope-shaped: ``case_dir`` always
-#: makes this, and the legacy ``<scope>-<stamp>`` layout never did.
-_SCOPE_MARKER = "plans"
+#: A wave directory: ``wave-0``, ``wave-1``, … The number is the wave it holds.
+_WAVE_DIR_RE = re.compile(r"^wave-(\d+)$")
+
+#: The flat layout's two directories, which ``reorganise_waves`` moves into the
+#: wave directories. Kept as names because both are still *read* — see
+#: ``_finding_files`` — so a campaign reorganised by hand, or read before the
+#: boot migration has run, still loads.
+_FLAT_FINDINGS = "findings"
+_FLAT_PLANS = "plans"
+
+
+def wave_dirs(directory: Path) -> list[tuple[int, Path]]:
+    """Every ``wave-<n>/`` in *directory*, as ``(n, path)``, ordered by n.
+
+    Sorted numerically rather than by name, so ``wave-10`` follows ``wave-9``
+    instead of landing between ``wave-1`` and ``wave-2`` the way a lexicographic
+    sort would put it.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    out = []
+    for child in directory.iterdir():
+        if not child.is_dir():
+            continue
+        match = _WAVE_DIR_RE.match(child.name)
+        if match:
+            out.append((int(match.group(1)), child))
+    return sorted(out, key=lambda pair: pair[0])
+
+
+def next_wave_number(directory: Path) -> int:
+    """The wave a fresh `/bug-hunt` on this scope should run next.
+
+    One past the highest wave already on disk, so hunting a scope a second time
+    continues its numbering rather than overwriting the waves it already has.
+    Minimum 1: wave 0 is recon, and recon is never something the operator asks
+    for as a wave.
+    """
+    waves = wave_dirs(directory)
+    return (waves[-1][0] + 1) if waves else 1
+
+
+def wave_dir(directory: Path, wave: int) -> Path:
+    """``<campaign>/wave-<n>/``, created."""
+    d = Path(directory) / f"wave-{wave}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def wave_findings_dir(directory: Path, wave: int) -> Path:
+    """``<campaign>/wave-<n>/findings/``, created."""
+    d = wave_dir(directory, wave) / _FLAT_FINDINGS
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def is_scope_shaped(directory: Path) -> bool:
+    """Whether *directory* is already a one-directory-per-scope campaign.
+
+    Replaces the old ``_SCOPE_MARKER = "plans"`` check, which stopped meaning
+    anything the moment ``plans/`` moved inside the wave directories: a
+    scope-shaped campaign no longer has a top-level ``plans/``, so the old
+    marker would have called every one of them legacy and tried to migrate them
+    again — and, worse, ``migrate_hunts`` *creates* the marker on a directory
+    whose name is already its own scope, so the re-run would have littered a
+    ``plans/`` back into campaigns that had just been reorganised.
+
+    A campaign is scope-shaped when it holds a wave directory, or still holds
+    the flat layout's ``plans/`` (which is what every campaign written before
+    the wave layout has, and what ``migrate_hunts`` itself creates).
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return False
+    if (directory / _FLAT_PLANS).is_dir():
+        return True
+    return bool(wave_dirs(directory))
+
+
+def _finding_files(directory: Path) -> list[Path]:
+    """Every finding report in a campaign, in wave order then by name.
+
+    Reads both layouts: ``wave-<n>/findings/*.md`` and the flat
+    ``findings/*.md`` the pre-wave campaigns used. Both are read rather than
+    only the new one because the reader is what the boot migration cannot be
+    relied on to have run before — an operator who opens `/findings` while the
+    migration is still pending, or who reorganises a campaign by hand, still
+    gets their findings instead of an empty panel.
+    """
+    directory = Path(directory)
+    out: list[Path] = []
+    for _, wave_path in wave_dirs(directory):
+        out.extend(sorted((wave_path / _FLAT_FINDINGS).glob("*.md")))
+    flat = directory / _FLAT_FINDINGS
+    if flat.is_dir():
+        out.extend(sorted(flat.glob("*.md")))
+    return out
+
+
+def _plan_files(directory: Path) -> list[Path]:
+    """Every wave plan in a campaign, newest layout and legacy alike.
+
+    ``wave-<n>/plan.md`` is the current shape; ``plans/wave-<n>-<stamp>.md`` is
+    what the flat layout wrote and what ``reorganise_waves`` has not yet moved.
+    Sorted by filename, which orders ``plan.md`` before ``plan-2.md`` — a
+    deliberately re-run wave's second plan reads after its first.
+    """
+    directory = Path(directory)
+    out: list[Path] = []
+    for _, wave_path in wave_dirs(directory):
+        out.extend(sorted(wave_path.glob("plan*.md")))
+    flat = directory / _FLAT_PLANS
+    if flat.is_dir():
+        out.extend(sorted(flat.glob("wave-*.md")))
+    return out
 
 
 def _campaign_scope(directory: Path) -> str:
@@ -806,7 +973,7 @@ def _campaign_scope(directory: Path) -> str:
     files. Falls back to the directory's own name, which is correct for
     everything written after the scope change.
     """
-    for path in sorted((directory / "findings").glob("*.md")):
+    for path in _finding_files(directory):
         try:
             target = _read_frontmatter(
                 path.read_text(encoding="utf-8", errors="replace")).get("target", "")
@@ -834,8 +1001,9 @@ def migrate_hunts(cfg: Config) -> list[tuple[Path, Path]]:
     became a directory named after its first eighty characters. This merges
     those into ``<scope>/`` so every campaign on a host sits together.
 
-    A campaign is a directory under ``hunts/`` that has no ``plans/``: the
-    scope-shaped layout always makes one and the legacy layout never did. Files
+    A campaign is a directory under ``hunts/`` that is not ``is_scope_shaped``:
+    a scope-shaped campaign holds wave directories (or the flat layout's
+    ``plans/``), and the legacy ``<scope>-<stamp>`` layout held neither. Files
     move only when the destination does not already hold that name, so a
     campaign migrated twice is a no-op and a genuinely different finding with
     the same filename is kept rather than overwritten. Empty legacy directories
@@ -849,14 +1017,14 @@ def migrate_hunts(cfg: Config) -> list[tuple[Path, Path]]:
 
     moved: list[tuple[Path, Path]] = []
     for directory in sorted(root.iterdir()):
-        if not directory.is_dir() or (directory / _SCOPE_MARKER).is_dir():
+        if not directory.is_dir() or is_scope_shaped(directory):
             continue
         scope = _campaign_scope(directory)
         if scope == directory.name:
             # Nothing to move it to — it is already its own scope, or its name
-            # is the best identity available. Give it the marker so the next
-            # call skips it.
-            (directory / _SCOPE_MARKER).mkdir(exist_ok=True)
+            # is the best identity available. Mark it so the next call skips it.
+            # `reorganise_waves` will give it its wave directories.
+            (directory / _FLAT_PLANS).mkdir(exist_ok=True)
             continue
 
         files = [p for p in sorted(directory.rglob("*")) if p.is_file()]
@@ -872,8 +1040,8 @@ def migrate_hunts(cfg: Config) -> list[tuple[Path, Path]]:
             continue
 
         dest = root / scope
-        (dest / "findings").mkdir(parents=True, exist_ok=True)
-        (dest / "plans").mkdir(parents=True, exist_ok=True)
+        (dest / _FLAT_FINDINGS).mkdir(parents=True, exist_ok=True)
+        (dest / _FLAT_PLANS).mkdir(parents=True, exist_ok=True)
 
         landed = 0
         for src in files:
@@ -899,6 +1067,96 @@ def migrate_hunts(cfg: Config) -> list[tuple[Path, Path]]:
             pass
         if landed:
             moved.append((directory, dest))
+    return moved
+
+
+def reorganise_waves(cfg: Config) -> list[tuple[Path, Path]]:
+    """File a flat campaign's artefacts into per-wave directories.
+
+    The flat layout put every wave's findings in one ``findings/`` and every
+    wave's plan in ``plans/``, so a three-wave campaign was 43 findings in a
+    heap whose only link to a wave was a frontmatter line. This moves each
+    finding to ``wave-<its own wave>/findings/`` and each plan to
+    ``wave-<its own wave>/plan.md``, then removes the two flat directories once
+    they are empty.
+
+    The wave number comes from each artefact's own frontmatter, which is why
+    that field was worth writing all along. A finding with no readable ``wave``
+    is left where it is rather than guessed at — a wrong wave is worse than a
+    flat one, because the flat one is obvious.
+
+    Safety properties, mirroring ``migrate_hunts``: move-only, never overwrite
+    an existing destination, never remove a directory that still holds a file,
+    and return the ``(source, destination)`` pairs that actually moved. So a
+    second call is a no-op — it finds no flat directories — and a campaign the
+    operator has reorganised by hand is left exactly as they left it.
+    """
+    root = Path(cfg.state_dir) / "hunts"
+    if not root.is_dir():
+        return []
+
+    moved: list[tuple[Path, Path]] = []
+    for directory in sorted(root.iterdir()):
+        if not directory.is_dir():
+            continue
+        moved.extend(_reorganise_one(directory))
+    return moved
+
+
+def _reorganise_one(directory: Path) -> list[tuple[Path, Path]]:
+    """The per-campaign half of ``reorganise_waves``."""
+    moved: list[tuple[Path, Path]] = []
+
+    # ---- findings, each to its own wave's directory.
+    flat_findings = directory / _FLAT_FINDINGS
+    if flat_findings.is_dir():
+        for src in sorted(flat_findings.glob("*.md")):
+            try:
+                meta = _read_frontmatter(
+                    src.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            raw = meta.get("wave", "").strip()
+            if not raw.isdigit():
+                continue
+            dest_dir = wave_findings_dir(directory, int(raw))
+            target = dest_dir / src.name
+            if target.exists():
+                # The destination already has a file by this name — a wave
+                # re-run, or a finding migrated before. Keep both rather than
+                # destroying either.
+                target = _unique(target)
+            try:
+                shutil.move(str(src), str(target))
+            except OSError:
+                continue
+            moved.append((src, target))
+
+    # ---- plans, ``wave-<n>-<stamp>.md`` to ``wave-<n>/plan.md``.
+    flat_plans = directory / _FLAT_PLANS
+    if flat_plans.is_dir():
+        for src in sorted(flat_plans.glob("wave-*.md")):
+            meta = _read_frontmatter(
+                src.read_text(encoding="utf-8", errors="replace"))
+            number = _as_int(meta.get("wave"), -1)
+            if number < 0:
+                continue
+            target = _unique(wave_dir(directory, number) / "plan.md")
+            try:
+                shutil.move(str(src), str(target))
+            except OSError:
+                continue
+            moved.append((src, target))
+
+    # ---- only what is empty. A flat directory still holding a file — one whose
+    # frontmatter named no wave, or whose move failed — stays for the operator.
+    for name in (_FLAT_FINDINGS, _FLAT_PLANS):
+        d = directory / name
+        try:
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
     return moved
 
 
@@ -950,12 +1208,18 @@ def write_recon(run: HuntRun, text: str) -> Path | None:
 
 def write_plan(run: HuntRun, wave: int, roster: team_mod.Roster,
                raw: str, fell_back: bool) -> Path | None:
-    """Write a wave's plan to ``<run.directory>/plans/wave-<n>-<stamp>.md``.
+    """Write a wave's plan to ``<run.directory>/wave-<n>/plan.md``.
 
     The roster the planner returned is the only statement of what a wave was
     *supposed* to do, and it used to exist only as a UI event — gone the moment
     the screen moved on. Keeping it is what makes a campaign legible afterwards:
     why ten agents went where they went, and which briefs came back empty.
+
+    It sits in the wave's own directory, beside the findings that wave produced,
+    so the tree answers "what did wave 2 do, and what did it find" without
+    reading a frontmatter field. There is no timestamp in the name any more —
+    the wave number already makes it unique within the campaign; a deliberately
+    re-run wave gets ``plan-2.md`` from ``_unique``, so both plans survive.
 
     ``raw`` is the planner's own reply, written only when it could not be read
     as a roster. That is the diagnostic case — the fixed matrix ran instead, and
@@ -992,9 +1256,8 @@ def write_plan(run: HuntRun, wave: int, roster: team_mod.Roster,
             "",
         ]
     try:
-        plans = run.directory / "plans"
-        plans.mkdir(parents=True, exist_ok=True)
-        path = _unique(plans / f"wave-{wave}-{_stamp()}.md")
+        plans = wave_dir(run.directory, wave)
+        path = _unique(plans / "plan.md")
         path.write_text("\n".join(lines), encoding="utf-8")
     except OSError:
         return None
@@ -1022,7 +1285,13 @@ def _unique(path: Path) -> Path:
 
 
 def write_report(run: HuntRun, f: Finding) -> Path:
-    """Write one finding to ``<run.directory>/findings/wave-<n>-<slug>.md``.
+    """Write one finding to ``<run.directory>/wave-<n>/findings/<severity>-<slug>.md``.
+
+    The wave moved out of the filename and into the directory: the finding sits
+    beside the plan that aimed at it, and the name leads with the severity so a
+    ``ls`` of a wave's findings reads worst-first. ``wave`` is still in the
+    frontmatter, which is what ``reorganise_waves`` uses to file a legacy
+    finding under the right wave.
 
     Two agents in one wave can land on the same title — "missing HSTS" is a
     title four different vectors might each report — and the slug would be
@@ -1030,7 +1299,7 @@ def write_report(run: HuntRun, f: Finding) -> Path:
     evidence. A numeric suffix keeps every finding's report on disk, which is
     the whole point of writing them.
     """
-    base = run.directory / "findings" / f"wave-{f.wave}-{_slug(f.title)}.md"
+    base = wave_findings_dir(run.directory, f.wave) / f"{f.severity}-{_slug(f.title)}.md"
     path = _unique(base)
     path.write_text(_finding_markdown(run, f), encoding="utf-8")
     return path
@@ -1073,6 +1342,124 @@ def write_summary(cfg: Config, run: HuntRun, text: str) -> Path:
     suffix = local.stem[len("summary-"):]
     dest_dir = reports_dir(cfg)
     dest = _unique(dest_dir / f"hunt-{run.directory.name}-{suffix}.md")
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local, dest)
+    except OSError:
+        return local
+    return dest
+
+
+def build_evidence_report(run: HuntRun) -> str:
+    """The campaign's findings as a professional, evidence-only report.
+
+    Deliberately **not** a model call. `/summary-hunt` is where narrative and
+    remediation live; this is the document an operator hands to whoever has to
+    act on the findings, and its whole value is that every line of it was
+    recorded during the engagement. A model asked to "write up the findings"
+    would paraphrase the evidence — and evidence that has been paraphrased is no
+    longer evidence, it is a claim about evidence. So this is assembled
+    verbatim, and the remediation section is omitted on purpose: it is the fix,
+    not the finding, and mixing the two in one document is how a report starts
+    reading as advocacy.
+
+    One ``## Wave N`` section per wave, in order, each with what the wave aimed
+    at and what it found; then one ``### SEVERITY — title`` block per finding,
+    worst-first, with the recorded evidence quoted unaltered.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    ranked = run.ranked()
+    counts: dict[str, int] = {}
+    for f in ranked:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+    tally = ", ".join(
+        f"{counts[s]} {s}" for s in VALID_SEVERITIES if counts.get(s)
+    ) or "none"
+
+    # One section per wave, in wave order. A finding whose wave has no record —
+    # a legacy campaign reorganised from the flat layout, whose plans did not
+    # survive — still gets a section, built from the findings alone, rather than
+    # being dropped for want of a plan.
+    by_wave: dict[int, list[Finding]] = {}
+    for f in ranked:
+        by_wave.setdefault(f.wave, []).append(f)
+    numbers = sorted(set(by_wave) | {r.number for r in run.wave_records})
+
+    lines = [
+        f"# Bug hunt — {run.target}",
+        "",
+        f"**Target:** {run.target}  ",
+        f"**Generated:** {stamp}  ",
+        # The sections below, counted — not the plans. A wave that was re-run
+        # leaves every plan on disk, so counting plans made this claim "16
+        # waves" over an 11-wave campaign. This is the number of `## ` headings
+        # the reader will find, which is the only thing the line can honestly
+        # promise.
+        f"**Waves:** {len(numbers)}  ",
+        f"**Findings:** {len(ranked)} ({tally})",
+        "",
+        "This report contains only what was recorded during the engagement. "
+        "Evidence is reproduced as captured.",
+        "",
+    ]
+
+    for n in numbers:
+        record = next((r for r in run.wave_records if r.number == n), None)
+        found = by_wave.get(n, [])
+        title = "Recon (wave 0)" if n == 0 else f"Wave {n}"
+        lines += ["", f"## {title}", ""]
+        if n == 0:
+            lines.append("Findings reported by the reconnaissance phase.")
+        elif record is not None:
+            aimed = record.summary or "(no summary recorded)"
+            lines.append(
+                f"**{record.agents} agent(s)** — {aimed}"
+                + (" _(fixed vector fallback)_" if record.fell_back else "")
+            )
+        else:
+            lines.append("_(no plan recorded for this wave)_")
+        lines.append("")
+
+        if not found:
+            lines += ["No findings recorded for this wave.", ""]
+            continue
+
+        for f in found:
+            lines += [
+                f"### {f.severity.upper()} — {f.title}",
+                "",
+                f"- **Asset:** {f.asset or '(not stated)'}",
+                f"- **Found by:** {f.agent} (wave {f.wave})",
+            ]
+            if f.summary:
+                lines += ["", f.summary, ""]
+            lines += ["**Evidence**", ""]
+            # Verbatim, and fenced so a payload containing markdown — a stack
+            # trace, a dumped config, an injected `<script>` — renders as the
+            # text it is rather than as markup in the operator's viewer.
+            lines += ["```", (f.evidence or "(no evidence recorded)").strip(), "```", ""]
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_evidence_report(cfg: Config, run: HuntRun) -> Path | None:
+    """Write the evidence report beside the campaign, and archive a copy.
+
+    Same two-step as ``write_summary``: into the campaign directory so it sits
+    with the artefacts it cites, then a copy into ``<state_dir>/reports/`` so
+    the deliverable outlives the campaign directory. Returns the archived path,
+    the campaign path when the archive copy failed, or None when there was
+    nothing to report.
+    """
+    if not run.findings:
+        return None
+    stamp = _stamp()
+    body = build_evidence_report(run)
+    local = _unique(Path(run.directory) / f"report-{stamp}.md")
+    local.write_text(body, encoding="utf-8")
+
+    dest_dir = reports_dir(cfg)
+    dest = _unique(dest_dir / f"hunt-report-{Path(run.directory).name}-{stamp}.md")
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local, dest)
@@ -1458,11 +1845,28 @@ async def run_hunt(
     summary_flag: Callable[[], bool] | None = None,
     run: HuntRun | None = None,
     fresh: bool = False,
+    wave_number: int | None = None,
+    max_waves: int = 1,
 ) -> HuntRun:
-    """Recon, then waves until stopped. Returns the run for the closing report.
+    """Recon, then wave(s). Returns the run for the closing report.
 
     Every step is reported through ``on_event`` as it happens. The caller owns
     the final summary text — this returns the run it needs to write it.
+
+    **It stops on its own now.** This used to be ``while not run.stop.is_set()``
+    with no cap at all, so a campaign ran wave after wave until the operator
+    pressed Ctrl+X — including waves planned after one that had already found a
+    critical, which is work the operator did not ask for and could not decline.
+    The loop is bounded by ``max_waves`` (default 1) and the UI never raises it,
+    so the command runs one wave per invocation and the operator decides whether
+    there is a next one. The bound is a parameter rather than a bare ``break``
+    so a test can still drive two waves through one call and check that the
+    second planner saw the first wave's findings.
+
+    ``wave_number`` names the wave to run; ``None`` means the next one the scope
+    has not run yet — see ``next_wave_number``. So ``/bug-hunt host`` continues a
+    campaign's numbering where it left off, and ``--wave 3`` runs wave 3
+    specifically, on top of whatever waves 1 and 2 already put on disk.
 
     ``summary_flag`` is polled at each wave boundary: `/summary-hunt` cannot run
     concurrently with the hunt (both stream through the same transcript), so it
@@ -1483,6 +1887,36 @@ async def run_hunt(
         run = HuntRun(target=target, directory=case_dir(cfg, target))
     if stop is not None:
         run.stop = stop
+
+    # The wave to run. `run.wave` is set to one *below* it, because the loop
+    # increments before it plans — so the counter the UI and the artefacts see
+    # is exactly the wave the operator asked for.
+    if wave_number is None:
+        wave_number = next_wave_number(run.directory)
+    run.wave = max(0, wave_number - 1)
+
+    # A wave is a step, not a label: the planner is briefed on what the previous
+    # wave found, so wave 3 on a scope that has run nothing is not wave 3, it is
+    # wave 1 with a misleading name and a planner told to follow up on findings
+    # that do not exist. Refuse it rather than run it — `next_wave_number` is
+    # what the operator wants in that case, and `--wave` is for re-running or
+    # reordering a campaign that already has a history.
+    highest = next_wave_number(run.directory) - 1
+    if wave_number > highest + 1:
+        await on_event({
+            "type": "hunt_refused", "target": run.target,
+            "wave": wave_number, "highest": highest,
+            "message": (
+                f"wave {wave_number} has nothing to follow: this scope has run "
+                f"up to wave {highest}. A wave is planned against the one before "
+                f"it, so run wave {highest + 1} first — plain "
+                f"`/bug-hunt {run.target}` does exactly that."
+            ) if highest else (
+                f"wave {wave_number} has nothing to follow: this scope has not "
+                f"run a wave yet. Start with `/bug-hunt {run.target}`."
+            ),
+        })
+        return run
 
     # ---- recon, or the recon we already have.
     #
@@ -1560,8 +1994,11 @@ async def run_hunt(
             "findings": [_finding_dict(f) for f in run.ranked()],
         })
 
-    # ---- waves, until the operator stops it.
-    while not run.stop.is_set():
+    # ---- waves. Bounded, and still racing the operator's stop: `/stop-hunt`
+    # mid-wave unwinds the agents rather than waiting out the slowest one.
+    waves_run = 0
+    while not run.stop.is_set() and waves_run < max(1, max_waves):
+        waves_run += 1
         run.wave += 1
         wave = run.wave
 
@@ -1690,6 +2127,10 @@ async def run_hunt(
             f"{this_wave} finding(s)"
             + (" (fixed vector fallback)" if fell_back else "")
         )
+        run.wave_records.append(WaveRecord(
+            number=wave, agents=len(roster.workers), fell_back=fell_back,
+            summary=roster.summary or "", stamp=_stamp(),
+        ))
         await on_event({
             "type": "hunt_wave_end", "wave": wave,
             "agents": len(roster.workers), "ok": ok, "found": this_wave,
@@ -1856,7 +2297,7 @@ def load_run(directory: Path) -> HuntRun | None:
         return None
 
     findings: list[Finding] = []
-    for path in sorted((directory / "findings").glob("*.md")):
+    for path in _finding_files(directory):
         text = path.read_text(encoding="utf-8", errors="replace")
         meta = _read_frontmatter(text)
         findings.append(Finding(
@@ -1880,19 +2321,59 @@ def load_run(directory: Path) -> HuntRun | None:
         recon = note.text
 
     # The plans are read back as the wave history, so a recovered summary can
-    # say what each wave was aimed at rather than only what it found.
-    waves = [f"(recovered from {directory})"]
-    for path in sorted((directory / "plans").glob("wave-*.md")):
-        meta = _read_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
-        wave = _as_int(meta.get("wave"), 0)
-        agents = _as_int(meta.get("agents"), 0)
-        fell_back = meta.get("fell_back", "false").strip().lower() == "true"
-        waves.append(
-            f"wave {wave}: {agents} agents"
-            + (" (fixed vector fallback)" if fell_back else "")
+    # say what each wave was aimed at rather than only what it found. Both
+    # layouts are read — see `_plan_files` — so a campaign the boot migration
+    # has not reached yet still recovers its history.
+    #
+    # One record per *wave*, not per plan. A wave that was deliberately re-run
+    # leaves every plan on disk — that is the operator's record, and `_unique`
+    # is what keeps them — but a wave is one thing, and counting plans made a
+    # report claim "16 waves" over an 11-wave campaign whose wave 1 had been run
+    # three times. The latest run of a wave wins.
+    #
+    # "Latest" is the pair of the frontmatter timestamp and the write order,
+    # because neither alone is enough. Two runs inside the same second share a
+    # timestamp; and the filename cannot break that tie, since `_unique` names
+    # the *second* plan `plan-2.md`, which sorts *before* `plan.md` — filename
+    # order picks the oldest. `_plan_seq` reads that counter back out, so the
+    # pair is a total order that matches the order the plans were written in.
+    best: dict[int, tuple[tuple[str, int], WaveRecord]] = {}
+    for path in _plan_files(directory):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        meta = _read_frontmatter(text)
+        record = WaveRecord(
+            number=_as_int(meta.get("wave"), 0),
+            agents=_as_int(meta.get("agents"), 0),
+            fell_back=meta.get("fell_back", "false").strip().lower() == "true",
+            # The first prose paragraph, which is where write_plan puts the
+            # planner's summary of what the wave is for. The heading line above
+            # it is the wave's agent count, which `agents` already carries.
+            summary=_plan_summary(text),
+            stamp=meta.get("timestamp", ""),
         )
+        order = (record.stamp, _plan_seq(path))
+        seen = best.get(record.number)
+        if seen is None or order >= seen[0]:
+            best[record.number] = (order, record)
+    records = [best[n][1] for n in sorted(best)]
 
-    if not findings and not recon:
+    # How many findings each wave actually produced, so a recovered digest can
+    # say what a wave found as well as what it aimed at. Counted off the
+    # findings, not the plan: a plan records intent, and the finding is the
+    # only evidence that the intent was met.
+    per_wave: dict[int, int] = {}
+    for f in findings:
+        per_wave[f.wave] = per_wave.get(f.wave, 0) + 1
+
+    waves = [f"(recovered from {directory})"]
+    waves += [r.line(per_wave.get(r.number, 0)) for r in records]
+
+    # A wave that ran and found nothing still leaves a plan, and that is now a
+    # state the operator reaches routinely: one wave per invocation means an
+    # empty wave is the *expected* way to end a campaign. Refusing to load it
+    # would make `/summary-hunt` say "no campaign here" over a directory whose
+    # tree plainly shows ten agents went out — so a plan counts as content.
+    if not findings and not recon and not records:
         return None
 
     return HuntRun(
@@ -1901,7 +2382,42 @@ def load_run(directory: Path) -> HuntRun | None:
         recon=recon,
         findings=findings,
         waves=waves,
+        wave_records=records,
+        # So `--wave` on a recovered campaign continues its numbering rather
+        # than restarting at 1 and overwriting what is on disk. The highest wave
+        # anything on disk names, plan or finding.
+        wave=max([f.wave for f in findings] + [r.number for r in records] + [0]),
     )
+
+
+def _plan_seq(path: Path) -> int:
+    """The write order of a plan, read back out of its ``_unique`` suffix.
+
+    ``plan.md`` is the first run of a wave and scores 1; ``plan-2.md`` is the
+    second and scores 2. ``load_run`` uses this only as a tiebreak, for plans
+    written inside the same second — but it is the *right* tiebreak, because
+    the number was assigned in the order the files were created, and it is the
+    one piece of ordering `_unique` records. A name it did not produce scores 0,
+    so a hand-made file never displaces a real run.
+    """
+    m = re.search(r"-(\d+)$", path.stem)
+    return int(m.group(1)) if m else 1
+
+
+def _plan_summary(text: str) -> str:
+    """The planner's own summary of a wave, out of a plan file.
+
+    ``write_plan`` writes the heading, then the roster's summary as a plain
+    paragraph, then ``## Roster``. This takes everything between them, so the
+    summary reads back whole even when it is several lines.
+    """
+    after = text.split("\n# ", 1)
+    if len(after) < 2:
+        return ""
+    body = after[1]
+    body = body.split("\n", 1)[1] if "\n" in body else ""
+    body = body.split("\n## ", 1)[0]
+    return body.strip()
 
 
 def _as_int(value, default: int = 0) -> int:

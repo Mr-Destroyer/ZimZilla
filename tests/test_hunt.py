@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import time
@@ -115,8 +116,8 @@ def test_parse_findings() -> None:
           fs[2].severity == "info", fs[2].severity)
     check("findings: the wave and agent are stamped on",
           all(f.wave == 3 and f.agent == "access-control" for f in fs))
-    check("findings: only medium+ earn a report",
-          [f.saved for f in fs] == [True, False, False],
+    check("findings: every severity earns a report",
+          [f.saved for f in fs] == [True, True, True],
           str([f.saved for f in fs]))
     check("findings: a brace inside a title does not unbalance the scan",
           fs[0].title == "IDOR on /api/users/{id}", fs[0].title)
@@ -196,10 +197,11 @@ def test_reports(wd: Path) -> None:
     run.findings.append(f)
 
     path = hunt_mod.write_report(run, f)
-    check("report: the file lands under findings/",
-          path.parent.name == "findings" and path.is_file(), str(path))
-    check("report: the filename carries the wave and a slug",
-          path.name.startswith("wave-2-"), path.name)
+    check("report: the file lands in the wave's own directory",
+          path.parent.name == "findings" and path.parent.parent.name == "wave-2"
+          and path.is_file(), str(path))
+    check("report: the filename leads with the severity and the slug",
+          path.name == "critical-sqli-in-q.md", path.name)
 
     body = path.read_text()
     check("report: frontmatter carries the fields",
@@ -212,21 +214,32 @@ def test_reports(wd: Path) -> None:
           and "## Remediation" in body)
     check("report: the evidence is preserved", "' OR 1=1--" in body)
 
-    # A low finding earns no file.
+    # A low finding earns a file too — it used to be dropped, which meant the
+    # evidence died with the process and the evidence report could not cite it.
     low = hunt_mod.Finding(wave=2, agent="x", title="nitpick", severity="low")
-    check("report: a low finding is not saved", hunt_mod._save(run, low) == "")
+    low_path = hunt_mod._save(run, low)
+    check("report: a low finding is saved too", low_path != "", low_path)
+    check("report: the low finding's severity leads its filename",
+          Path(low_path).name == "low-nitpick.md", Path(low_path).name)
 
-    # Round-trip: a campaign can be reloaded from disk.
+    # Round-trip: a campaign can be reloaded from disk. Both files are read
+    # back — the low finding was written above and is recovered too, which is
+    # the point of saving every severity.
     loaded = hunt_mod.load_run(run.directory)
     check("reload: a campaign reads back off disk", loaded is not None)
-    check("reload: the finding is recovered",
-          loaded is not None and len(loaded.findings) == 1,
+    check("reload: every finding is recovered",
+          loaded is not None and len(loaded.findings) == 2,
           str(len(loaded.findings) if loaded else 0))
     check("reload: severity and title survive the round trip",
-          loaded is not None and loaded.findings[0].severity == "critical"
-          and loaded.findings[0].title == "SQLi in ?q")
+          loaded is not None
+          and loaded.ranked()[0].severity == "critical"
+          and loaded.ranked()[0].title == "SQLi in ?q")
+    check("reload: the quiet finding comes back too",
+          loaded is not None
+          and [f.severity for f in loaded.ranked()] == ["critical", "low"],
+          str([f.severity for f in loaded.ranked()]) if loaded else "None")
     check("reload: the summary section is recovered",
-          loaded is not None and "concatenated" in loaded.findings[0].summary)
+          loaded is not None and "concatenated" in loaded.ranked()[0].summary)
     check("reload: an empty directory yields None",
           hunt_mod.load_run(wd / "nothing-here") is None)
 
@@ -271,6 +284,530 @@ def test_reports(wd: Path) -> None:
 _RECON_MARK = "opening a security engagement"
 
 
+def test_wave_layout(wd: Path) -> None:
+    """The wave-directory helpers: naming, numbering, and what counts as shaped.
+
+    These are the primitives every writer, reader and migration goes through, so
+    the edge cases are pinned here rather than left to whichever caller happens
+    to exercise them: ``wave-10`` must sort after ``wave-9`` (a lexicographic
+    sort puts it between 1 and 2), a fresh campaign must number from 1 and not 0,
+    and ``is_scope_shaped`` must recognise *both* the current layout and the flat
+    one — the old ``_SCOPE_MARKER = "plans"`` would have called every
+    reorganised campaign legacy and migrated it a second time.
+    """
+    cfg = _cfg(wd)
+    cfg.state_dir = _state(wd, "test_wave_layout")
+    d = hunt_mod.case_dir(cfg, "waves.test")
+
+    check("wave layout: a fresh campaign has no waves", hunt_mod.wave_dirs(d) == [],
+          str(hunt_mod.wave_dirs(d)))
+    check("wave layout: a fresh campaign numbers from 1, not 0",
+          hunt_mod.next_wave_number(d) == 1, str(hunt_mod.next_wave_number(d)))
+    check("wave layout: a fresh campaign is not yet scope-shaped",
+          hunt_mod.is_scope_shaped(d) is False)
+
+    # Deliberately out of order, and past nine: the sort has to be numeric.
+    for n in (10, 2, 1):
+        hunt_mod.wave_dir(d, n)
+    check("wave layout: waves come back in numeric order",
+          [n for n, _ in hunt_mod.wave_dirs(d)] == [1, 2, 10],
+          str([n for n, _ in hunt_mod.wave_dirs(d)]))
+    check("wave layout: the next wave follows the highest, not the last read",
+          hunt_mod.next_wave_number(d) == 11, str(hunt_mod.next_wave_number(d)))
+    check("wave layout: a campaign holding waves is scope-shaped",
+          hunt_mod.is_scope_shaped(d) is True)
+
+    # The path builders create what they name, because every caller writes
+    # through them rather than mkdir-ing first.
+    check("wave layout: wave_dir names and creates the wave",
+          hunt_mod.wave_dir(d, 3).name == "wave-3"
+          and hunt_mod.wave_dir(d, 3).is_dir())
+    check("wave layout: wave_findings_dir nests under it",
+          hunt_mod.wave_findings_dir(d, 3) == d / "wave-3" / "findings"
+          and hunt_mod.wave_findings_dir(d, 3).is_dir(),
+          str(hunt_mod.wave_findings_dir(d, 3)))
+
+    # A wave-<n> that is not a number is not a wave directory. ``wave-x`` is
+    # somebody else's directory and must not be renumbered into the sequence.
+    (d / "wave-x").mkdir()
+    (d / "wave-").mkdir()
+    check("wave layout: a non-numeric wave directory is ignored",
+          [n for n, _ in hunt_mod.wave_dirs(d)] == [1, 2, 3, 10],
+          str([n for n, _ in hunt_mod.wave_dirs(d)]))
+
+    # The flat layout is scope-shaped too — it is what every campaign written
+    # before the wave directories has, and what migrate_hunts itself creates.
+    flat = d / "flat.test"
+    (flat / "plans").mkdir(parents=True)
+    check("wave layout: a flat campaign with plans/ is scope-shaped",
+          hunt_mod.is_scope_shaped(flat) is True)
+    empty = d / "empty.test"
+    empty.mkdir()
+    check("wave layout: an empty directory is not scope-shaped",
+          hunt_mod.is_scope_shaped(empty) is False)
+    check("wave layout: a missing directory is not scope-shaped",
+          hunt_mod.is_scope_shaped(d / "nope") is False)
+    check("wave layout: a fresh campaign directory holds nothing but itself",
+          sorted(p.name for p in hunt_mod.case_dir(cfg, "bare.test").iterdir()) == [],
+          str(sorted(p.name for p in hunt_mod.case_dir(cfg, "bare.test").iterdir())))
+
+
+def test_readers_span_both_layouts(wd: Path) -> None:
+    """``_finding_files``/``_plan_files`` read the wave layout *and* the flat one.
+
+    Both are read because the reader is what the boot migration cannot be
+    assumed to have run before: an operator who opens `/findings` on a campaign
+    written by the previous version, or who reorganises one by hand, still gets
+    their findings instead of an empty panel.
+    """
+    cfg = _cfg(wd)
+    cfg.state_dir = _state(wd, "test_readers_span_both_layouts")
+    d = hunt_mod.case_dir(cfg, "mixed.test")
+
+    # The wave layout.
+    hunt_mod.wave_findings_dir(d, 1).joinpath("critical-a.md").write_text("---\n---\n")
+    hunt_mod.wave_findings_dir(d, 2).joinpath("high-b.md").write_text("---\n---\n")
+    hunt_mod.wave_dir(d, 1).joinpath("plan.md").write_text("---\nwave: 1\n---\n")
+
+    # The flat layout, still present: not yet migrated.
+    (d / "findings").mkdir()
+    (d / "findings" / "medium-c.md").write_text("---\n---\n")
+    (d / "plans").mkdir()
+    (d / "plans" / "wave-3-20261010-000000.md").write_text("---\nwave: 3\n---\n")
+
+    names = [p.name for p in hunt_mod._finding_files(d)]
+    check("readers: findings come from both layouts",
+          names == ["critical-a.md", "high-b.md", "medium-c.md"], str(names))
+    plans = [p.name for p in hunt_mod._plan_files(d)]
+    check("readers: plans come from both layouts",
+          plans == ["plan.md", "wave-3-20261010-000000.md"], str(plans))
+
+    # And the tool reads the same set — it duplicates the globbing rather than
+    # importing it, so the two can silently drift apart.
+    tool_names = [p.name for p in tools_mod._finding_files(d)]
+    check("readers: the tool's copy agrees with hunt's",
+          tool_names == names, str(tool_names))
+    check("readers: the tool's plan copy agrees too",
+          [p.name for p in tools_mod._plan_files(d)] == plans,
+          str([p.name for p in tools_mod._plan_files(d)]))
+
+
+def test_reorganise_waves(wd: Path) -> None:
+    """A flat campaign files into per-wave directories, once and only once.
+
+    The layout the real ``lerevecraze.com`` campaign is in: every wave's
+    findings in one ``findings/``, every wave's plan in ``plans/``, the wave
+    recoverable only from a frontmatter line. This is the migration that makes
+    the tree explain itself.
+    """
+    cfg = _cfg(wd)
+    cfg.state_dir = _state(wd, "test_reorganise_waves")
+    root = cfg.state_dir / "hunts"
+    d = root / "flat.test"
+    (d / "findings").mkdir(parents=True)
+    (d / "plans").mkdir()
+
+    def finding(name: str, wave: int, severity: str = "medium") -> None:
+        (d / "findings" / name).write_text(
+            f"---\ntarget: flat.test\nwave: {wave}\nseverity: {severity}\n"
+            f"timestamp: 2026-10-10T00:00:00Z\n---\n\n# {name}\n")
+
+    finding("medium-a.md", 0)
+    finding("critical-b.md", 1)
+    finding("high-c.md", 1)
+    finding("low-d.md", 2)
+    (d / "plans" / "wave-1-20261010-010101.md").write_text(
+        "---\nwave: 1\nagents: 10\nfell_back: false\n"
+        "timestamp: 2026-10-10T01:01:01Z\n---\n\n# Wave 1 — 10 agents\n\nauth\n")
+    (d / "plans" / "wave-2-20261010-020202.md").write_text(
+        "---\nwave: 2\nagents: 10\nfell_back: true\n"
+        "timestamp: 2026-10-10T02:02:02Z\n---\n\n# Wave 2 — 10 agents\n\nmore auth\n")
+
+    # A finding whose frontmatter names no wave: it must be left exactly where it
+    # is. A wrong wave is worse than a flat one — the flat one is obvious.
+    (d / "findings" / "nowave.md").write_text("---\ntarget: flat.test\n---\n\n# ?\n")
+
+    moved = hunt_mod.reorganise_waves(cfg)
+    check("reorganise: every wave-bearing finding moved",
+          len([m for m in moved if m[0].suffix == ".md"
+               and m[0].parent.name == "findings"]) == 4, str(len(moved)))
+
+    check("reorganise: recon's own finds file under wave 0",
+          (d / "wave-0" / "findings" / "medium-a.md").is_file())
+    check("reorganise: wave 1's findings file together",
+          (d / "wave-1" / "findings" / "critical-b.md").is_file()
+          and (d / "wave-1" / "findings" / "high-c.md").is_file())
+    check("reorganise: wave 2's finding files under wave 2",
+          (d / "wave-2" / "findings" / "low-d.md").is_file())
+    check("reorganise: the plans become each wave's plan.md",
+          (d / "wave-1" / "plan.md").is_file()
+          and (d / "wave-2" / "plan.md").is_file())
+    check("reorganise: the emptied plans directory is removed",
+          not (d / "plans").exists())
+    # `findings/` survives holding the one file that could not be filed — a
+    # directory is only removed once it is empty, so the operator can see what
+    # was left behind rather than having it deleted on a guess.
+    check("reorganise: the undated finding is left where it is",
+          (d / "findings" / "nowave.md").is_file()
+          and not (d / "wave-0" / "findings" / "nowave.md").exists(),
+          "it must not be guessed into wave 0")
+    check("reorganise: a non-empty flat directory is kept, not deleted",
+          (d / "findings").is_dir()
+          and [p.name for p in (d / "findings").iterdir()] == ["nowave.md"],
+          str(sorted(p.name for p in (d / "findings").iterdir())))
+
+    # Reading back: the campaign loads whole, with its wave history recovered
+    # from the plans it just moved.
+    loaded = hunt_mod.load_run(d)
+    check("reorganise: the campaign still loads", loaded is not None)
+    check("reorganise: every finding survived the move",
+          loaded is not None and len(loaded.findings) == 5,
+          str(len(loaded.findings) if loaded else 0))
+    check("reorganise: the wave history is recovered from the moved plans",
+          loaded is not None and [r.number for r in loaded.wave_records] == [1, 2],
+          str([r.number for r in loaded.wave_records] if loaded else None))
+    check("reorganise: a wave's fallback is recovered",
+          loaded is not None
+          and next(r for r in loaded.wave_records if r.number == 2).fell_back is True)
+    check("reorganise: a wave's aim is recovered",
+          loaded is not None
+          and next(r for r in loaded.wave_records if r.number == 1).summary == "auth",
+          str([r.summary for r in loaded.wave_records] if loaded else None))
+
+    # Idempotent, and it does not touch a campaign that is already filed.
+    before = sorted(str(p) for p in d.rglob("*"))
+    check("reorganise: a second run moves nothing",
+          hunt_mod.reorganise_waves(cfg) == [])
+    check("reorganise: and disturbs nothing",
+          sorted(str(p) for p in d.rglob("*")) == before)
+
+    # A campaign already in the wave layout is left alone — no wave-0/plans
+    # resurrection, which is what the old marker check would have caused.
+    settled = root / "settled.test"
+    hunt_mod.wave_findings_dir(settled, 1).joinpath("critical-x.md").write_text(
+        "---\nwave: 1\n---\n\n# x\n")
+    hunt_mod.reorganise_waves(cfg)
+    check("reorganise: a wave-layout campaign is untouched",
+          (settled / "wave-1" / "findings" / "critical-x.md").is_file()
+          and not (settled / "findings").exists()
+          and not (settled / "plans").exists(),
+          str(sorted(p.name for p in settled.iterdir())))
+
+    # A collision keeps both: a re-run wave's second finding by the same name
+    # must not destroy the first.
+    clash = root / "clash.test"
+    (clash / "findings").mkdir(parents=True)
+    (clash / "findings" / "critical-dup.md").write_text(
+        "---\nwave: 1\n---\n\nthe first\n")
+    hunt_mod.wave_findings_dir(clash, 1).joinpath("critical-dup.md").write_text(
+        "the original")
+    hunt_mod.reorganise_waves(cfg)
+    check("reorganise: a collision keeps the existing file",
+          (clash / "wave-1" / "findings" / "critical-dup.md").read_text()
+          == "the original")
+    check("reorganise: and the incoming one is kept beside it",
+          (clash / "wave-1" / "findings" / "critical-dup-2.md").is_file(),
+          str(sorted(p.name for p in (clash / "wave-1" / "findings").iterdir())))
+
+
+def test_evidence_report(wd: Path) -> None:
+    """``/report-bug-hunt``: every wave, every finding's evidence, verbatim.
+
+    The two things this must get right are the ones a paraphrase would ruin:
+    the evidence has to be reproduced *unaltered*, and remediation has to be
+    absent — it is the fix, not the finding, and `/summary-hunt` is where it
+    lives. So the assertions below quote the exact recorded strings and check
+    the remediation text is nowhere in the document.
+    """
+    cfg = _cfg(wd)
+    cfg.state_dir = _state(wd, "test_evidence_report")
+    d = hunt_mod.case_dir(cfg, "report.test")
+
+    run = hunt_mod.HuntRun(target="report.test", directory=d)
+    run.wave_records = [
+        hunt_mod.WaveRecord(number=0, agents=0, summary=""),
+        hunt_mod.WaveRecord(number=1, agents=10, summary="aiming at the login flow"),
+        hunt_mod.WaveRecord(number=2, agents=10, summary="following up on auth",
+                            fell_back=True),
+    ]
+    # A wave-0 finding with no plan, and two in later waves. Distinct titles, so
+    # the tracker's dedup cannot collapse them and hide a missing section.
+    run.add_finding(hunt_mod.Finding(
+        wave=0, agent="recon", title="mariadb exposed", severity="medium",
+        asset="report.test:3306", summary="the port answers to anyone",
+        evidence="nmap -p3306 -> 10.0.0.5:3306 open"))
+    run.add_finding(hunt_mod.Finding(
+        wave=1, agent="injection", title="SQLi in ?q", severity="critical",
+        asset="report.test/search", summary="q is concatenated into SQL",
+        evidence="' OR 1=1-- returned every row",
+        remediation="parameterise the query"))
+    run.add_finding(hunt_mod.Finding(
+        wave=2, agent="idor", title="IDOR /api/users", severity="high",
+        asset="report.test/api/users", summary="any id is readable",
+        evidence="GET /api/users/2 -> 200 with user 2's email",
+        remediation="check the caller owns the id"))
+
+    body = hunt_mod.build_evidence_report(run)
+
+    check("evidence report: it names the target", "# Bug hunt — report.test" in body)
+    check("evidence report: it states the wave count", "**Waves:** 3" in body,
+          body[:300])
+    check("evidence report: it tallies the severities",
+          "**Findings:** 3 (" in body and "1 critical" in body
+          and "1 high" in body and "1 medium" in body, body[:400])
+    check("evidence report: one section per wave, in order",
+          body.index("## Recon (wave 0)") < body.index("## Wave 1")
+          < body.index("## Wave 2"))
+    check("evidence report: recon's section is labelled as such",
+          "Findings reported by the reconnaissance phase." in body)
+    check("evidence report: a wave says what it aimed at",
+          "aiming at the login flow" in body)
+    check("evidence report: a wave says how many agents ran",
+          "**10 agent(s)**" in body)
+    check("evidence report: a fallback wave is marked as one",
+          "(fixed vector fallback)" in body)
+    check("evidence report: findings are headed by severity and title",
+          "### CRITICAL — SQLi in ?q" in body
+          and "### HIGH — IDOR /api/users" in body
+          and "### MEDIUM — mariadb exposed" in body)
+    check("evidence report: a finding names its asset",
+          "- **Asset:** report.test/search" in body)
+    check("evidence report: a finding names who found it",
+          "- **Found by:** injection (wave 1)" in body)
+
+    # Verbatim, character for character. This is the whole point of the
+    # document: evidence that has been reworded is a claim about evidence.
+    check("evidence report: the evidence is reproduced unaltered",
+          "```\n' OR 1=1-- returned every row\n```" in body, body[-900:])
+    check("evidence report: every finding's evidence is there",
+          "nmap -p3306 -> 10.0.0.5:3306 open" in body
+          and "GET /api/users/2 -> 200 with user 2's email" in body)
+
+    # And the deliberate omission.
+    check("evidence report: remediation is NOT included",
+          "parameterise the query" not in body
+          and "check the caller owns the id" not in body
+          and "Remediation" not in body)
+
+    # Written beside the campaign and archived, like the summary.
+    path = hunt_mod.write_evidence_report(cfg, run)
+    check("evidence report: it is archived into the reports store",
+          path is not None and path.parent == hunt_mod.reports_dir(cfg), str(path))
+    check("evidence report: a copy sits with the evidence it cites",
+          len(list(d.glob("report-*.md"))) == 1,
+          str([p.name for p in d.glob("report-*.md")]))
+    check("evidence report: the archive is the same document",
+          path is not None and path.read_text() == body)
+
+    # A campaign with nothing in it writes nothing rather than an empty shell.
+    bare = hunt_mod.HuntRun(target="bare.test",
+                            directory=hunt_mod.case_dir(cfg, "bare.test"))
+    check("evidence report: a campaign with no findings writes no report",
+          hunt_mod.write_evidence_report(cfg, bare) is None)
+
+    # A finding whose wave has no plan still gets its section, built from the
+    # findings alone — a campaign reorganised from the flat layout may have lost
+    # its plans, and dropping the findings for want of a plan would be worse.
+    orphan = hunt_mod.HuntRun(target="orphan.test",
+                              directory=hunt_mod.case_dir(cfg, "orphan.test"))
+    orphan.add_finding(hunt_mod.Finding(
+        wave=3, agent="x", title="orphan bug", severity="low",
+        evidence="still recorded"))
+    orphan_body = hunt_mod.build_evidence_report(orphan)
+    check("evidence report: a wave with no plan still gets a section",
+          "## Wave 3" in orphan_body and "orphan bug" in orphan_body,
+          orphan_body[-400:])
+    check("evidence report: and says the plan is missing",
+          "(no plan recorded for this wave)" in orphan_body)
+
+
+def test_rerun_wave_is_one_wave(wd: Path) -> None:
+    """A deliberately re-run wave is still *one* wave.
+
+    Every plan is kept — that is the operator's record of what each run aimed
+    at — but counting plans made a report claim "16 waves" over an 11-wave
+    campaign, and repeated "wave 1" three times in the digest. Found against the
+    real ``lerevecraze.com`` campaign, whose wave 1 was run three times.
+    """
+    cfg = _cfg(wd)
+    cfg.state_dir = _state(wd, "test_rerun_wave_is_one_wave")
+    d = hunt_mod.case_dir(cfg, "rerun.test")
+
+    # Three runs of wave 1, as ``write_plan`` + ``_unique`` actually lay them
+    # down: ``plan.md`` first, then ``plan-2.md``, then ``plan-3.md``. No sleep
+    # between them, deliberately: three runs inside one second share a
+    # frontmatter timestamp, so the file order is the only thing that can break
+    # the tie — and filename order alone gets it backwards, since ``plan-2.md``
+    # sorts before ``plan.md``. This is the case that made the real campaign
+    # report the *first* run of wave 1 as its history.
+    run = hunt_mod.HuntRun(target="rerun.test", directory=d)
+    roster = hunt_mod.team_mod.Roster(
+        summary="first aim",
+        workers=[hunt_mod.team_mod.WorkerSpec(name="a", brief="b", owns=["a"])])
+    for summary in ("first aim", "second aim", "third aim"):
+        roster.summary = summary
+        hunt_mod.write_plan(run, 1, roster, raw="", fell_back=False)
+    hunt_mod.write_plan(run, 2, roster, raw="", fell_back=False)
+
+    plans = sorted(p.name for p in (d / "wave-1").glob("plan*.md"))
+    check("rerun: every plan of the re-run wave is kept",
+          plans == ["plan-2.md", "plan-3.md", "plan.md"], str(plans))
+
+    loaded = hunt_mod.load_run(d)
+    check("rerun: the wave history has one line per wave, not per plan",
+          loaded is not None and [r.number for r in loaded.wave_records] == [1, 2],
+          str([r.number for r in loaded.wave_records] if loaded else None))
+    check("rerun: the latest run of the wave is the one recorded",
+          loaded is not None
+          and next(r for r in loaded.wave_records if r.number == 1).summary
+          == "third aim",
+          str([r.summary for r in loaded.wave_records] if loaded else None))
+    check("rerun: the digest does not repeat a wave",
+          loaded is not None and len(loaded.waves) == 3
+          and [w.count("wave 1:") for w in loaded.waves].count(1) == 1,
+          str(loaded.waves if loaded else None))
+
+    body = hunt_mod.build_evidence_report(loaded)
+    check("rerun: the report counts waves, not plans",
+          "**Waves:** 2" in body, body[:300])
+    check("rerun: and gives one section per wave",
+          body.count("## Wave 1") == 1 and body.count("## Wave 2") == 1,
+          str([l for l in body.splitlines() if l.startswith("## ")]))
+
+
+async def test_one_wave_is_the_default(wd: Path) -> None:
+    """`/bug-hunt` with no ``--wave`` runs exactly one wave, then stops.
+
+    The complaint this exists for: after wave 1 found a critical, the loop
+    planned wave 2 anyway. One wave per invocation makes the operator's next
+    decision theirs — and ``--wave N`` runs N without the ones before it.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "w1", "brief": "first", "owns": ["a"]}]}')
+    cfg = _cfg(wd, mode="zim")
+    cfg.state_dir = _state(wd, "test_one_wave_is_the_default")
+
+    def factory(marker: str = "bug-a"):
+        # A distinct title per hunt on purpose: the tracker deduplicates on
+        # title+asset and the run is seeded with what is already on disk, so a
+        # repeated marker would be dropped as a duplicate and the wave would
+        # legitimately write nothing — measuring the dedup, not the numbering.
+        return _hunt_factory({
+            "rosters": [roster], "planner_calls": 0, "prompts": [],
+            "recon_final": "recon: one host",
+            "final": [_finding_json(marker)],
+        })
+
+    # ---- the default: one wave, no stop signal needed.
+    events: list[dict] = []
+    stop = asyncio.Event()
+    run = await hunt_mod.run_hunt(
+        cfg, "default.test", on_event=_recorder(events, stop, after=99),
+        agent_factory=factory("bug-a"), stop=stop, wave_size=1, concurrency=1)
+    check("one wave: a plain hunt runs exactly one wave", run.wave == 1,
+          str(run.wave))
+    check("one wave: and stops on its own, with no stop set",
+          stop.is_set() is False and run.stop.is_set() is False)
+    check("one wave: the planner was consulted once",
+          len([e for e in events if e["type"] == "hunt_wave_start"]) == 1)
+
+    # ---- the same scope again: wave 2, not a second wave 1.
+    events2: list[dict] = []
+    stop2 = asyncio.Event()
+    run2 = await hunt_mod.run_hunt(
+        cfg, "default.test", on_event=_recorder(events2, stop2, after=99),
+        agent_factory=factory("bug-b"), stop=stop2, wave_size=1, concurrency=1)
+    check("one wave: a repeat hunt continues the numbering", run2.wave == 2,
+          str(run2.wave))
+    check("one wave: wave 1's findings are still on disk",
+          (run.directory / "wave-1" / "findings" / "critical-bug-a.md").is_file(),
+          str(sorted(p.name for p in (run.directory / "wave-1" / "findings").iterdir())))
+    check("one wave: and wave 2 got its own directory",
+          (run2.directory / "wave-2" / "findings" / "critical-bug-b.md").is_file(),
+          str(sorted(p.name for p in (run2.directory / "wave-2" / "findings").iterdir())))
+
+    # ---- --wave 3: run wave 3 specifically, without 4.
+    events3: list[dict] = []
+    stop3 = asyncio.Event()
+    run3 = await hunt_mod.run_hunt(
+        cfg, "default.test", on_event=_recorder(events3, stop3, after=99),
+        agent_factory=factory("bug-c"), stop=stop3, wave_size=1, concurrency=1,
+        wave_number=3)
+    check("one wave: --wave 3 runs wave 3", run3.wave == 3, str(run3.wave))
+    check("one wave: and only wave 3",
+          len([e for e in events3 if e["type"] == "hunt_wave_start"]) == 1)
+    check("one wave: wave 4 was not run", not (run3.directory / "wave-4").exists())
+
+    # ---- --wave 9 with only three waves behind it: refused, not run.
+    #
+    # A wave is planned against the one before it, so wave 9 here is not wave 9
+    # — it is wave 4 wearing a misleading name, with a planner briefed to follow
+    # up on findings that do not exist. The refusal must happen *before* recon
+    # and before a single brief, and must name the wave that would actually work.
+    events_ref: list[dict] = []
+    stop_ref = asyncio.Event()
+    script_ref = {"rosters": [roster], "planner_calls": 0, "prompts": [],
+                  "recon_final": "r", "final": _finding_json("bug-x")}
+    run_ref = await hunt_mod.run_hunt(
+        cfg, "default.test", on_event=_recorder(events_ref, stop_ref, after=99),
+        agent_factory=_hunt_factory(script_ref), stop=stop_ref, wave_size=1,
+        concurrency=1, wave_number=9)
+    refused = [e for e in events_ref if e["type"] == "hunt_refused"]
+    check("one wave: a wave with nothing to follow is refused",
+          len(refused) == 1, str([e["type"] for e in events_ref]))
+    check("one wave: the refusal names the wave that would work",
+          refused and "run wave 4 first" in refused[0]["message"],
+          refused[0]["message"] if refused else "(no refusal)")
+    check("one wave: and nothing was planned or run",
+          script_ref["planner_calls"] == 0
+          and not (run_ref.directory / "wave-9").exists(),
+          str(script_ref["planner_calls"]))
+    check("one wave: no wave start was emitted for the refused wave",
+          not [e for e in events_ref if e["type"] == "hunt_wave_start"])
+
+    # On a scope that has never run a wave the advice is the plain command, not
+    # "run wave 1 first" — there is no earlier wave to point at.
+    virgin = _state(wd, "test_one_wave_is_the_default_fresh") / "hunts"
+    cfg2 = _cfg(wd, mode="zim")
+    cfg2.state_dir = virgin.parent
+    events_v: list[dict] = []
+    stop_v = asyncio.Event()
+    await hunt_mod.run_hunt(
+        cfg2, "virgin.test", on_event=_recorder(events_v, stop_v, after=99),
+        agent_factory=_hunt_factory(script_ref), stop=stop_v, wave_size=1,
+        concurrency=1, wave_number=2)
+    refused_v = [e for e in events_v if e["type"] == "hunt_refused"]
+    check("one wave: on a virgin scope the refusal says start with wave 1",
+          refused_v and "has not run a wave yet" in refused_v[0]["message"],
+          refused_v[0]["message"] if refused_v else "(no refusal)")
+
+    # The carried findings are labelled as an earlier wave's, not this
+    # campaign's — the campaign is the scope's whole history now.
+    script = {"rosters": [roster], "planner_calls": 0, "prompts": [],
+              "recon_final": "r", "final": _finding_json("bug-d")}
+    events4: list[dict] = []
+    stop4 = asyncio.Event()
+    await hunt_mod.run_hunt(
+        cfg, "default.test", on_event=_recorder(events4, stop4, after=99),
+        agent_factory=_hunt_factory(script), stop=stop4, wave_size=1,
+        concurrency=1)
+    check("one wave: the next planner sees the earlier waves' findings",
+          "found in an earlier wave" in script["prompts"][0],
+          script["prompts"][0][-300:] if script["prompts"] else "(no prompt)")
+
+    # A stop mid-wave still lands: the bound is a wave count, not a substitute
+    # for the operator's stop.
+    events5: list[dict] = []
+    stop5 = asyncio.Event()
+    run5 = await hunt_mod.run_hunt(
+        cfg, "default.test", on_event=_recorder(events5, stop5, after=1),
+        agent_factory=factory("bug-e"), stop=stop5, wave_size=1, concurrency=1)
+    check("one wave: the stop signal is still honoured", stop5.is_set() is True
+          and run5.wave == 5, str(run5.wave))
+
+
+
+
 def _hunt_factory(script):
     """A factory whose planner answers from *script* and whose agents report.
 
@@ -283,6 +820,13 @@ def _hunt_factory(script):
     ``(name, args)`` of the one tool call a worker makes, defaulting to an
     ungated ``list_dir``; ``script["worker_prompts"]`` collects what each worker
     was actually handed.
+
+    ``script["hold"]`` is an ``asyncio.Event`` that parks every *worker* before
+    its first turn. It exists because a campaign is one wave now, so a stub that
+    runs to completion finishes the whole hunt inside the ``pause()`` a test
+    takes to look at the screen — leaving no wave view up to inspect. Recon is
+    deliberately not held: it runs before any wave, so parking it would mean the
+    wave never starts.
     """
     built: list[Agent] = []
 
@@ -300,6 +844,10 @@ def _hunt_factory(script):
             state["n"] += 1
             prompt = agent.messages[-1]["content"] if agent.messages else ""
             prompt = prompt if isinstance(prompt, str) else ""
+
+            hold = script.get("hold")
+            if hold is not None and cfg.mode != "plan" and _RECON_MARK not in prompt:
+                await hold.wait()
 
             if cfg.mode == "plan":
                 script["prompts"].append(prompt)
@@ -433,9 +981,14 @@ async def test_hunt_loop(wd: Path) -> None:
           kinds.count("hunt_finding") == 2, str(kinds.count("hunt_finding")))
     check("hunt: saved findings report their path",
           any(e.get("saved") for e in events if e["type"] == "hunt_finding"))
+    # Each wave's reports live in that wave's own directory, so the tree says
+    # which wave a finding came from without reading its frontmatter.
+    saved_files = hunt_mod._finding_files(run.directory)
     check("hunt: the report file exists on disk",
-          len(list((run.directory / "findings").glob("*.md"))) == 2,
-          str(len(list((run.directory / "findings").glob("*.md")))))
+          len(saved_files) == 2, str([p.name for p in saved_files]))
+    check("hunt: the reports are filed under their wave",
+          {p.parent.parent.name for p in saved_files} == {f"wave-{run.wave}"},
+          str(sorted({p.parent.parent.name for p in saved_files})))
     check("hunt: findings are attributed to the agent that found them",
           {f.agent for f in run.findings} == {"auth", "idor"},
           str({f.agent for f in run.findings}))
@@ -493,8 +1046,11 @@ def test_scope_naming(wd: Path) -> None:
     check("scope: the same host reuses one directory", first == second, str(first))
     check("scope: the directory is named for the scope",
           first.name == "mail.lerevecraze.com", first.name)
-    check("scope: the campaign subdirectories are made",
-          (first / "findings").is_dir() and (first / "plans").is_dir())
+    # Nothing but the directory itself: the wave directories are made as the
+    # waves run, so a hunt stopped before its first brief leaves no clutter.
+    check("scope: a fresh campaign holds nothing but the directory",
+          first.is_dir() and not any(first.iterdir()),
+          str([p.name for p in first.iterdir()]))
 
 
 async def test_campaign_notes(wd: Path) -> None:
@@ -544,12 +1100,14 @@ async def test_campaign_notes(wd: Path) -> None:
           str(done[0].get("saved") if done else None))
 
     # ---- plans
-    plan_files = sorted((run.directory / "plans").glob("wave-*.md"))
+    plan_files = sorted(run.directory.glob("wave-1/plan*.md"))
     check("notes: the wave's plan is written",
           len(plan_files) == 1, str([p.name for p in plan_files]))
     plan = plan_files[0].read_text()
-    check("notes: the plan names its wave", plan_files[0].name.startswith("wave-1-"),
-          plan_files[0].name)
+    check("notes: the plan sits in the wave's own directory",
+          plan_files[0].parent.name == "wave-1"
+          and plan_files[0].name == "plan.md",
+          str(plan_files[0].relative_to(run.directory)))
     check("notes: the plan keeps each brief", "test auth" in plan)
     check("notes: the plan keeps what each agent owns", "auth, login" in plan)
     check("notes: the plan records the roster size", "agents: 1" in plan)
@@ -578,6 +1136,21 @@ async def test_campaign_notes(wd: Path) -> None:
           recovered is not None and any(w.startswith("wave 1: 1 agents")
                                         for w in recovered.waves),
           str(recovered.waves if recovered else None))
+    check("notes: the recovered history says what the wave found",
+          recovered is not None and any("finding(s)" in w for w in recovered.waves),
+          str(recovered.waves if recovered else None))
+    check("notes: the wave reads back as a record, not a string",
+          recovered is not None and len(recovered.wave_records) == 1
+          and recovered.wave_records[0].number == 1
+          and recovered.wave_records[0].agents == 1,
+          str(recovered.wave_records if recovered else None))
+    check("notes: the wave record keeps the planner's summary",
+          recovered is not None
+          and "aiming at auth" in recovered.wave_records[0].summary,
+          (recovered.wave_records[0].summary if recovered else ""))
+    check("notes: the recovered run knows its highest wave",
+          recovered is not None and recovered.wave == 1,
+          str(recovered.wave if recovered else None))
 
     # A campaign with recon but no findings is still summarisable — that is the
     # exact case the operator hit: stopped mid-campaign, nothing confirmed, but
@@ -690,9 +1263,11 @@ async def test_repeat_hunt_reuses_recon(wd: Path) -> None:
     plan_prompt = second_script["prompts"][-1]
     check("repeat: the planner is told the recon was not taken now",
           "was NOT taken now" in plan_prompt, plan_prompt[-400:])
+    # "An earlier wave", not "an earlier campaign": with one wave per
+    # invocation, wave 2's own wave-1 findings arrive through this same seeding
+    # path, so the narrower label would be a lie about half of them.
     check("repeat: the planner sees the carried finding as carried",
-          "carried from an earlier campaign" in plan_prompt,
-          plan_prompt[:400])
+          "found in an earlier wave" in plan_prompt, plan_prompt[:400])
 
     # ---- and --fresh forces the mapping phase back on.
     fresh_events: list[dict] = []
@@ -802,7 +1377,7 @@ async def test_plan_records_a_fallback(wd: Path) -> None:
         agent_factory=factory, stop=stop, wave_size=2, concurrency=1,
     )
 
-    plan_files = sorted((run.directory / "plans").glob("wave-*.md"))
+    plan_files = sorted(run.directory.glob("wave-*/plan*.md"))
     check("fallback: the wave still has a plan file", len(plan_files) == 1)
     plan = plan_files[0].read_text()
     check("fallback: the plan is marked as fallen back",
@@ -917,7 +1492,12 @@ def test_migrate_hunts(wd: Path) -> None:
 
 
 async def test_hunt_replans_from_findings(wd: Path) -> None:
-    """Wave 2's planner must be handed wave 1's findings."""
+    """Wave 2's planner must be handed wave 1's findings.
+
+    Two waves through one call, which the UI never does — it runs one wave per
+    invocation — but this is the seam that proves the replanning edge still
+    works, and it is why ``max_waves`` is a parameter rather than a bare break.
+    """
     roster = ('{"summary": "s", "workers": ['
               '{"name": "w1", "brief": "first", "owns": ["a"]}]}')
     script = {
@@ -940,6 +1520,7 @@ async def test_hunt_replans_from_findings(wd: Path) -> None:
     run = await hunt_mod.run_hunt(
         cfg, "x.test", on_event=_recorder(events, stop, after=2),
         agent_factory=factory, stop=stop, wave_size=1, concurrency=1,
+        max_waves=2,
     )
 
     check("replan: two waves ran", run.wave == 2, str(run.wave))
@@ -1435,10 +2016,15 @@ async def test_boot_migrates_hunts(wd: Path) -> None:
         app._boot_done()
         await pilot.pause()
 
+        # Folded into its scope *and* filed into the wave its frontmatter names,
+        # in one boot: the fixture's finding is `wave: 0`, so it lands in
+        # wave-0/findings/ — the flat findings/ the merge left behind is gone.
         check("boot: the legacy campaign is folded into its scope",
-              (cfg.state_dir / "hunts" / "legacy.test" / "findings"
+              (cfg.state_dir / "hunts" / "legacy.test" / "wave-0" / "findings"
                / "a.md").is_file(),
               str(sorted(p.name for p in (cfg.state_dir / "hunts").iterdir())))
+        check("boot: and filed under the wave its frontmatter names",
+              not (cfg.state_dir / "hunts" / "legacy.test" / "findings").exists())
         check("boot: the legacy directory is gone",
               not (cfg.state_dir / "hunts" / "legacy.test-20261009-010101").exists())
         check("boot: the main agent is offered the read tool",
@@ -1635,9 +2221,14 @@ async def test_stop_hunt_reaches_the_loop(wd: Path) -> None:
     roster = ('{"summary": "s", "workers": ['
               '{"name": "p", "brief": "b", "owns": ["p"]}]}')
     app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    # Held open: the point of this test is a campaign that is *still running*
+    # when the command is typed, and one wave per invocation means an unheld
+    # stub would be finished before the assertions ran — every one of them
+    # asserting on a hunt that had already ended.
+    hold = asyncio.Event()
     app._team_agent_factory = _hunt_factory(
         {"rosters": [roster], "planner_calls": 0, "prompts": [],
-         "recon_final": "r", "final": "none"})
+         "recon_final": "r", "final": "none", "hold": hold})
 
     async with app.run_test(size=(120, 40)) as pilot:
         app.pop_screen()
@@ -1659,6 +2250,7 @@ async def test_stop_hunt_reaches_the_loop(wd: Path) -> None:
         await pilot.pause()
         check("stop: the command sets the flag",
               app._hunt_stop.is_set() is True)
+        hold.set()
 
         for _ in range(60):
             await pilot.pause()
@@ -2095,8 +2687,8 @@ async def test_busy_gate(wd: Path) -> None:
     dispatch_names = {
         "help", "clear", "mode", "model", "cost", "scope", "rain", "theme",
         "save", "load", "compact", "team", "osint", "phish", "bug-hunt",
-        "stop-hunt", "summary-hunt", "findings", "zim-logfare",
-        "zim-tokenjuice", "zim-source", "zim-tokenharbour",
+        "stop-hunt", "summary-hunt", "report-bug-hunt", "findings",
+        "zim-logfare", "zim-tokenjuice", "zim-source", "zim-tokenharbour",
         "tokenharbour-api-setup", "tokenharbour-models", "logfare-models",
         "exit", "quit",
     }
@@ -2339,9 +2931,39 @@ def test_hunt_findings_tool(wd: Path) -> None:
           res.output[:120])
     check("hunt_findings: it reports the finding",
           "auth bypass" in res.output and "CRITICAL" in res.output, res.output)
+    # The wave is the directory now, so the filename is severity-first: a wave's
+    # reports sort worst-first in a plain `ls`, and the wave-N- prefix that used
+    # to carry that information is gone.
     check("hunt_findings: it gives the file path to read in full",
-          "wave-1-auth-bypass.md" in res.output, res.output)
+          "critical-auth-bypass.md" in res.output
+          and "wave-1" in res.output, res.output)
     check("hunt_findings: it does not error", res.is_error is False)
+
+    # Worst first. On disk the files sort by wave then name, which buries a
+    # campaign's one critical in the middle of the list — against the real
+    # 43-finding campaign it sat at position 20. A reader skimming must meet the
+    # critical first, the same order `/findings` and the summary use.
+    hunt_mod.write_report(run, hunt_mod.Finding(
+        wave=1, agent="recon", title="a low note", severity="low",
+        asset="target.test/x", summary="minor", evidence="eh"))
+    hunt_mod.write_report(run, hunt_mod.Finding(
+        wave=1, agent="auth", title="a medium note", severity="medium",
+        asset="target.test/y", summary="middling", evidence="hm"))
+    ranked = tools_mod.execute("hunt_findings", {"scope": "target.test"}, cfg)
+    order = [m.group(1).lower() for m in
+             (re.match(r"- \[(\w+)\]", line)
+              for line in ranked.output.splitlines()) if m]
+    check("hunt_findings: the list is worst first, not file order",
+          order == ["critical", "medium", "low"], str(order))
+    check("hunt_findings: and it says so", "worst first" in ranked.output)
+
+    # The severity table is duplicated from hunt.VALID_SEVERITIES to avoid the
+    # import cycle (hunt -> agent -> tools), so pin the two together. A severity
+    # added on one side and not the other would silently sort as unknown — last,
+    # below "info", which is the one place it must never land.
+    check("hunt_findings: the severity table matches hunt's",
+          tools_mod._SEVERITY_ORDER == hunt_mod.SEVERITY_ORDER,
+          f"{tools_mod._SEVERITY_ORDER} vs {hunt_mod.SEVERITY_ORDER}")
 
     # ---- the default is the most recently written campaign
     recent = tools_mod.execute("hunt_findings", {}, cfg)
@@ -2858,6 +3480,221 @@ async def test_bug_hunt_reuses_recon_from_the_ui(wd: Path) -> None:
 
 # ---------------------------------------------------------------------------
 
+async def test_bug_hunt_wave_flag(wd: Path) -> None:
+    """``--wave N`` is parsed out of the target, and every bad form is refused.
+
+    The flag has a value, so it cannot be filtered the way ``--fresh`` is: the
+    number after it has to be consumed too, or it lands in the target and becomes
+    part of the scope directory's name. And a wave the operator cannot run —
+    wave 0 is recon, which has no briefs — must be refused *before* a campaign
+    is started, not by starting one and running nothing.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = _state(wd, "test_bug_hunt_wave_flag")
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        # Stand in for the campaign worker so the parse can be asserted without
+        # a hunt actually running: what is under test is the argument handling
+        # and the banner, not the loop (covered above).
+        started: list[dict] = []
+
+        def fake_run(target, *, fresh=False, wave_number=None):
+            started.append({"target": target, "fresh": fresh,
+                            "wave": wave_number})
+
+        app._run_hunt = fake_run
+
+        # ---- the number after the flag is consumed, not left in the target.
+        app._handle_command("/bug-hunt x.test --wave 3")
+        await pilot.pause()
+        check("--wave: the flag and its number are both taken out of the target",
+              started and started[-1]["target"] == "x.test"
+              and started[-1]["wave"] == 3, str(started[-1] if started else None))
+        text = _transcript_text(app)
+        check("--wave: the banner names the wave that will run",
+              "wave 3" in text, text[-400:])
+        check("--wave: and does not claim it stops there",
+              "then it stops" not in text, text[-400:])
+
+        # ---- the `=` form, and the flag before the target.
+        app._handle_command("/bug-hunt --wave=7 x.test")
+        await pilot.pause()
+        check("--wave: the --wave=N form works too",
+              started[-1]["wave"] == 7 and started[-1]["target"] == "x.test",
+              str(started[-1]))
+
+        # ---- no flag: the banner still says which wave will run, because on a
+        # repeat hunt it is not 1 and the operator cannot otherwise tell whether
+        # they are continuing a campaign or starting over.
+        app._handle_command("/bug-hunt x.test")
+        await pilot.pause()
+        check("--wave: without the flag the next wave is named",
+              started[-1]["wave"] is None and "wave 1" in _transcript_text(app),
+              _transcript_text(app)[-300:])
+
+        # ---- refusals. Each must return before anything is started.
+        before = len(started)
+
+        app._handle_command("/bug-hunt x.test --wave")
+        await pilot.pause()
+        check("--wave: a flag with no value is refused",
+              len(started) == before
+              and "--wave needs a number" in _transcript_text(app),
+              _transcript_text(app)[-200:])
+
+        app._handle_command("/bug-hunt x.test --wave 0")
+        await pilot.pause()
+        check("--wave: wave 0 is refused, because wave 0 is recon",
+              len(started) == before
+              and "Wave 0 is recon" in _transcript_text(app),
+              _transcript_text(app)[-260:])
+
+        app._handle_command("/bug-hunt x.test --wave abc")
+        await pilot.pause()
+        check("--wave: a non-numeric wave is refused",
+              len(started) == before
+              and "1 or more" in _transcript_text(app),
+              _transcript_text(app)[-260:])
+
+        app._handle_command("/bug-hunt x.test --wave -1")
+        await pilot.pause()
+        check("--wave: a negative wave is refused, not slugged into the target",
+              len(started) == before, str(started[before:] if started else None))
+        check("--wave: nothing was started by any refusal", len(started) == before)
+
+        # The usage screen, for an operator who typed only the command.
+        app._handle_command("/bug-hunt")
+        await pilot.pause()
+        usage = _transcript_text(app)
+        check("--wave: bare /bug-hunt prints the usage",
+              "/bug-hunt <target> --wave N" in usage, usage[-500:])
+
+
+async def test_refused_wave_reaches_the_transcript(wd: Path) -> None:
+    """A refused `--wave` says so in the transcript, and stops cleanly.
+
+    ``run_hunt`` decides the refusal — a wave is planned against the one before
+    it, so wave 4 on a scope that has run nothing is wave 1 with a misleading
+    name. But the decision is useless if the UI drops the event: the operator
+    would watch the harness go busy and then idle with nothing said, and would
+    reasonably conclude the wave had run and found nothing. This drives the real
+    worker end to end to prove the line lands and the busy flag is released.
+    """
+    roster = ('{"summary": "s", "workers": ['
+              '{"name": "w1", "brief": "first", "owns": ["a"]}]}')
+    cfg = _cfg(wd, mode="zim", boot_rain=False)
+    cfg.state_dir = _state(wd, "test_refused_wave_reaches_the_transcript")
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(120, 44)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        script = {"rosters": [roster], "planner_calls": 0, "prompts": [],
+                  "recon_final": "recon: one host",
+                  "final": [_finding_json("bug-refused")]}
+        app._team_agent_factory = _hunt_factory(script)
+
+        # Virgin scope, wave 4: nothing to follow.
+        app._run_hunt("virgin.test", wave_number=4)
+        for _ in range(80):
+            await pilot.pause()
+            if not app.busy:
+                break
+        await pilot.pause()
+
+        text = _transcript_text(app)
+        check("refused wave: the transcript carries the refusal",
+              "has not run a wave yet" in text, text[-500:])
+        check("refused wave: and names the command that works",
+              "/bug-hunt virgin.test" in text, text[-500:])
+        check("refused wave: nothing was planned",
+              script["planner_calls"] == 0, str(script["planner_calls"]))
+        check("refused wave: the harness is idle again, not stuck busy",
+              app.busy is False)
+        check("refused wave: no wave directory was left behind",
+              not (cfg.state_dir / "hunts" / "virgin.test" / "wave-4").exists(),
+              str(sorted(p.name for p in
+                         (cfg.state_dir / "hunts" / "virgin.test").iterdir())))
+
+
+async def test_report_bug_hunt_command(wd: Path) -> None:
+    """``/report-bug-hunt`` writes the evidence report for the archived campaign.
+
+    It reads the campaign off disk rather than a live run, because a report
+    built from half a wave under-counts — and it refuses outright while a hunt
+    is running rather than interleaving transcript writes into a streaming wave.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = _state(wd, "test_report_bug_hunt_command")
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        # Nothing has run: it says so rather than writing an empty shell.
+        app._handle_command("/report-bug-hunt")
+        await pilot.pause()
+        check("report: with no campaign it says so",
+              "no hunt has run" in _transcript_text(app),
+              _transcript_text(app)[-200:])
+
+        # A finished campaign on disk, in the wave layout.
+        directory = hunt_mod.case_dir(cfg, "reported.test")
+        run = hunt_mod.HuntRun(target="reported.test", directory=directory)
+        hunt_mod.write_plan(run, 1, hunt_mod.team_mod.Roster(
+            summary="aiming at auth",
+            workers=[hunt_mod.team_mod.WorkerSpec(
+                name="auth", brief="test auth", owns=["auth"])]),
+            raw="", fell_back=False)
+        hunt_mod.write_report(run, hunt_mod.Finding(
+            wave=1, agent="auth", title="auth bypass", severity="critical",
+            asset="reported.test/login", summary="no check",
+            evidence="curl -s /login -> 200 with a session cookie",
+            remediation="check the password"))
+
+        app._handle_command("/report-bug-hunt")
+        await pilot.pause()
+        text = _transcript_text(app)
+        check("report: it says how much it wrote",
+              "1 finding(s)" in text and "1 wave(s)" in text, text[-400:])
+        check("report: it names the file it wrote",
+              "report-" in text and ".md" in text, text[-400:])
+        check("report: it says the report is evidence-only",
+              "no remediation" in text, text[-300:])
+
+        written = sorted(directory.glob("report-*.md"))
+        check("report: the file is on disk beside the campaign",
+              len(written) == 1, str([p.name for p in written]))
+        body = written[0].read_text() if written else ""
+        check("report: the finding's evidence is in it, verbatim",
+              "curl -s /login -> 200 with a session cookie" in body, body[-500:])
+        check("report: the remediation is NOT in it",
+              "check the password" not in body and "Remediation" not in body)
+        check("report: it is archived into the reports store",
+              any(p.name.startswith("hunt-report-reported.test")
+                  for p in hunt_mod.reports_dir(cfg).glob("*.md")),
+              str([p.name for p in hunt_mod.reports_dir(cfg).glob("*.md")]))
+
+        # Refused while a hunt is live, rather than reporting a half-wave.
+        app._hunt_run = hunt_mod.HuntRun(target="x.test", directory=directory)
+        app.busy = True
+        try:
+            app._handle_command("/report-bug-hunt")
+            await pilot.pause()
+            check("report: it refuses while a hunt is running",
+                  "/stop-hunt" in _transcript_text(app)[-300:],
+                  _transcript_text(app)[-300:])
+        finally:
+            app.busy = False
+            app._hunt_run = None
+
+
 async def test_stream_turn_watchdog() -> None:
     """The planner's prose reaches the UI while it is still thinking.
 
@@ -3217,10 +4054,17 @@ async def test_wave_overlay_can_still_be_escaped(wd: Path) -> None:
     from zimzilla.ui.widgets import PromptInput
 
     app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    # The wave is held open on purpose. A campaign is one wave per invocation
+    # now, so a stub that ran to completion would finish the whole hunt before
+    # the first ``pause()`` returned and there would be no wave view to press
+    # ``ctrl+x`` against — the test would be asserting on a screen that had
+    # already been popped.
+    hold = asyncio.Event()
     app._team_agent_factory = _hunt_factory(
         {"rosters": ['{"summary": "s", "workers": '
                      '[{"name": "p", "brief": "b", "owns": ["p"]}]}'],
-         "planner_calls": 0, "prompts": [], "recon_final": "r", "final": "none"})
+         "planner_calls": 0, "prompts": [], "recon_final": "r", "final": "none",
+         "hold": hold})
 
     async with app.run_test(size=(118, 36)) as pilot:
         app.pop_screen()
@@ -3263,6 +4107,9 @@ async def test_wave_overlay_can_still_be_escaped(wd: Path) -> None:
         await pilot.press("ctrl+x")
         check("escape hatch: ctrl+x sets the hunt's stop flag",
               app._hunt_stop.is_set() is True)
+        # Released so the wave can actually unwind: the workers are parked
+        # inside a turn, and cancellation alone would leave them there.
+        hold.set()
         await pilot.pause()
         check("escape hatch: the campaign stops", app.busy is False)
         check("escape hatch: and it stopped gracefully, not by cancellation",
@@ -3330,10 +4177,15 @@ async def test_wave_overlay_ctrl_c_still_interrupts(wd: Path) -> None:
     key when the graceful path is not responding, and the wrong one to rely on.
     """
     app = ZimZillaApp(_cfg(wd, boot_rain=False))
+    # Held open for the same reason as the graceful-path test above: one wave
+    # per invocation means an unheld stub finishes the hunt before the screen
+    # can be inspected.
+    hold = asyncio.Event()
     app._team_agent_factory = _hunt_factory(
         {"rosters": ['{"summary": "s", "workers": '
                      '[{"name": "p", "brief": "b", "owns": ["p"]}]}'],
-         "planner_calls": 0, "prompts": [], "recon_final": "r", "final": "none"})
+         "planner_calls": 0, "prompts": [], "recon_final": "r", "final": "none",
+         "hold": hold})
 
     async with app.run_test(size=(118, 36)) as pilot:
         app.pop_screen()
@@ -3347,6 +4199,7 @@ async def test_wave_overlay_ctrl_c_still_interrupts(wd: Path) -> None:
         await pilot.pause()
         check("ctrl+c: it reaches the app through the wave view",
               app._cancelled is True)
+        hold.set()
         await pilot.pause()
         check("ctrl+c: the campaign is stopped", app.busy is False)
         check("ctrl+c: it does not set the graceful stop flag",
@@ -3372,6 +4225,11 @@ async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         wd = Path(td)
         test_reports(wd)
+        test_wave_layout(wd)
+        test_readers_span_both_layouts(wd)
+        test_reorganise_waves(wd)
+        test_evidence_report(wd)
+        test_rerun_wave_is_one_wave(wd)
         test_scope_naming(wd)
         test_migrate_hunts(wd)
         test_hunt_findings_tool(wd)
@@ -3384,6 +4242,7 @@ async def main() -> int:
         await test_live_reporting_mid_wave(wd)
         await test_live_reporting_is_per_agent(wd)
         await test_hunt_replans_from_findings(wd)
+        await test_one_wave_is_the_default(wd)
         await test_hunt_fallback_wave(wd)
         await test_brief_context(wd)
         await test_planner_retry(wd)
@@ -3407,6 +4266,9 @@ async def main() -> int:
         await test_busy_gate(wd)
         await test_findings_command(wd)
         await test_bug_hunt_reuses_recon_from_the_ui(wd)
+        await test_bug_hunt_wave_flag(wd)
+        await test_refused_wave_reaches_the_transcript(wd)
+        await test_report_bug_hunt_command(wd)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")
