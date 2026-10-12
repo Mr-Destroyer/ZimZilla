@@ -758,6 +758,15 @@ class ZimZillaApp(App):
         self._hunt_stop = asyncio.Event()
         self._hunt_run = None
         self._hunt_summary_queued = False
+        #: The campaign directory of the last hunt *this session* started, kept
+        #: after `_hunt_run` is cleared at the end of the wave. `/summary-hunt`
+        #: and `/findings` prefer it over the newest-directory heuristic: the
+        #: operator asking for a report one line after a wave finished means
+        #: *that* wave, and on a machine with more than one campaign the
+        #: heuristic is a guess. Only a real `/ad` or `/bug-hunt` in this session
+        #: sets it, so it cannot point at a directory the operator did not just
+        #: run.
+        self._hunt_dir: Path | None = None
         #: The target of the campaign in flight, kept past the run object's
         #: clearing so the closing notice can name it.
         self._hunt_target = ""
@@ -3431,23 +3440,45 @@ class ZimZillaApp(App):
                 pass
 
     def _latest_hunt_dir(self) -> Path | None:
-        """The most recently written campaign directory, or None.
+        """The campaign `/summary-hunt` and `/findings` should read.
 
-        By mtime, not by name: the layout is one directory per scope now, so the
-        directory carries no timestamp and "most recent" has to be whichever was
-        written to last.
+        This session's own campaign wins, and that is the fix for a real
+        misfire: the operator runs a wave, asks for the report one line later,
+        and the report is written about a *different* target. The heuristic
+        below is a guess, and on a machine holding more than one campaign the
+        guess is wrong often enough to matter — most sharply for the campaign
+        left by the old unbounded loop, whose files boot re-filing rewrites with
+        a fresh mtime. Nothing about that campaign is recent; only its metadata
+        is. So the run this session started, which is not a guess at all, is
+        preferred whenever there is one.
         """
-        root = Path(self.cfg.state_dir) / "hunts"
-        if not root.is_dir():
+        if self._hunt_dir is not None and self._hunt_dir.is_dir():
+            return self._hunt_dir
+
+        # Otherwise the most recently written campaign. `_campaign_dirs` orders
+        # by the newest *artefact* rather than the directory's own mtime, for
+        # the reason documented there: writing a file into a directory does not
+        # touch the directory, but `migrate_hunts` moving files into one bumps
+        # it to now — so the directory's mtime can rank a campaign that ran last
+        # week above one that finished an hour ago. It is the same trap in both
+        # places, and it already has a correct answer in `tools.py`.
+        try:
+            dirs = tools_mod._campaign_dirs(self.cfg.state_dir)
+        except Exception:  # noqa: BLE001
             return None
-        dirs = [d for d in root.iterdir() if d.is_dir()]
-        if not dirs:
-            return None
-        return max(dirs, key=lambda d: d.stat().st_mtime)
+        return dirs[0] if dirs else None
 
     @work(exclusive=True)
     async def _run_summary(self, run) -> None:
-        """Write a closing report for a finished campaign, off the UI thread."""
+        """Write a closing report for a finished campaign, off the UI thread.
+
+        The body is the model's prose, but the report is *always* written: a
+        turn that returns nothing still gets the deterministic evidence report
+        as its body, and the operator is told which of the two they are looking
+        at. This used to archive a frontmatter-only file under a cheerful
+        "report archived" — 80 bytes, no findings, and no way to tell a model
+        that produced nothing from a campaign that found nothing.
+        """
         p = self.palette
         chat = self.query_one(ChatPane)
         bar = self.query_one(StatusBar)
@@ -3461,8 +3492,22 @@ class ZimZillaApp(App):
                 if ev.get("type") == "text_delta":
                     text += ev.get("text", "")
                 await self._handle_event(ev)
+            # No prose means the narrative half failed — an upstream that
+            # answered with a tool call, a turn that hit an error, a model that
+            # returned nothing. The findings are already on disk, so the report
+            # falls back to what was recorded rather than to an empty file, and
+            # says so, so nobody reads a machine-written report as the model's
+            # assessment.
+            narrated = bool(text.strip())
+            if not narrated:
+                text = hunt_mod.build_evidence_report(run)
             path = hunt_mod.write_summary(self.cfg, run, text)
-            self._sys_line(f"report archived: {path}", ok=True)
+            if narrated:
+                self._sys_line(f"report archived: {path}", ok=True)
+            else:
+                self._sys_line(
+                    f"the model returned no report — archived the recorded "
+                    f"evidence instead: {path}", warn=True)
         except Exception as e:  # noqa: BLE001
             chat.write_block(R.error_block(
                 f"summary failed: {type(e).__name__}: {e}", p))
@@ -3530,6 +3575,10 @@ class ZimZillaApp(App):
         # Kept for the campaign's notice to the main agent, which is built from
         # the event at the end — by which point the run object is being cleared.
         self._hunt_target = target
+        # And kept for `/summary-hunt` and `/findings` after the run is cleared.
+        # This is the campaign the operator just ran; the newest-directory
+        # heuristic is only a fallback for a session that has not run one.
+        self._hunt_dir = self._hunt_run.directory
 
         counter = {"running": 0, "total": 0, "wave": 0, "done": 0}
         #: name -> colour, so a tool line, its prose and its result panel all

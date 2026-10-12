@@ -342,7 +342,17 @@ def test_reports(wd: Path) -> None:
     check("summary: it is archived into the reports store",
           dest.parent == hunt_mod.reports_dir(cfg), str(dest))
     check("summary: the archive carries the run's shape",
-          "waves: 2" in dest.read_text() and "findings: 1" in dest.read_text())
+          "findings: 1" in dest.read_text())
+    # The frontmatter's wave count and the evidence report's `**Waves:**` line
+    # are the same number, from the same helper. They used to disagree — the
+    # frontmatter took the highest wave *number*, the body counted `## `
+    # sections — so one file carried two answers.
+    summary_waves = re.search(r"^waves: (\d+)$", dest.read_text(),
+                              flags=re.M).group(1)
+    body_waves = re.search(r"\*\*Waves:\*\* (\d+)",
+                           hunt_mod.build_evidence_report(run)).group(1)
+    check("summary: the frontmatter and the body agree on the wave count",
+          summary_waves == body_waves, f"{summary_waves} vs {body_waves}")
 
     # A second campaign on the same scope must not overwrite the first's report:
     # the directory is the scope's and is reused, so a fixed name would lose it.
@@ -3438,6 +3448,131 @@ async def test_findings_command(wd: Path) -> None:
               panel is not None and panel.live is False)
 
 
+async def test_summary_reads_this_sessions_campaign(wd: Path) -> None:
+    """/summary-hunt reports on the campaign the operator just ran.
+
+    The bug this pins: run a wave against one target, ask for the report, and
+    get a report about a *different* target — because with the run object
+    cleared at the end of the wave, the command fell back to "newest campaign
+    directory", which is a guess and a wrong one whenever more than one campaign
+    exists. Here a decoy campaign is made deliberately newer on disk than the
+    one the session ran, so only the session's own reference can pick correctly.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = wd / "summary-state"
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()  # the boot splash
+        await pilot.pause()
+
+        # The campaign this session "ran".
+        mine = hunt_mod.case_dir(cfg, "mine.test")
+        run = hunt_mod.HuntRun(target="mine.test", directory=mine)
+        run.add_finding(hunt_mod.Finding(
+            wave=1, agent="injection", title="SQLi in ?id", severity="critical",
+            asset="mine.test", evidence="5 rows returned"))
+
+        # A decoy, written afterwards so it is strictly newer on disk — which is
+        # exactly the position the runaway campaign's directory was left in.
+        decoy = hunt_mod.case_dir(cfg, "decoy.test")
+        hunt_mod.write_report(hunt_mod.HuntRun(target="decoy.test",
+                                               directory=decoy),
+                              hunt_mod.Finding(
+            wave=1, agent="x", title="DECOY", severity="low",
+            asset="decoy.test", evidence="decoy evidence"))
+        check("summary: the decoy really is the newer directory",
+              decoy.stat().st_mtime >= mine.stat().st_mtime)
+
+        # No session campaign: the heuristic is all there is, and it picks the
+        # decoy. That is the documented fallback, not the bug.
+        app._hunt_dir = None
+        check("summary: with no session campaign it falls back to newest",
+              app._latest_hunt_dir() == decoy,
+              str(app._latest_hunt_dir()))
+
+        # The session ran one: it wins, whatever the filesystem says.
+        app._hunt_dir = mine
+        check("summary: the session's own campaign wins over newest-on-disk",
+              app._latest_hunt_dir() == mine, str(app._latest_hunt_dir()))
+
+        # And /summary-hunt is what reads it, so the command the operator types
+        # reports on their target rather than the decoy's.
+        app._hunt_run = None
+        app._handle_command("/summary-hunt")
+        await pilot.pause()
+        text = _transcript_text(app)
+        check("summary: the command reports on the session's target",
+              "mine.test" in text and "DECOY" not in text, text[-200:])
+
+        # A session campaign whose directory has since gone is not a stale
+        # reference — the fallback takes over rather than failing. Asserted
+        # against whatever the fallback itself considers newest, not against the
+        # decoy: the `/summary-hunt` above wrote a report into `mine.test`, so by
+        # now *that* is the newest on disk. Pinning the decoy here would be
+        # asserting a fact about test ordering rather than about the fallback.
+        app._hunt_dir = wd / "summary-state" / "hunts" / "gone.test"
+        newest = tools_mod._campaign_dirs(cfg.state_dir)[0]
+        check("summary: a vanished session campaign falls back",
+              app._latest_hunt_dir() == newest, str(app._latest_hunt_dir()))
+
+
+async def test_summary_never_archives_an_empty_body(wd: Path) -> None:
+    """A summary turn that returns no prose still writes a real report.
+
+    The other half of the same bug: an upstream that answered with no text left
+    an 80-byte frontmatter-only file announced as "report archived". A report
+    with no findings in it and a report whose model failed look identical that
+    way. The body now falls back to the recorded evidence, and the operator is
+    told which one they have.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = wd / "summary-empty-state"
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        directory = hunt_mod.case_dir(cfg, "silent.test")
+        run = hunt_mod.HuntRun(target="silent.test", directory=directory)
+        # `add_finding`, not just `write_report`: the fallback body is built from
+        # the run's in-memory findings, and `write_report` only touches disk.
+        # Using the wrong one here would make the fallback look broken when the
+        # test had simply not given it anything to write.
+        run.add_finding(hunt_mod.Finding(
+            wave=1, agent="injection", title="SQLi in ?id", severity="critical",
+            asset="silent.test", evidence="5 rows returned"))
+
+        # A model that yields no text at all — the shape the live misfire had.
+        async def silent_turn(_prompt):
+            if False:  # pragma: no cover - an async generator needs a yield
+                yield {}
+            return
+
+        app.agent.run_turn = silent_turn  # type: ignore[assignment]
+        app._run_summary(run)
+        # The worker is scheduled; let it run to completion.
+        for _ in range(40):
+            await pilot.pause()
+            if not app.busy:
+                break
+
+        text = _transcript_text(app)
+        check("summary: an empty model turn is reported as such",
+              "returned no report" in text, text[-200:])
+        # And the archive is not empty: the evidence is in it.
+        archived = sorted((Path(cfg.state_dir) / "reports").glob("*.md"))
+        check("summary: a report was still archived", bool(archived),
+              str(archived))
+        body = archived[-1].read_text() if archived else ""
+        check("summary: the fallback body carries the recorded evidence",
+              "5 rows returned" in body and len(body) > 200,
+              f"{len(body)} bytes")
+        check("summary: and it is not the bare frontmatter that shipped",
+              body.strip().count("\n") > 5, body[:200])
+
+
 async def test_bug_hunt_reuses_recon_from_the_ui(wd: Path) -> None:
     """`/bug-hunt` on a mapped scope says so up front and skips the remap.
 
@@ -4345,6 +4480,8 @@ async def main() -> int:
         await test_loop_rail_shows_hack_during_hunt(wd)
         await test_busy_gate(wd)
         await test_findings_command(wd)
+        await test_summary_reads_this_sessions_campaign(wd)
+        await test_summary_never_archives_an_empty_body(wd)
         await test_bug_hunt_reuses_recon_from_the_ui(wd)
         await test_bug_hunt_wave_flag(wd)
         await test_refused_wave_reaches_the_transcript(wd)

@@ -1380,6 +1380,25 @@ def reports_dir(cfg: Config) -> Path:
     return Path(cfg.state_dir) / "reports"
 
 
+def report_wave_numbers(run: HuntRun) -> list[int]:
+    """The wave numbers a report will print a ``## `` section for.
+
+    A finding's wave counts even when its plan did not survive — a legacy
+    campaign reorganised from the flat layout still gets a section, built from
+    the findings alone, rather than being dropped for want of a plan — so this
+    is the union of the recorded waves and the waves findings were reported in.
+
+    Both the frontmatter count in ``write_summary`` and the ``**Waves:**`` line
+    in ``build_evidence_report`` are this number. They used to be computed
+    separately and drifted: the frontmatter took ``run.wave``, the highest wave
+    *number*, while the body counted sections, so one report said ``waves: 1``
+    at the top and ``**Waves:** 2`` in the body. Two answers in one file, and
+    the reader has no way to know which was meant.
+    """
+    return sorted({f.wave for f in run.findings}
+                  | {r.number for r in run.wave_records})
+
+
 def write_summary(cfg: Config, run: HuntRun, text: str) -> Path:
     """Archive the closing report.
 
@@ -1395,10 +1414,14 @@ def write_summary(cfg: Config, run: HuntRun, text: str) -> Path:
     layout exists to stop.
     """
     stamp = _stamp()
+    # The number of `## ` sections the report will print — the same number the
+    # evidence report's own header carries, from the same helper. See
+    # `report_wave_numbers` for the drift this replaces.
+    waves = len(report_wave_numbers(run))
     body = (
         "---\n"
         f"target: {run.target}\n"
-        f"waves: {run.wave}\n"
+        f"waves: {waves}\n"
         f"findings: {len(run.findings)}\n"
         f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
         "---\n\n"
@@ -1453,7 +1476,7 @@ def build_evidence_report(run: HuntRun) -> str:
     by_wave: dict[int, list[Finding]] = {}
     for f in ranked:
         by_wave.setdefault(f.wave, []).append(f)
-    numbers = sorted(set(by_wave) | {r.number for r in run.wave_records})
+    numbers = report_wave_numbers(run)
 
     lines = [
         f"# Bug hunt — {run.target}",
