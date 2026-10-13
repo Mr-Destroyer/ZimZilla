@@ -42,6 +42,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "summarise history to free context"),
     ("/team", "fan the task out across parallel agents"),
     ("/osint", "open-source recon on a target"),
+    ("/osint-tree", "re-show a finished recon as a result tree"),
     ("/phish", "clone a login page and harvest creds"),
     ("/bug-hunt", "recon, then one wave of 10 agents"),
     ("/ad", "Active Directory campaign — gated and interlocked"),

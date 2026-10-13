@@ -2774,8 +2774,8 @@ async def test_busy_gate(wd: Path) -> None:
     # lie the operator discovers at the worst moment.
     dispatch_names = {
         "help", "clear", "mode", "model", "cost", "scope", "rain", "theme",
-        "save", "load", "compact", "team", "osint", "phish", "bug-hunt",
-        "ad",
+        "save", "load", "compact", "team", "osint", "osint-tree", "phish",
+        "bug-hunt", "ad", "crack",
         "stop-hunt", "summary-hunt", "report-bug-hunt", "findings",
         "zim-logfare", "zim-tokenjuice", "zim-source", "zim-tokenharbour",
         "tokenharbour-api-setup", "tokenharbour-models", "logfare-models",

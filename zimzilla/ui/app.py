@@ -26,6 +26,7 @@ from .. import crack as crack_mod
 from .. import hunt as hunt_mod
 from .. import logfare as lf_mod
 from .. import osint as osint_mod
+from .. import osint_tree as osint_tree_mod
 from .. import phish as phish_mod
 from .. import session as session_mod
 from .. import sources as sources_mod
@@ -1601,6 +1602,11 @@ class ZimZillaApp(App):
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
         "logfare-models",
+        # Reading an archived report back is a disk read and a write to the
+        # transcript; it starts no turn and touches nothing the live one owns.
+        # Useful mid-run too — while a *new* recon is cooking, the previous
+        # one's tree is exactly what you want to compare against.
+        "osint-tree",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1621,6 +1627,7 @@ class ZimZillaApp(App):
             "compact": lambda a: self._cmd_compact(),
             "team": lambda a: self._cmd_team(a),
             "osint": lambda a: self._cmd_osint(a),
+            "osint-tree": lambda a: self._cmd_osint_tree(a),
             "phish": lambda a: self._cmd_phish(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
             "ad": lambda a: self._cmd_ad(a),
@@ -1673,6 +1680,7 @@ class ZimZillaApp(App):
             ("/compact", "summarise history to free context"),
             ("/team <task>", "fan the task out across parallel agents"),
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
+            ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
             ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
             ("/bug-hunt <target> --wave N", "run wave N specifically"),
@@ -2666,17 +2674,23 @@ class ZimZillaApp(App):
         )
 
     def _finalise_osint(self, case: Path) -> None:
-        """Archive the run's report and clear the case directory.
+        """Archive the run's report, show it as a tree, clear the case directory.
 
         Reports are the one artefact worth keeping, so they move to
         ``<state_dir>/reports/`` and everything else — the clones, the raw API
         responses, the avatars — is deleted. A run that produced no report
         (failed, or interrupted before the write) is left untouched so the
         operator can see what it managed to collect.
+
+        The tree is the point of the command ending here rather than on a path:
+        a run that took twenty minutes should hand back its *findings*, not a
+        filename. It is printed after the archive line so the path is still
+        there for anyone who wants the full report.
         """
         report, cleaned = osint_mod.finalise_case(self.cfg, case)
         if report is not None:
             self._sys_line(f"report archived: {report}", ok=True)
+            self._show_osint_tree(report)
             if cleaned:
                 self._sys_line("case directory cleared (evidence discarded)")
         else:
@@ -2684,6 +2698,55 @@ class ZimZillaApp(App):
                 f"no report found — case directory kept for inspection: {case}",
                 warn=True,
             )
+
+    def _show_osint_tree(self, report: Path) -> None:
+        """Render an archived report as a tree in the transcript."""
+        p = self.palette
+        node = osint_tree_mod.parse_report_file(report)
+        if not node.children:
+            self._sys_line(
+                f"no sections parsed from {report.name} — open it directly",
+                warn=True)
+            return
+
+        t = Text()
+        t.append("  ⚑ RESULT    ", style=f"bold {p.accent}")
+        t.append(osint_tree_mod.summary_line(node), style=p.primary)
+        t.append("\n")
+        self.query_one(ChatPane).write_block(t)
+        self.query_one(ChatPane).write_block(
+            osint_tree_mod.render_tree(node, p))
+
+    def _cmd_osint_tree(self, args) -> None:
+        """/osint-tree [kind|path] — re-show a finished recon as a tree.
+
+        The tree is printed when a run finalises, but a transcript scrolls and
+        `/clear` empties it. Reports are archived permanently under
+        ``<state_dir>/reports/``, so this reads one back — the answer to "show
+        me that recon again", in this session or a later one. A case directory
+        that never finalised counts too; see ``osint_tree.find_report``.
+        """
+        which = " ".join(args).strip() or None
+        report = osint_tree_mod.find_report(self.cfg, which)
+        if report is None:
+            where = osint_mod.reports_dir(self.cfg)
+            if which:
+                # Say "recon", not "report": `<state_dir>/reports/` is shared
+                # with /bug-hunt and /crack, so `/osint-tree crack` on a box
+                # with crack reports archived would otherwise read as "that
+                # file does not exist" when the truth is "that is not a recon".
+                self._sys_line(
+                    f"no recon report matches {which!r} — /osint-tree reads "
+                    f"/osint runs only; try it with no argument for the latest",
+                    warn=True)
+            else:
+                self._sys_line(
+                    f"no recon reports found — run /osint first "
+                    f"(archive: {where})", warn=True)
+            return
+
+        self._sys_line(f"report: {report}")
+        self._show_osint_tree(report)
 
     def _osint_menu(self) -> None:
         """The kind list, shown by a bare `/osint`."""
@@ -4401,6 +4464,7 @@ class ZimZillaApp(App):
             ("/compact", "summarise history to free context", "compact"),
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
+            ("/osint-tree", "re-show a finished recon as a result tree", "osint"),
             ("/phish", "clone a login page and harvest creds", "phish"),
             ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
             ("/ad", "Active Directory campaign — gated and interlocked", "ad"),

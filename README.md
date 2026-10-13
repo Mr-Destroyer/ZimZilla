@@ -427,6 +427,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/compact` | summarise history to free context |
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
+| `/osint-tree [kind\|path]` | re-show a finished recon as a result tree |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
@@ -553,6 +554,56 @@ case directory is deleted** — clones and raw API dumps can run to hundreds of
 megabytes, and they are not worth keeping once the report cites them. A run
 that produced *no* report (it failed, or you interrupted it before the write)
 is left exactly as it is, so you can inspect what it managed to collect.
+
+**The result comes back as a tree.** A run used to end with a path, which meant
+the findings — who the target turned out to be, which breach carried a plaintext
+password — sat in 300 lines of markdown you had to open somewhere else. When a
+run finishes now, its report is printed as a tree: sections as branches,
+findings as leaves, each tagged with the confidence the report gave it.
+
+```
+OSINT Report — target@example.com
+├── Headline
+│   └── This is a free consumer address belonging to …
+├── 1. VALIDATION
+│   ├── [CONFIRMED] Example Mail is a free consumer provider, not corporate
+│   └── [CONFIRMED] Address is not disposable and DNS is valid
+├── 2. IDENTITY
+│   ├── [CONFIRMED] Git commits authored with this exact address
+│   └── [UNVERIFIED] Alias demoguy appears in one commit only
+└── 4. BREACH EXPOSURE
+    └── [CONFIRMED] ExampleLeak — 71M records, plaintext passwords
+```
+
+Confidence is only ever *read* from the report, never inferred: a finding with
+no stated confidence gets no tag rather than a guessed `UNVERIFIED`. The tree is
+a summary, not a substitute — the archived report is still named above it.
+
+`/osint-tree` re-prints it later, which is the point of archiving reports at
+all: the transcript scrolls and `/clear` empties it, but the report is on disk.
+`/osint-tree` takes the newest, `/osint-tree email` the newest of a kind, or a
+case name or path. It reads no model and starts no turn, so it works while a run
+is cooking — useful when a fresh recon is running and you want the previous
+one's shape to compare against.
+
+`<state_dir>/reports/` is **shared** with `/bug-hunt` and `/crack`, which move
+their own reports into the same flat directory — so it holds
+`hunt-<target>-<stamp>.md` and `<hashfile>-<stamp>.md` alongside the recons.
+`/osint-tree` reads only recon reports (the filename's leading token is a recon
+kind), because handing back a newer hunt report would render an empty tree for a
+run that never happened — which reads exactly like "the recon found nothing".
+It also reads case directories that never finalised: archiving happens in the
+turn's `finally` block, so an app killed outright leaves its case — and a
+perfectly readable `report.md` — on disk, and "no archived reports yet" would be
+a lie while three recons sit there.
+
+The reports are not uniform — the model follows the report format when it
+follows it — so the parser works down a ladder: the specified five-line
+What/Where/Confidence/Means/Verify blocks first, then markdown table rows, then
+plain prose, and a section that yields nothing says `(N lines — no findings
+parsed)` rather than rendering an empty branch that would read as "nothing was
+found". Two of the three reports on the author's box are table-only, and a
+strict parser would have shown them as blank.
 
 **Tools it uses, if you have them.** Breach lookups, `holehe` and `sherlock`
 are optional — the playbook runs without them and says which sources it had to
@@ -929,6 +980,7 @@ zimzilla/                     the package
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
+  osint_tree.py               reads a finished report back as a result tree
   hunt.py                     the campaign engine — wave loop, per-wave dirs, reports
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
@@ -957,6 +1009,7 @@ python tests/test_ad.py            # /ad — the gate, the interlock, the tool p
 python tests/test_crack.py         # /crack — identification, the estimate, a real crack
 python tests/test_web.py           # the wave web — geometry and the tracker
 python tests/test_osint.py         # /osint — registry, validation, wiring
+python tests/test_osint_tree.py    # the result tree — parser, real reports, /osint-tree
 python tests/test_update.py        # self-update — real git, throwaway repos
 python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv
