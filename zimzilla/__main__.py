@@ -9,6 +9,8 @@ from pathlib import Path
 
 from . import __version__
 from . import logfare as lf_mod
+from . import beatapi as beat_mod
+from . import openrouter as or_mod
 from . import sources as sources_mod
 from . import tokenharbour as th_mod
 from . import update as update_mod
@@ -145,19 +147,22 @@ def main(argv: list[str] | None = None) -> int:
         boot_rain=False if args.no_rain else None,
     )
 
-    # A remembered TokenHarbour choice has to be re-applied here, not in the
+    # A remembered hosted-gateway choice has to be re-applied here, not in the
     # launcher: the key can live in ZimZilla's own profile, in ~/claude-source,
     # or only in the environment, and only the harness knows how to find all
-    # three. The launcher deliberately does not source a TokenHarbour profile it
-    # cannot find, so without this a session would come back up on the default
-    # Logfare endpoint with the wrong credential.
+    # three. The launcher deliberately does not source a profile it cannot find,
+    # so without this a session would come back up on the default Logfare
+    # endpoint with the wrong credential.
     #
     # Guarded by applies_to_default_endpoint: an endpoint the operator pointed
     # somewhere deliberate — the gateway itself, or any other host — is left
     # exactly as they set it, so a stale selection file cannot hijack it.
-    if sources_mod.current_key() == "tokenharbour" \
-            and th_mod.applies_to_default_endpoint(cfg.base_url):
-        th_mod.apply_to(cfg)
+    _remembered = sources_mod.current_key()
+    for _key, _mod in (("tokenharbour", th_mod), ("beatapi", beat_mod),
+                       ("openrouter", or_mod)):
+        if _remembered == _key and _mod.applies_to_default_endpoint(cfg.base_url):
+            _mod.apply_to(cfg)
+            break
 
     # The split is not silent. A stale scope.yaml would otherwise leave the
     # operator believing the guard is armed when nothing is loaded at all —

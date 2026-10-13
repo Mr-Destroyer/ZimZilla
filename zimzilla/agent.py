@@ -14,6 +14,8 @@ Events yielded
 ``blocked``      the scope guard refused a command
 ``retry``        transient API error, backing off
 ``usage``        token counts for the completed request
+``truncated``    the reply hit ``max_tokens`` and was cut off
+``deliverable``  a declared file was or was not written by the end of the turn
 ``error``        fatal error for this turn
 ``turn_end``     the turn finished
 """
@@ -22,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import random
+from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncContextManager, AsyncIterator, Awaitable, Callable
 
 from .config import Config, price_for
@@ -185,6 +189,34 @@ class _null_guard:
         return False
 
 
+@dataclass(frozen=True)
+class Deliverable:
+    """A file a turn is expected to leave behind.
+
+    Some turns are not chat: ``/osint`` and ``/crack`` run a playbook whose
+    whole product is a report on disk. For those, "the model stopped talking"
+    is not the same as "the work is done", and the loop's usual rule — break
+    when a message carries no tool call — cannot tell them apart.
+
+    Observed, not theorised: an ``/osint instagram`` run executed every phase,
+    left 6 MB of real evidence in the case directory, printed "All phases
+    complete. Writing the report." as plain text, and ended. No report was
+    written, so ``finalise_case`` correctly kept the directory and the operator
+    got ``no report found``. Two distinct failures produce that transcript — a
+    ``Write`` truncated by ``max_tokens``, and a ``Write`` never attempted — and
+    nothing in the harness distinguished them, because ``stop_reason`` was read
+    nowhere. ``run_turn`` now reads it, and nudges only in the second case.
+    """
+
+    path: Path
+    #: How to name the file in the nudge and in the transcript ("report.md").
+    label: str
+    #: How many times to re-prompt before giving up and saying so plainly.
+    #: Small on purpose: a model that will not write the file costs two extra
+    #: round-trips and then the run reports the miss, exactly as it does today.
+    max_nudges: int = 2
+
+
 class Agent:
     def __init__(
         self,
@@ -247,6 +279,20 @@ class Agent:
                 # but still finite.
                 "max_retries": 0,  # retries are handled by _stream_once
             }
+            # A bearer token and an ``x-api-key`` are two credentials, and the
+            # SDK sends whichever of them it has. Sending both is not "more
+            # authenticated" — an upstream that validates ``x-api-key`` rejects
+            # the request before it ever looks at the bearer. Measured against
+            # BeatAPI:
+            #
+            #   auth_token + api_key="placeholder"  → 401 invalid_api_key
+            #   auth_token + api_key=None           → 200
+            #
+            # So the two are mutually exclusive: when a bearer token is present
+            # it is the ONLY credential sent, and any ``api_key`` alongside it is
+            # dropped — it would be a credential for the wrong service anyway.
+            # Otherwise the api_key is sent, or ``None`` when there is neither,
+            # which the SDK accepts and turns into no auth header at all.
             if self.cfg.auth_token:
                 kwargs["auth_token"] = self.cfg.auth_token
                 kwargs["api_key"] = self.cfg.api_key or "placeholder"
@@ -414,11 +460,15 @@ class Agent:
         return text
 
     # ---- main loop --------------------------------------------------------
-    async def run_turn(self, user_text: str) -> AsyncIterator[dict]:
+    async def run_turn(
+        self, user_text: str, deliverable: "Deliverable | None" = None
+    ) -> AsyncIterator[dict]:
         self.turn_count += 1
         turn_in = 0
         turn_out = 0
         turn_cost = 0.0
+        #: Nudges spent so far, against ``deliverable.max_nudges``.
+        nudges = 0
 
         # Any notice buffered since the last turn leads this one, so the model
         # sees it before the instruction it applies to — and the history keeps
@@ -474,7 +524,50 @@ class Agent:
                 b for b in final.content if getattr(b, "type", None) == "tool_use"
             ]
 
+            # Why the model stopped. Read nowhere before this, which is how a
+            # reply cut off at max_tokens mid-``Write`` became indistinguishable
+            # from one that simply finished: the truncated tool call never
+            # reaches ``final.content``, so the loop sees no tool call either
+            # way and breaks in both cases.
+            stop_reason = getattr(final, "stop_reason", None)
+            truncated = stop_reason == "max_tokens"
+            if truncated:
+                yield {"type": "truncated", "max_tokens": self.cfg.max_tokens}
+
             if not tool_calls:
+                # A turn with a declared deliverable is not finished until the
+                # file exists. Nudge once or twice if the model narrated instead
+                # of writing — but never after a truncation: the model was cut
+                # off mid-``Write``, so re-prompting spends another ceiling and
+                # produces the same truncation. Reporting it is the honest move,
+                # and it is the branch that keeps the two failures distinct.
+                if (
+                    deliverable is not None
+                    and not truncated
+                    and nudges < deliverable.max_nudges
+                    and not deliverable.path.exists()
+                ):
+                    nudges += 1
+                    yield {
+                        "type": "nudged",
+                        "label": deliverable.label,
+                        "attempt": nudges,
+                    }
+                    # A real user message, appended so the history stays a clean
+                    # user/assistant alternation — the same constraint ``notice``
+                    # documents for why it folds rather than appends.
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"You stopped before writing {deliverable.label} "
+                                f"to {deliverable.path}. Write it now with the "
+                                "Write tool — that file is the deliverable, and "
+                                "nothing else in this turn counts as finishing."
+                            ),
+                        }
+                    )
+                    continue
                 break
 
             tool_results = []
@@ -648,6 +741,18 @@ class Agent:
         self.session_cost += turn_cost
         self.last_turn_cost = turn_cost
 
+        # State the deliverable's fate rather than leaving the UI to infer it
+        # from the transcript. ``written`` is a fact read off the disk, and
+        # ``nudges`` says whether the model needed pushing to get there.
+        if deliverable is not None:
+            yield {
+                "type": "deliverable",
+                "path": str(deliverable.path),
+                "label": deliverable.label,
+                "written": deliverable.path.exists(),
+                "nudges": nudges,
+            }
+
         yield {
             "type": "turn_end",
             "input": turn_in,
@@ -813,6 +918,12 @@ class Agent:
                 "upstream error; a model that is not served or an upstream "
                 "timeout both look like this."
             )
+        # 402. A gateway that has run out of credit is not an auth failure and
+        # not a bad request — it is a billing state with one obvious fix, and on
+        # BeatAPI it is what a PAID model returns on a zero-balance account
+        # (measured: ``insufficient_credits``). Said plainly, because the free
+        # models on the same key still work, so "try again" would be wrong and
+        # "check your key" would send the operator to re-check a key that is fine.
         return f"{type(e).__name__}: {e}"
 
     @staticmethod

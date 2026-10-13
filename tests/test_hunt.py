@@ -53,6 +53,33 @@ def _cfg(workdir: Path, **kw) -> Config:
                            base_url="http://localhost:4001", **kw)
 
 
+def _dispatch_names_from_source() -> set[str]:
+    """Every command name in app.py's real `dispatch` dict.
+
+    Parsed from the source because the dict is a local inside
+    ``_handle_command`` and cannot be imported. ``ast`` rather than a regex, so
+    a key written as a variable or a dict spread is a parse error here rather
+    than a silently-missing name — and the caller asserts the parse found
+    something, so a refactor that renames the dict fails loudly instead of
+    quietly emptying this set.
+    """
+    import ast
+
+    src = (Path(__file__).resolve().parent.parent
+           / "zimzilla" / "ui" / "app.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "dispatch" not in targets or not isinstance(node.value, ast.Dict):
+            continue
+        return {
+            k.value for k in node.value.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+    return set()
+
+
 def _state(wd: Path, name: str) -> Path:
     """A private ``state_dir`` for one test, under the shared workdir.
 
@@ -2772,18 +2799,18 @@ async def test_busy_gate(wd: Path) -> None:
 
     # Every BUSY_OK name must actually dispatch to something, or the set is a
     # lie the operator discovers at the worst moment.
-    dispatch_names = {
-        "help", "clear", "mode", "model", "cost", "scope", "rain", "theme",
-        "save", "load", "compact", "team", "osint", "osint-tree", "phish",
-        "bug-hunt", "ad", "crack",
-        "stop-hunt", "summary-hunt", "report-bug-hunt", "findings",
-        "zim-logfare", "zim-tokenjuice", "zim-source", "zim-tokenharbour",
-        "tokenharbour-api-setup", "tokenharbour-models", "logfare-models",
-        "exit", "quit",
-    }
+    #
+    # Read out of the real `dispatch` dict in app.py rather than kept as a
+    # hand-written copy. The copy was correct until a command was added and the
+    # list was not, at which point this check fails for the wrong reason — it
+    # accuses the new command of being undispatched when it is the inventory
+    # that is stale. Parsing the source means the check tracks the code.
+    dispatch_names = _dispatch_names_from_source()
     check("gate: every busy-permitted command is dispatchable",
           app.BUSY_OK <= dispatch_names,
           str(sorted(app.BUSY_OK - dispatch_names)))
+    check("gate: the dispatch inventory was actually parsed",
+          len(dispatch_names) > 20, f"parsed {len(dispatch_names)} names")
 
     from textual.widgets import Input
 

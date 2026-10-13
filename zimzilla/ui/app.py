@@ -22,10 +22,12 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import ad as ad_mod
+from .. import beatapi as beat_mod
 from .. import crack as crack_mod
 from .. import hunt as hunt_mod
 from .. import logfare as lf_mod
 from .. import osint as osint_mod
+from .. import openrouter as or_mod
 from .. import osint_tree as osint_tree_mod
 from .. import phish as phish_mod
 from .. import session as session_mod
@@ -33,7 +35,7 @@ from .. import sources as sources_mod
 from .. import team as team_mod
 from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
-from ..agent import Agent
+from ..agent import Agent, Deliverable
 from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
 from ..theme import THINKING_VERBS, agent_color, get_palette
 from . import renderers as R
@@ -66,6 +68,14 @@ def _dedupe(items) -> list[str]:
 #: correct: it is the escalation of last resort and the plan prints it as
 #: dropped, by name. An operator who wants more or less says `--max-time`.
 CRACK_DEFAULT_BUDGET = 1800.0
+
+
+#: Column the model id is padded to in `/models`, before its blurb. Wide enough
+#: for a BeatAPI id (`deepseek-v3.2-free`) with room to spare, and narrower than
+#: most OpenRouter ids — which is the point of the over-long branch in
+#: `_show_models`: those wrap rather than truncate, because the id is what the
+#: operator retypes.
+_MODEL_COL = 34
 
 
 def _parse_crack_args(args) -> tuple[str, int | None, float, bool, str]:
@@ -1275,6 +1285,7 @@ class ZimZillaApp(App):
         display: str | None = None,
         osint_case: Path | None = None,
         finalise: "Callable[[], None] | None" = None,
+        deliverable: "Deliverable | None" = None,
     ) -> None:
         p = self.palette
         chat = self.query_one(ChatPane)
@@ -1301,7 +1312,7 @@ class ZimZillaApp(App):
         spinner = asyncio.create_task(self._verb_spinner())
 
         try:
-            async for ev in self.agent.run_turn(text):
+            async for ev in self.agent.run_turn(text, deliverable=deliverable):
                 if self._cancelled:
                     break
                 await self._handle_event(ev)
@@ -1441,6 +1452,41 @@ class ZimZillaApp(App):
             self._flush_stream(chat, p)
             chat.card_finish()
             chat.write_block(R.error_block(ev["message"], p))
+
+        elif etype == "truncated":
+            # The reply hit the output ceiling and was cut off. Said out loud
+            # because the SDK drops a truncated tool call, so a `Write` that ran
+            # into the ceiling leaves a transcript that looks exactly like one
+            # where the model simply stopped — which is how an osint run ended
+            # with "Writing the report." and no report.
+            self._flush_stream(chat, p)
+            self._sys_line(
+                f"reply truncated at {ev['max_tokens']} output tokens — the "
+                "requested action may not have run (raise it with --max-tokens)",
+                warn=True,
+            )
+
+        elif etype == "nudged":
+            self._flush_stream(chat, p)
+            self._sys_line(
+                f"{ev['label']} was not written — asking again "
+                f"({ev['attempt']})",
+                warn=True,
+            )
+
+        elif etype == "deliverable":
+            # The end-of-turn verdict on the file the turn was supposed to
+            # leave behind. Read off the disk in agent.py, so this states a
+            # fact rather than inferring one from the transcript.
+            self._flush_stream(chat, p)
+            if ev["written"]:
+                self._sys_line(f"{ev['label']} written: {ev['path']}", ok=True)
+            else:
+                self._sys_line(
+                    f"{ev['label']} was never written — the turn ended without "
+                    f"it (expected at {ev['path']})",
+                    warn=True,
+                )
 
         elif etype == "turn_end":
             self._flush_stream(chat, p)
@@ -1601,6 +1647,8 @@ class ZimZillaApp(App):
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
+        "beatapi-api-setup", "openrouter-api-setup",
+        "zim-beatapi", "zim-openrouter", "models",
         "logfare-models",
         # Reading an archived report back is a disk read and a write to the
         # transcript; it starts no turn and touches nothing the live one owns.
@@ -1639,9 +1687,14 @@ class ZimZillaApp(App):
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
+            "zim-beatapi": lambda a: self._cmd_zim_gateway("beatapi"),
+            "zim-openrouter": lambda a: self._cmd_zim_gateway("openrouter"),
             "zim-source": lambda a: self._cmd_zim_source(None),
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
+            "beatapi-api-setup": lambda a: self._cmd_gateway_key("beatapi", a),
+            "openrouter-api-setup": lambda a: self._cmd_gateway_key("openrouter", a),
+            "models": lambda a: self._cmd_models(a),
             "logfare-models": lambda a: self._cmd_logfare_models(a),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
@@ -1671,9 +1724,14 @@ class ZimZillaApp(App):
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
+            ("/zim-beatapi", "switch upstream to BeatAPI      (hosted)"),
+            ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
+            ("/beatapi-api-setup <key>", "store your BeatAPI API key"),
+            ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
+            ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-models", "fetch the live catalog; show what is up"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
@@ -2305,6 +2363,260 @@ class ZimZillaApp(App):
             self._sys_line("fetching the free model list…")
             self._fetch_tokenharbour_models(token)
 
+    # ---- hosted gateways: BeatAPI and OpenRouter --------------------------
+    #
+    # These two are the same shape of thing as TokenHarbour — a remote endpoint
+    # speaking the Anthropic protocol, with a credential the operator *sets*
+    # rather than one the launcher discovers — so the three commands they need
+    # are written once each here, parameterised by kind, rather than six times.
+    # TokenHarbour keeps its own originals because it predates this and its
+    # transcript wording is referenced elsewhere.
+
+    def _gateway(self, kind: str):
+        """``(module, label)`` for a hosted gateway key. ``None`` if unknown."""
+        if kind == "beatapi":
+            return beat_mod, "BeatAPI"
+        if kind == "openrouter":
+            return or_mod, "OpenRouter"
+        return None
+
+    def _cmd_gateway_key(self, kind: str, args) -> None:
+        """/beatapi-api-setup | /openrouter-api-setup [key] — store the key.
+
+        Written to ~/.zimzilla/<kind>/source, mode 600, in the same
+        ``export VAR="value"`` format every other profile uses — so it can be
+        sourced by a shell as well as read by the harness, and there is one
+        credential format in the project rather than three.
+
+        The key is never echoed. The confirmation names the file and the last
+        four characters, which is enough to tell one key from another and not
+        enough to be one.
+        """
+        found = self._gateway(kind)
+        if found is None:
+            self._sys_line(f"unknown gateway: {kind}", warn=True)
+            return
+        mod, label = found
+        p = self.palette
+
+        if not args:
+            creds = mod.load_credentials()
+            t = Text()
+            t.append(f"  {label.upper()} API KEY\n\n", style=f"bold {p.accent}")
+            if creds is None:
+                t.append("  no key set.\n\n", style=p.amber)
+            else:
+                _, _, origin = creds
+                t.append("  source: ", style=p.dim)
+                t.append(origin + "\n\n", style=p.primary)
+            t.append("  set it with  ", style=p.dim)
+            t.append(f"/{kind}-api-setup <key>\n", style=f"bold {p.primary}")
+            if kind == "openrouter":
+                # Worth saying plainly: this catalog is public, so the free list
+                # and a model choice work before any key exists. The key is only
+                # needed to actually send a message.
+                t.append("  note:        ", style=p.dim)
+                t.append(
+                    "the model catalog is public — /models works without a key. "
+                    "A key is needed to send.\n",
+                    style=p.dim,
+                )
+            t.append(f"  stored in     {mod.PROFILE}\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        key = args[0].strip()
+        if not mod.looks_like_key(key):
+            self._sys_line(
+                "that does not look like an API key — paste just the key, "
+                "not the whole `export` line", warn=True)
+            return
+
+        # Keep whatever model is current, so setting a key does not silently
+        # reset the model the operator was on.
+        current = self.cfg.model if mod.active_endpoint(self.cfg.base_url) else ""
+        path = mod.save_key(key, current)
+        mod.clear_cache()             # a new key invalidates the old catalog
+        self._sys_line(f"{label} key saved (…{key[-4:]}) to {path}", ok=True)
+        self._sys_line(f"switch to it with /zim-{kind}")
+
+    def _cmd_zim_gateway(self, kind: str) -> None:
+        """/zim-beatapi | /zim-openrouter — repoint the session at the gateway.
+
+        No local proxy to start and no shipped profile: the key comes from
+        wherever the operator put it — the environment (a sourced
+        ~/claude-source profile), ZimZilla's own profile, or a ~/claude-source
+        file — and the model defaults to a free one so a fresh switch costs
+        nothing.
+        """
+        found = self._gateway(kind)
+        if found is None:
+            self._sys_line(f"unknown gateway: {kind}", warn=True)
+            return
+        mod, label = found
+
+        creds = mod.load_credentials()
+        if creds is None:
+            self._sys_line(
+                f"no {label} key found. Set one with /{kind}-api-setup <key>, "
+                "or source a profile first", warn=True)
+            return
+
+        token, model, origin = creds
+        if sources_mod.active_key(self.cfg.base_url) == kind:
+            # Already pointed here — most often because a profile was sourced
+            # before launch. Record it anyway: the environment does not survive
+            # the next launch, and the whole point of the selection file is that
+            # the choice does.
+            mod.set_current(kind)
+            self._sys_line(f"already on {label} ({origin})", ok=True)
+            return
+
+        applied = mod.apply_to(self.cfg)
+        if applied is None:            # unreachable: creds was just checked
+            self._sys_line(f"no {label} key found", warn=True)
+            return
+        origin, model = applied
+        self.agent._client = None      # rebuild against the new host
+        mod.set_current(kind)
+        self._refresh_after_source_change(label, f"key from {origin}")
+
+        # A first switch with no model chosen lands on whatever the profile
+        # named; with none, offer the free list rather than guessing a paid one.
+        if not model:
+            self._sys_line("fetching the free model list…")
+            self._fetch_models(kind)
+
+    def _cmd_models(self, args) -> None:
+        """/models [source] — the free models of an upstream.
+
+        Defaults to whichever upstream is *active*, because the question it
+        answers is "what can I run right now without paying", and a model on an
+        upstream this session is not pointed at cannot be run at all.
+
+        An explicit source is accepted for the one case the active-source rule
+        gets wrong: **OpenRouter's catalog is public**, so its free list is
+        worth seeing before a key exists — and before the session is pointed
+        there, since pointing at it needs a key. Without the argument that list
+        would be unreachable until after the very setup it is meant to inform.
+        """
+        key = args[0].strip().lower() if args else ""
+        if not key:
+            key = sources_mod.active_key(self.cfg.base_url)
+            if key is None:
+                self._sys_line(
+                    "this endpoint is not a known upstream — /zim-source lists "
+                    "them, or name one: /models openrouter", warn=True)
+                return
+
+        known = {"logfare", "tokenjuice", "tokenharbour", "beatapi", "openrouter"}
+        if key not in known:
+            self._sys_line(
+                f"unknown upstream: {key} — try one of "
+                f"{', '.join(sorted(known))}", warn=True)
+            return
+
+        # A gateway whose catalog is gated needs its key before there is
+        # anything to show. OpenRouter is deliberately absent from this check:
+        # its catalog is public, which is the whole point of naming it here.
+        if key in ("beatapi", "tokenharbour"):
+            mod = self._gateway(key)[0]
+            if not mod.has_key():
+                _, label = self._gateway(key)
+                self._sys_line(
+                    f"no {label} key — set one with /{key}-api-setup <key>",
+                    warn=True)
+                return
+        self._sys_line(f"fetching the {key} catalog…")
+        self._fetch_models(key)
+
+    @work(exclusive=True, thread=True)
+    def _fetch_models(self, kind: str) -> None:
+        """The blocking catalog fetch, off the UI thread, then back on it."""
+        models, err = self._models_for_kind(kind)
+        self.call_from_thread(self._show_models, kind, models, err)
+
+    def _models_for_kind(self, kind: str):
+        """``(models, error)`` for a source key — the free, usable ones.
+
+        Runs on the worker thread; touches no widget.
+        """
+        if kind == "beatapi":
+            mod = beat_mod
+            creds = mod.load_credentials()
+            if creds is None:
+                return None, "no key"
+            return mod.free_models(creds[0])
+        if kind == "openrouter":
+            # Keyless on purpose: the catalog is public, so this works before
+            # /openrouter-api-setup has run. Send the key when there is one, so
+            # the listing matches what this session would be charged.
+            creds = or_mod.load_credentials()
+            return or_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "tokenharbour":
+            creds = th_mod.load_credentials()
+            if creds is None:
+                return None, "no key"
+            return th_mod.free_models(creds[0])
+        if kind == "logfare":
+            # Logfare's catalog is a health feed — it carries no pricing at all,
+            # so there is no free tier to filter to. Reported as an empty list
+            # it would read as "nothing is free right now", which is a claim
+            # about the upstream that is simply not true; say what is actually
+            # the case instead.
+            return None, ("Logfare publishes no pricing — its catalog is a "
+                          "health feed, so there is no free list to show. "
+                          "Use /logfare-models for what it serves.")
+        return None, f"no catalog for {kind}"
+
+    def _show_models(self, kind: str, models, err: str) -> None:
+        p = self.palette
+        if models is None:
+            self._sys_line(f"{kind}: {err}", warn=True)
+            return
+        label = {"beatapi": "BEATAPI", "openrouter": "OPENROUTER",
+                 "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE"}.get(
+                     kind, kind.upper())
+        t = Text()
+        t.append(f"  {label} — FREE MODELS\n\n", style=f"bold {p.accent}")
+        if not models:
+            t.append("  nothing free is usable right now.\n", style=p.amber)
+            if kind == "openrouter":
+                t.append(
+                    "  (free models that cannot call tools are excluded — "
+                    "they cannot drive this harness)\n", style=p.dim)
+        else:
+            for m in models:
+                mark = "◉" if m.id == self.cfg.model else "○"
+                style = f"bold {p.accent}" if m.id == self.cfg.model else p.primary
+                # The id is padded to a column, but NOT truncated: the id is
+                # what the operator retypes into `/model <name>`, so cutting it
+                # short would hand them a name that does not exist. `:<34` alone
+                # pads and never truncates, which is how an OpenRouter id longer
+                # than the column (most of them are) ran straight into its own
+                # blurb — `…:free` and `free · 512k ctx` rendered as `freefree`.
+                # An over-long id instead wraps its blurb to the next line,
+                # indented under the id.
+                t.append(f"  {mark} {m.id}", style=style)
+                if len(m.id) <= _MODEL_COL:
+                    t.append(" " * (_MODEL_COL - len(m.id) + 1))
+                else:
+                    t.append("\n    ")
+                t.append(m.blurb + "\n", style=p.dim)
+            t.append("\n  pick one with  ", style=p.dim)
+            t.append("/model <name>\n", style=f"bold {p.primary}")
+        if kind == "beatapi":
+            # The limit is real and surprising, and it comes from the 429 body
+            # rather than the docs — so it is stated here, where someone about
+            # to point a long run at BeatAPI will see it.
+            t.append(f"  {beat_mod.FREE_RATE_NOTE} · paid models need a "
+                     "topped-up balance\n", style=p.amber)
+        if kind == "openrouter":
+            t.append("  free = :free suffix and a zero price · tools-capable only\n",
+                     style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        self._refresh_model_choices()
+
     def _refresh_model_choices(self) -> None:
         """Re-render the completion popup against the live catalog.
 
@@ -2675,6 +2987,11 @@ class ZimZillaApp(App):
             prompt,
             display=f"⚑ /osint {kind.name} {label}",
             osint_case=case,
+            # The whole point of the run is this file. Declaring it means a
+            # model that narrates "Writing the report." and stops is asked
+            # again, and one that still will not write it is reported as
+            # having failed rather than ending in silence.
+            deliverable=Deliverable(path=case / "report.md", label="report.md"),
         )
 
     def _finalise_osint(self, case: Path) -> None:
@@ -3238,6 +3555,9 @@ class ZimZillaApp(App):
             prompt,
             display=label,
             finalise=lambda: self._finalise_crack(case),
+            # Same shape as /osint: the run exists to produce report.md, so it
+            # gets the same nudge-then-report-honestly treatment.
+            deliverable=Deliverable(path=case / "report.md", label="report.md"),
         )
 
     def _finalise_crack(self, case: Path) -> None:
@@ -4457,10 +4777,16 @@ class ZimZillaApp(App):
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
+            ("/zim-beatapi", "switch upstream to BeatAPI", "zim-beatapi"),
+            ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
             ("/tokenharbour-api-setup", "store your TokenHarbour API key",
              "tokenharbour-api-setup"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free",
              "tokenharbour-models"),
+            ("/beatapi-api-setup", "store your BeatAPI API key", "beatapi-api-setup"),
+            ("/openrouter-api-setup", "store your OpenRouter API key",
+             "openrouter-api-setup"),
+            ("/models", "free models of an upstream — /models [source]", "models"),
             ("/logfare-models", "fetch the live catalog; show what is up",
              "logfare-models"),
             ("/save", "write the session to disk", "save"),

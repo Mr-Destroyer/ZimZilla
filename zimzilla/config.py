@@ -158,11 +158,26 @@ KNOWN_MODELS: list[str] = [
 
 
 def price_for(model: str) -> tuple[float, float]:
-    """Return (input, output) USD per million tokens for *model*."""
+    """Return (input, output) USD per million tokens for *model*.
+
+    A free model costs nothing, and that is checked FIRST. The prefix tolerance
+    below is what makes the check necessary rather than merely nice: BeatAPI
+    names its giveaway ``deepseek-v4.1-flash-free``, which *starts with* the paid
+    ``deepseek-v4.1-flash`` row, so the loop would bill the free model at the
+    paid model's rate — measured at $0.0003 for a two-token reply, on a model the
+    operator was told costs nothing. Worse, an unknown free model fell through to
+    DEFAULT_PRICE and was billed $1/$3.
+
+    Both gateway conventions are recognised: BeatAPI's ``-free`` suffix and
+    OpenRouter's ``:free`` one. A model that is genuinely paid can never carry
+    either, so this cannot mis-price a real charge.
+    """
+    base = model.split("/")[-1]
+    if base.endswith("-free") or base.endswith(":free"):
+        return (0.0, 0.0)
     if model in PRICING:
         return PRICING[model]
     # Tolerate dated suffixes / provider prefixes.
-    base = model.split("/")[-1]
     for name, price in PRICING.items():
         if base == name or base.startswith(name) or name.startswith(base):
             return price
@@ -188,7 +203,15 @@ class Config:
     #: was an allow-list that also blocked, so reading it as a deny-list would
     #: block the very hosts it declared. Kept only so the UI can say so.
     legacy_scope_path: Path | None = None
-    max_tokens: int = 8192
+    # Output ceiling per request. Was 8192, which is too close to the size of a
+    # real osint report to be safe: the two archived reports on this box are
+    # 4880 and 6169 tokens, so a report that grows at all — one more breach
+    # section, a longer coverage table — is cut off mid-``Write``. The SDK then
+    # discards the truncated tool call, and the turn ends looking exactly like
+    # one where the model narrated instead of writing. 32768 leaves room, and is
+    # inside every model observed (BeatAPI accepts 64000; the ceiling is
+    # model-dependent, so this is the value that is safe everywhere).
+    max_tokens: int = 32768
     temperature: float = 0.0
     # Max seconds to wait on the API between reads. Without this the SDK default
     # is 600s, so a proxy that accepts the connection and then goes quiet hangs
