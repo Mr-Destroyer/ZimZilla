@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from rich.text import Text
 from textual import on, work
@@ -20,6 +22,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import ad as ad_mod
+from .. import crack as crack_mod
 from .. import hunt as hunt_mod
 from .. import logfare as lf_mod
 from .. import osint as osint_mod
@@ -49,6 +52,83 @@ def _dedupe(items) -> list[str]:
     once, not twice.
     """
     return list(dict.fromkeys(items))
+
+
+#: `/crack`'s default budget. Thirty minutes, chosen so the ladder's *useful*
+#: stages actually fit the case this command exists for. A Kerberoast hash —
+#: what `/ad` produces — runs the dictionary in ~12s and best64 in ~16m on this
+#: host, so a ten-minute default would drop best64, which is precisely the stage
+#: that cracks corporate passwords. A default that excludes the stage that works
+#: is not a default, it is a trap.
+#:
+#: The mask is still excluded (7h on a Kerberoast, 4m on an NTLM), and that is
+#: correct: it is the escalation of last resort and the plan prints it as
+#: dropped, by name. An operator who wants more or less says `--max-time`.
+CRACK_DEFAULT_BUDGET = 1800.0
+
+
+def _parse_crack_args(args) -> tuple[str, int | None, float, bool, str]:
+    """Parse `/crack`'s arguments. Returns ``(path, mode, max_time, deep, err)``.
+
+    Split out of the command so the parse is testable on its own — every
+    malformed flag is refused here, with the value named, rather than silently
+    becoming part of the path or a nonsense budget. `--mode` is validated against
+    the modes this command knows, because a wrong mode number does not fail: it
+    spends the entire budget on a format that cannot match.
+    """
+    path_arg = ""
+    mode: int | None = None
+    max_time = CRACK_DEFAULT_BUDGET
+    deep = False
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        name = arg.partition("=")[0]
+        if name in ("--mode", "--max-time"):
+            value = arg.partition("=")[2] if "=" in arg else (
+                args[i + 1] if i + 1 < len(args) else "")
+            if "=" not in arg:
+                i += 1  # consume the value too
+            if not value:
+                return "", None, max_time, deep, (
+                    f"{name} needs a value, e.g. /crack hashes.txt "
+                    f"{name} {'13100' if name == '--mode' else '600'}")
+            if name == "--mode":
+                if not value.isdigit():
+                    return "", None, max_time, deep, (
+                        f"--mode takes a hashcat mode number, not {value!r} — "
+                        "try /crack --help for the ones this knows")
+                mode = int(value)
+                if mode not in crack_mod.HASH_MODES:
+                    known = ", ".join(str(m) for m in sorted(crack_mod.HASH_MODES))
+                    return "", None, max_time, deep, (
+                        f"mode {mode} is not one /crack knows ({known}) — pass "
+                        "--mode only for a format in that list, or let the file "
+                        "be identified")
+            else:
+                try:
+                    max_time = float(value)
+                except ValueError:
+                    return "", None, max_time, deep, (
+                        f"--max-time takes seconds, not {value!r}")
+                if max_time <= 0:
+                    return "", None, max_time, deep, (
+                        "--max-time must be greater than zero")
+        elif arg == "--deep":
+            deep = True
+        elif arg.startswith("--"):
+            return "", None, max_time, deep, (
+                f"unknown flag {arg!r} — /crack takes "
+                "<file|dir> [--mode N] [--max-time S] [--deep]")
+        elif not path_arg:
+            path_arg = arg
+        else:
+            return "", None, max_time, deep, (
+                f"unexpected extra argument {arg!r} — /crack takes one path")
+        i += 1
+
+    return path_arg, mode, max_time, deep, ""
 
 
 class PermissionModal(ModalScreen[str]):
@@ -1193,6 +1273,7 @@ class ZimZillaApp(App):
         text: str,
         display: str | None = None,
         osint_case: Path | None = None,
+        finalise: "Callable[[], None] | None" = None,
     ) -> None:
         p = self.palette
         chat = self.query_one(ChatPane)
@@ -1255,7 +1336,16 @@ class ZimZillaApp(App):
             # Runs in the finally block, so an interrupted run is tidied too.
             # finalise_case deletes NOTHING unless it found a report, so a run
             # that failed or was cut short keeps its evidence for inspection.
-            if osint_case is not None:
+            #
+            # `finalise` is the general form of the same hook: a command whose
+            # run leaves state behind hands its own tidy-up callable here rather
+            # than each getting its own parameter. `/crack` archives its report
+            # but keeps its case (the potfile is worth keeping), which is a
+            # different policy from osint's — so the policy lives in the
+            # callable, and this block stays ignorant of it.
+            if finalise is not None:
+                finalise()
+            elif osint_case is not None:
                 self._finalise_osint(osint_case)
             self.query_one("#input", Input).focus()
 
@@ -1534,6 +1624,7 @@ class ZimZillaApp(App):
             "phish": lambda a: self._cmd_phish(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
             "ad": lambda a: self._cmd_ad(a),
+            "crack": lambda a: self._cmd_crack(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
@@ -1587,6 +1678,8 @@ class ZimZillaApp(App):
             ("/bug-hunt <target> --wave N", "run wave N specifically"),
             ("/ad <domain> --ack <domain>", "AD campaign — gated, interlocks on"),
             ("/ad tools", "what AD tooling this host actually has"),
+            ("/crack <file|dir>", "crack hashes offline — CPU only, budgeted"),
+            ("/crack <file|dir> --deep", "add the rule set that takes hours"),
             ("/stop-hunt", "end a running hunt       (works while busy)"),
             ("/summary-hunt", "the hunt report          (works while busy)"),
             ("/report-bug-hunt", "evidence-only report, every wave"),
@@ -2979,6 +3072,124 @@ class ZimZillaApp(App):
         t.append("  says what each wave aimed at and what it found\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
+    # ---- /crack ------------------------------------------------------------
+    def _cmd_crack(self, args) -> None:
+        """/crack <file|dir> [--mode N] [--max-time S] [--deep] — crack hashes offline.
+
+        A router, like `/osint`: identify what is in the file, work out what is
+        affordable on *this* host, print that arithmetic, then hand the playbook
+        to the main agent as one turn. The estimate is the feature — there is no
+        GPU here, and an operator who starts a rule set against a Kerberoast hash
+        without knowing it is a ten-minute run will cancel it.
+        """
+        p = self.palette
+
+        path_arg, mode, max_time, deep, err = _parse_crack_args(args)
+        if err:
+            self._sys_line(err, warn=True)
+            return
+        if not path_arg:
+            self._sys_line(
+                "usage: /crack <file|dir> [--mode N] [--max-time S] [--deep]",
+                warn=True)
+            return
+
+        source, verr = crack_mod.validate_path(path_arg)
+        if source is None:
+            self._sys_line(verr, warn=True)
+            return
+
+        if shutil.which("hashcat") is None:
+            self._sys_line(
+                "hashcat is not installed — /crack drives hashcat. Install it "
+                "(apt install hashcat) and try again.", warn=True)
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        detected = crack_mod.identify(source)
+        # A `--mode` the operator gave wins; otherwise the most prevalent format
+        # found. A file that identifies as nothing still runs — the playbook
+        # tells the agent to establish the mode with `--identify` — but the
+        # banner has to say the estimate is unknown rather than invent one.
+        chosen = mode if mode is not None else (detected[0].mode if detected else None)
+
+        case = crack_mod.case_dir(self.cfg, source)
+        pot = crack_mod.potfile(self.cfg)
+
+        t = Text()
+        t.append("  ⚒ TARGET    ", style=f"bold {p.accent}")
+        t.append(f"{source}\n", style=p.primary)
+        t.append("  ⚒ EVIDENCE  ", style=f"bold {p.accent}")
+        t.append(str(case) + "\n", style=p.dim)
+        t.append("  ⚒ POTFILE   ", style=f"bold {p.accent}")
+        t.append(f"{pot}  (shared across runs)\n", style=p.dim)
+
+        if detected:
+            t.append("  ⚒ FORMATS   ", style=f"bold {p.accent}")
+            t.append(", ".join(
+                f"{d.name} ×{d.count}" for d in detected) + "\n", style=p.primary)
+        else:
+            t.append("  ⚒ FORMATS   ", style=f"bold {p.accent}")
+            t.append("none recognised — the agent will run `hashcat --identify`\n",
+                     style=p.amber)
+
+        if chosen is not None:
+            rate = crack_mod.rate_for(chosen)
+            t.append("  ⚒ RATE      ", style=f"bold {p.accent}")
+            t.append(
+                f"{crack_mod.HASH_MODES.get(chosen, (f'mode {chosen}',))[0]} · "
+                f"{rate / 1e6:,.1f} MH/s  ", style=p.primary)
+            t.append("(CPU only — this host has no GPU)\n", style=p.dim)
+
+            plan = crack_mod.plan(chosen, max_time, deep=deep)
+            t.append("  ⚒ PLAN      ", style=f"bold {p.accent}")
+            t.append(f"budget {crack_mod.human_time(max_time)}\n", style=p.primary)
+            for ps in plan:
+                mark = "run " if ps.run else "skip"
+                style = p.primary if ps.run else p.dim
+                t.append(f"      [{mark}] ", style=style)
+                t.append(f"{ps.stage.name:<38}", style=style)
+                t.append(f"~{crack_mod.human_time(ps.seconds):>7}", style=style)
+                if not ps.run:
+                    t.append(f"   {ps.reason}", style=p.dim)
+                t.append("\n")
+        else:
+            t.append("  ⚒ PLAN      ", style=f"bold {p.accent}")
+            t.append("cannot estimate until the mode is known\n", style=p.amber)
+
+        t.append("  ⚒ NOTICE    ", style=f"bold {p.amber}")
+        t.append(
+            "authorised use only — hashes you are entitled to test\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+        prompt = crack_mod.build_prompt(self.cfg, source, case, detected, max_time)
+        label = f"⚒ /crack {source.name}" if source.is_file() else f"⚒ /crack {source}"
+        self._run_turn(
+            prompt,
+            display=label,
+            finalise=lambda: self._finalise_crack(case),
+        )
+
+    def _finalise_crack(self, case: Path) -> None:
+        """Archive the run's report, and keep the case directory.
+
+        Deliberately not osint's policy: osint deletes its case because the
+        clones and API dumps have no further use, but a crack case holds the hash
+        copy and the potfile, and the potfile is what makes a *second* run pick
+        up where this one stopped. So the report is copied out to
+        ``<state_dir>/reports/`` and the case stays.
+        """
+        report = crack_mod.finalise_case(self.cfg, case)
+        if report is not None:
+            self._sys_line(f"report archived: {report}", ok=True)
+            self._sys_line(f"case kept (potfile and hashes): {case}")
+        else:
+            self._sys_line(
+                f"no report found — case kept for inspection: {case}", warn=True)
+
     # ---- /ad ---------------------------------------------------------------
     def _cmd_ad(self, args) -> None:
         """/ad <domain> --ack <domain> — an Active Directory campaign.
@@ -4193,6 +4404,7 @@ class ZimZillaApp(App):
             ("/phish", "clone a login page and harvest creds", "phish"),
             ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
             ("/ad", "Active Directory campaign — gated and interlocked", "ad"),
+            ("/crack", "crack hashes offline — CPU only, budgeted", "crack"),
             ("/stop-hunt", "end a running hunt", "stop-hunt"),
             ("/summary-hunt", "the hunt report — what each wave did", "summary-hunt"),
             ("/report-bug-hunt", "evidence-only report, every wave", "report-bug-hunt"),

@@ -434,6 +434,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/bug-hunt [--fresh] [--wave N] <target>` | recon (reused if already done), then **one** wave of 10 agents |
 | `/ad [--fresh] [--wave N] [--lockout N] [--arm] <domain> --ack <domain>` | Active Directory campaign — gated and interlocked |
 | `/ad tools` | reprint the AD tool probe |
+| `/crack <file\|dir> [--mode N] [--max-time S] [--deep]` | crack hashes offline — CPU only, budgeted |
 | `/stop-hunt` | end a running hunt |
 | `/summary-hunt` | the hunt report — what each wave did |
 | `/report-bug-hunt` | evidence-only report — every wave, raw evidence, no remediation |
@@ -795,6 +796,77 @@ they do for `/bug-hunt`.
 
 ---
 
+## Cracking
+
+`/crack` takes a hash file (or a directory of them), works out what is in it, and
+cracks it offline. It is the destination `/ad` already pointed at: a campaign
+that Kerberoasts a hash has somewhere to take it, and a Responder capture, a
+NetNTLMv2 from a relay, or a shadow file all work the same way.
+
+```bash
+/crack loot/tgs.txt                          # identify, then a bounded ladder
+/crack loot/ --max-time 1800                 # a directory, half an hour
+/crack ntlm.txt --mode 1000                  # skip identification
+/crack hashes.txt --max-time 7200 --deep     # allow the hours-long rule set
+```
+
+**This host has no GPU, and the command is built around that.** Every figure
+below is measured from real runs on a 4-core CPU through PoCL — not from
+`hashcat -b`, which reports the kernel's best case and is 11× optimistic on
+NetNTLMv2:
+
+| Mode | Format | Rate here |
+|---|---|---|
+| 1000 | NTLM | 119 MH/s |
+| 5600 | NetNTLMv2 | 1.9 MH/s |
+| 13100 | Kerberos TGS-REP (Kerberoast) | 1.16 MH/s |
+| 18200 | Kerberos AS-REP | 1.21 MH/s |
+| 1800 | sha512crypt | 1 061 H/s |
+| 3200 | bcrypt | 1 001 H/s |
+
+The spread is the point. Kerberos is ~100× slower than NTLM because it is salted
+and iterated, and a shadow-file crypt hash is slower still — **a million times**
+slower than NTLM. So `/crack` prints an estimate before it runs anything, and the
+ladder is bounded by a budget:
+
+| Stage | Candidates | On a Kerberoast |
+|---|---|---|
+| `rockyou.txt` | 14.3 M | ~12 s |
+| `+ best64` rules | 1.1 B | ~16 m |
+| targeted mask `?u?l?l?l?l?l?d?d` | 30.9 B | ~7 h |
+| `+ rockyou-30000` rules (`--deep`) | 430 B | ~4 days |
+
+A stage that does not fit the remaining budget is **dropped and named as
+dropped** — never silently run past the cap. `--max-time` is a real bound:
+hashcat is given `--runtime`, and a stage that turns out slower than its estimate
+is cut off by hashcat itself. The default is 600 s.
+
+**The analysis is the product.** A recovered password is not the finding — the
+finding is what it says about the password policy. The playbook asks the agent to
+argue the crack *rate*, the *patterns* (`Season+Year`, `Word+digits`), which
+accounts fell and what each one grants, and what the survivors say about the
+policy working. The report lands in `<state_dir>/reports/`, and the case
+directory is kept, because the potfile is what makes a second run resume rather
+than restart.
+
+Two things worth knowing:
+
+- **One hashcat at a time.** hashcat refuses to start a second copy — it exits
+  255 with "Already an instance … running on pid N". If a `/crack` run collides
+  with your own hashcat, wait for it; the command says so rather than retrying.
+  Exit code 4 is not an error either — it means the budget was reached.
+- **The potfile is shared.** Every run appends to
+  `<state_dir>/crack/crack.potfile`, deliberately: cracking is multi-session, and
+  a hash that did not fall today may fall tomorrow with a bigger rule. A re-run
+  never redoes work already done. It is zimzilla's own potfile, so `/crack` never
+  writes to your global hashcat state.
+
+> **Authorised use only.** `/crack` is for hashes you are entitled to test —
+> your own estate, a consented audit, or a declared engagement. The command
+> cannot verify that; it only refuses to be careless with your time.
+
+---
+
 ## Phish
 
 `/phish` clones a login page, serves it locally, opens a public tunnel if a
@@ -859,6 +931,7 @@ zimzilla/                     the package
   osint.py                    /osint kinds, playbooks, case dirs, report archive
   hunt.py                     the campaign engine — wave loop, per-wave dirs, reports
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
+  crack.py                    /crack — hash identification, the bounded ladder, the estimate
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan palettes
   termbg.py                   asks the terminal for its own background
@@ -881,6 +954,7 @@ tests/                        the test suite
 python tests/test_phase4.py        # from the checkout's venv
 python tests/test_hunt.py          # the campaign engine — wave loop, per-wave layout, reports
 python tests/test_ad.py            # /ad — the gate, the interlock, the tool probe
+python tests/test_crack.py         # /crack — identification, the estimate, a real crack
 python tests/test_web.py           # the wave web — geometry and the tracker
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_update.py        # self-update — real git, throwaway repos
@@ -902,6 +976,18 @@ and the tool probe runs against a stubbed `PATH` so the result does not depend
 on what is installed on the machine running the tests. The scope cases use the
 eight AD command forms the guard could not previously see — impacket's
 `domain/user:pass@host`, a UNC path, `ldap://` — each of which must now block.
+
+`test_crack.py` is offline and mostly model-free, but not hashcat-free: its
+centre is a **real crack**. hashcat ships an example Kerberoast hash whose
+plaintext is `hashcat`, so the test writes that hash and a four-word dictionary,
+runs the same `run_stage`/`recovered` path the agent drives, and asserts the
+potfile yields the plaintext. That is the test that proves the feature works
+rather than that it formats strings. The rest pins the parts a refactor would
+break: that the rate table stays real-run figures rather than drifting back to
+benchmark optimism, that a mask is emitted *after* the hashfile (emitted before
+it, hashcat reads the mask as the hashfile and cracks nothing — a bug this suite
+caught), and that a rule file is never passed where the wordlist goes. It skips
+the live runs, with a PASS and a reason, when hashcat is not installed.
 
 Stubs the model and drives the interface directly, so it needs no network and
 no credentials. `test_update.py` runs real `git` against repositories it

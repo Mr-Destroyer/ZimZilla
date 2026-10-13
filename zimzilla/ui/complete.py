@@ -45,6 +45,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/phish", "clone a login page and harvest creds"),
     ("/bug-hunt", "recon, then one wave of 10 agents"),
     ("/ad", "Active Directory campaign — gated and interlocked"),
+    ("/crack", "crack hashes offline — CPU only, budgeted"),
     ("/stop-hunt", "end a running hunt"),
     ("/summary-hunt", "the hunt report — what each wave did"),
     ("/report-bug-hunt", "evidence-only report, every wave"),
