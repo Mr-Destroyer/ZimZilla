@@ -295,9 +295,9 @@ class Agent:
             # which the SDK accepts and turns into no auth header at all.
             if self.cfg.auth_token:
                 kwargs["auth_token"] = self.cfg.auth_token
-                kwargs["api_key"] = self.cfg.api_key or "placeholder"
+                kwargs["api_key"] = None
             else:
-                kwargs["api_key"] = self.cfg.api_key or "placeholder"
+                kwargs["api_key"] = self.cfg.api_key or None
             self._client = anthropic.AsyncAnthropic(**kwargs)
         return self._client
 
@@ -924,6 +924,12 @@ class Agent:
         # (measured: ``insufficient_credits``). Said plainly, because the free
         # models on the same key still work, so "try again" would be wrong and
         # "check your key" would send the operator to re-check a key that is fine.
+        if getattr(e, "status_code", None) == 402:
+            return (
+                "the account has no credit for this model (402). Free models "
+                "still work — /models lists them; a paid one needs a topped-up "
+                "balance."
+            )
         return f"{type(e).__name__}: {e}"
 
     @staticmethod
