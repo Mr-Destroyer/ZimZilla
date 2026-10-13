@@ -2628,9 +2628,13 @@ class ZimZillaApp(App):
         target = " ".join(args[1:]).strip()
 
         if not kind.built:
+            # Name the kinds that *do* work rather than the one that does not:
+            # the list grows every time a playbook lands, and a hard-coded
+            # "email is the one that works" goes stale the moment it does.
+            live = " ".join(n for n in osint_mod.KIND_ORDER
+                            if osint_mod.OSINT_KINDS[n].built)
             self._sys_line(
-                f"/osint {kind.name} is not built yet — email is the one that "
-                "works today",
+                f"/osint {kind.name} is not built yet — try: {live}",
                 warn=True,
             )
             return

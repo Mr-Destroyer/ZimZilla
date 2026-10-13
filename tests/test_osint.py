@@ -56,8 +56,9 @@ def test_registry() -> None:
     # this test should be updated on purpose rather than passing by accident —
     # it is the reminder that a new playbook needs its own coverage.
     built = [n for n, k in osint.OSINT_KINDS.items() if k.built]
-    check("registry: email, discord and github are the built kinds",
-          sorted(built) == ["discord", "email", "github"], f"{built}")
+    check("registry: all but phone are the built kinds",
+          sorted(built) == ["discord", "email", "facebook", "github",
+                            "instagram", "tiktok"], f"{built}")
 
     # The stubs must NOT carry a playbook — otherwise a stub would look
     # runnable to build_prompt and the "not built" guard would be the only
@@ -180,6 +181,115 @@ def test_validation() -> None:
     ok, err = osint.validate(dc, "80351110224678912")
     check("validate: a snowflake is accepted", ok, err)
 
+    # ---- facebook --------------------------------------------------------
+    # Four legitimate shapes: a numeric id, a vanity username, a `pfbid`
+    # opaque id, and any of those as a pasted URL. All four must pass, because
+    # the operator has no way to know which one they were handed.
+    fb = osint.OSINT_KINDS["facebook"]
+
+    for value in ["100012345678901", "4", "54971236771", "nasa",
+                  "mark.zuckerberg", "NASA", "pfbid0AbCdefghijklmnopqrstuvwxyz"]:
+        ok, err = osint.validate(fb, value)
+        check(f"validate: accepts facebook {value!r}", ok, err)
+
+    # Every host Facebook serves the same profile from, and the two URL shapes
+    # that carry a name *and* an id — where the id is what must survive.
+    for pasted in ["https://www.facebook.com/nasa",
+                   "http://www.facebook.com/nasa",
+                   "https://web.facebook.com/nasa",
+                   "https://m.facebook.com/nasa",
+                   "https://mbasic.facebook.com/nasa",
+                   "https://business.facebook.com/nasa",
+                   "facebook.com/nasa",
+                   "https://www.facebook.com/nasa/",
+                   "https://www.facebook.com/profile.php?id=4",
+                   "https://www.facebook.com/people/Mark-Zuckerberg/4/"]:
+        ok, err = osint.validate(fb, pasted)
+        check(f"validate: accepts the URL form {pasted!r}", ok, err)
+
+    # A URL with tracking cruft still reduces to the identity.
+    ok, err = osint.validate(fb, "https://web.facebook.com/nasa?__cft__[0]=abc#frag")
+    check("validate: accepts a facebook URL with tracking cruft", ok, err)
+    # A pasted subpage recovers the account rather than being refused.
+    ok, err = osint.validate(fb, "https://www.facebook.com/nasa/photos")
+    check("validate: a facebook subpage reduces to its account", ok, err)
+
+    # Site furniture is not a profile, and must not become one silently.
+    for junk in ["", "   ", "login", "groups", "marketplace", "not a handle!",
+                 "has space", "a@b.com"]:
+        ok, _ = osint.validate(fb, junk)
+        check(f"validate: rejects facebook {junk!r}", not ok)
+
+    ok, err = osint.validate(fb, "   ")
+    check("validate: facebook names its own label in the error",
+          not ok and "Facebook" in err, err)
+
+    # ---- tiktok ----------------------------------------------------------
+    tk = osint.OSINT_KINDS["tiktok"]
+
+    for value in ["charlidamelio", "@charlidamelio", "user.name_1", "ab",
+                  "x" * 24]:
+        ok, err = osint.validate(tk, value)
+        check(f"validate: accepts tiktok {value!r}", ok, err)
+
+    # The URL forms an operator actually pastes, including the query strings
+    # and the dead `m.` host, all of which were measured to serve the same
+    # profile as the bare handle.
+    for pasted in ["https://www.tiktok.com/@charlidamelio",
+                   "https://www.tiktok.com/@charlidamelio?lang=en",
+                   "https://www.tiktok.com/@charlidamelio?is_from_webapp=1&sender_device=pc",
+                   "https://www.tiktok.com/@charlidamelio/",
+                   "https://m.tiktok.com/@charlidamelio",
+                   "tiktok.com/@charlidamelio"]:
+        ok, err = osint.validate(tk, pasted)
+        check(f"validate: accepts the URL form {pasted!r}", ok, err)
+
+    for junk in ["", "   ", "a", "x" * 25, "has space", "not a handle!",
+                 "a@b.com"]:
+        ok, _ = osint.validate(tk, junk)
+        check(f"validate: rejects tiktok {junk!r}", not ok)
+
+    ok, err = osint.validate(tk, "   ")
+    check("validate: tiktok names its own label in the error",
+          not ok and "TikTok" in err, err)
+
+    # ---- instagram -------------------------------------------------------
+    # A handle, or the numeric IGID the crawler record yields.
+    ig = osint.OSINT_KINDS["instagram"]
+
+    for value in ["nasa", "@nasa", "user.name_1", "a", "x" * 30,
+                  "528817151", "17841401474538262"]:
+        ok, err = osint.validate(ig, value)
+        check(f"validate: accepts instagram {value!r}", ok, err)
+
+    for pasted in ["https://www.instagram.com/nasa",
+                   "https://www.instagram.com/nasa/",
+                   "instagram.com/nasa",
+                   "www.instagram.com/nasa?hl=en",
+                   "m.instagram.com/nasa"]:
+        ok, err = osint.validate(ig, pasted)
+        check(f"validate: accepts the URL form {pasted!r}", ok, err)
+
+    # A pasted *post* URL reduces to its author, who is the account.
+    ok, err = osint.validate(ig, "https://www.instagram.com/nasa/p/CxYzAbCdEf/")
+    check("validate: an instagram post URL reduces to its author", ok, err)
+
+    for junk in ["", "   ", "x" * 31, "has space", "not a handle!", "a@b.com"]:
+        ok, _ = osint.validate(ig, junk)
+        check(f"validate: rejects instagram {junk!r}", not ok)
+
+    # Site furniture must not silently become a handle — `/p/...` is a post,
+    # `/explore/...` is a feed, and neither is an account.
+    for furniture in ["https://www.instagram.com/p/CxYzAbCdEf/",
+                      "https://www.instagram.com/explore/tags/nasa/",
+                      "https://www.instagram.com/reel/CxYzAbCdEf/"]:
+        ok, _ = osint.validate(ig, furniture)
+        check(f"validate: rejects instagram furniture {furniture!r}", not ok)
+
+    ok, err = osint.validate(ig, "   ")
+    check("validate: instagram names its own label in the error",
+          not ok and "Instagram" in err, err)
+
 
 def test_normalise() -> None:
     # Domain lowercased, local part's case preserved — the local part is
@@ -244,7 +354,58 @@ def test_normalise() -> None:
           and osint.normalise(osint.OSINT_KINDS["phone"], "  +1555  ") == "+1555"
           and osint.normalise(osint.OSINT_KINDS["discord"],
                               "https://discord.com/users/80351110224678912")
-          == "80351110224678912")
+          == "80351110224678912"
+          and osint.normalise(osint.OSINT_KINDS["facebook"],
+                              "https://www.facebook.com/nasa") == "nasa"
+          and osint.normalise(osint.OSINT_KINDS["tiktok"],
+                              "https://www.tiktok.com/@charlidamelio?lang=en")
+          == "charlidamelio"
+          and osint.normalise(osint.OSINT_KINDS["instagram"],
+                              "https://www.instagram.com/nasa/") == "nasa")
+
+    # The facebook normaliser picks the *durable* identifier out of a URL: the
+    # numeric id survives a rename, the display name does not.
+    fb = osint.OSINT_KINDS["facebook"]
+    check("normalise: facebook takes the id from /people/<name>/<id>/",
+          osint.normalise_facebook(
+              "https://www.facebook.com/people/Mark-Zuckerberg/4/") == "4",
+          osint.normalise_facebook("https://www.facebook.com/people/Mark-Zuckerberg/4/"))
+    check("normalise: facebook takes the id from profile.php?id=",
+          osint.normalise_facebook("https://www.facebook.com/profile.php?id=4") == "4")
+    check("normalise: facebook drops tracking query and fragment",
+          osint.normalise_facebook(
+              "https://web.facebook.com/nasa?__cft__[0]=abc#frag") == "nasa",
+          osint.normalise_facebook("https://web.facebook.com/nasa?__cft__[0]=abc#frag"))
+    check("normalise: facebook recovers the account from a subpage",
+          osint.normalise_facebook("https://www.facebook.com/nasa/photos") == "nasa")
+    check("normalise: facebook leaves a bare id alone",
+          osint.normalise_facebook("  100012345678901  ") == "100012345678901")
+
+    # The tiktok normaliser unwraps every host and strips the query strings,
+    # including the dead `m.` host, which is unwrapped so a stale paste still
+    # becomes a handle that works on `www.`.
+    check("normalise: strips a tiktok profile URL",
+          osint.normalise_tiktok("https://www.tiktok.com/@charlidamelio") == "charlidamelio")
+    check("normalise: strips a tiktok query string",
+          osint.normalise_tiktok(
+              "https://www.tiktok.com/@charlidamelio?is_from_webapp=1") == "charlidamelio")
+    check("normalise: strips the dead m. tiktok host",
+          osint.normalise_tiktok("https://m.tiktok.com/@charlidamelio") == "charlidamelio")
+    check("normalise: strips a leading @ from a tiktok handle",
+          osint.normalise_tiktok("@charlidamelio") == "charlidamelio")
+
+    # The instagram normaliser unwraps the host, the `@`, and the query, and
+    # reduces a post URL to its author.
+    check("normalise: strips an instagram profile URL",
+          osint.normalise_instagram("https://www.instagram.com/nasa/") == "nasa")
+    check("normalise: strips an instagram query string",
+          osint.normalise_instagram("www.instagram.com/nasa?hl=en") == "nasa")
+    check("normalise: strips a leading @ from an instagram handle",
+          osint.normalise_instagram("@nasa") == "nasa")
+    check("normalise: reduces an instagram post URL to its author",
+          osint.normalise_instagram(
+              "https://www.instagram.com/nasa/p/CxYzAbCdEf/") == "nasa",
+          osint.normalise_instagram("https://www.instagram.com/nasa/p/CxYzAbCdEf/"))
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +718,182 @@ def test_prompt_discord(tmp: Path) -> None:
           "LIMITS" in p and "a token would have added" in p)
 
 
+def test_prompt_facebook(tmp: Path) -> None:
+    fb = osint.OSINT_KINDS["facebook"]
+    case = tmp / "fbcase"
+    p = osint.build_prompt(fb, "nasa", case)
+
+    check("facebook prompt: carries the target", "nasa" in p)
+    check("facebook prompt: carries the case dir", str(case) in p)
+    check("facebook prompt: no unsubstituted placeholders",
+          "{target}" not in p and "{case_dir}" not in p)
+    check("facebook prompt: states the authorised-use condition",
+          "Authorised investigation only" in p)
+    check("facebook prompt: asks for report.md", "report.md" in p)
+    check("facebook prompt: defines the confidence levels",
+          "CONFIRMED" in p and "PROBABLE" in p and "UNVERIFIED" in p)
+
+    for needle in ("**What**", "**Where**", "**Confidence**", "**Means**",
+                   "**Verify**", "| Phase | Ran? | Result |",
+                   "## Headline", "Gaps and next steps"):
+        check(f"facebook prompt: report format has {needle!r}", needle in p)
+
+    # A pasted URL must reduce to the identifier the agent and the report
+    # title both use.
+    p_url = osint.build_prompt(fb, "https://www.facebook.com/nasa", case)
+    check("facebook prompt: normalises a pasted profile URL",
+          "nasa" in p_url and "facebook.com/nasa" not in p_url)
+
+    # ---- the measured facts -------------------------------------------
+    # Facebook is the most closed surface, and the playbook's whole value is
+    # that it says so. These pin the walls established by probing the live
+    # site, so an edit cannot quietly reintroduce a dead endpoint.
+    check("facebook prompt: says the web surface is an error, not a login wall",
+          "400" in p and "not** a profile and **not** a login" in p.replace("\n", " "))
+    check("facebook prompt: warns the crawler trick is dead",
+          "crawler User-Agent trick is dead" in p.replace("\n", " "))
+    check("facebook prompt: names both Graph walls and their distinct codes",
+          "code\":104" in p and "code\":200" in p and "403" in p)
+    check("facebook prompt: names the avatar endpoint as the one live source",
+          "graph.facebook.com" in p and "/picture" in p)
+    check("facebook prompt: says the avatar endpoint is an existence oracle",
+          "existence oracle" in p.lower())
+    check("facebook prompt: gives the default-avatar hash to test against",
+          "3e8f62364b0f574a7d18a6c8b26730f1" in p)
+    check("facebook prompt: names the Internet Archive as the richest source",
+          "Internet Archive" in p and "wayback" in p.lower())
+    check("facebook prompt: warns off the refuted avatar-filename pivot",
+          "middle and last fields both return 400" in p
+          and "not the page's own" in p)
+
+    # A leaked credential is described, never copied into the report — the
+    # same restraint every other kind's playbook carries.
+    check("facebook prompt: says to describe not reproduce a secret",
+          "never reproduce it" in p and "do not write\n     the value" in p)
+
+    check("facebook prompt: requires a limits section",
+          "LIMITS" in p and "without a token" in p)
+
+
+def test_prompt_tiktok(tmp: Path) -> None:
+    tk = osint.OSINT_KINDS["tiktok"]
+    case = tmp / "tkcase"
+    p = osint.build_prompt(tk, "charlidamelio", case)
+
+    check("tiktok prompt: carries the handle", "charlidamelio" in p)
+    check("tiktok prompt: carries the case dir", str(case) in p)
+    check("tiktok prompt: no unsubstituted placeholders",
+          "{target}" not in p and "{case_dir}" not in p)
+    check("tiktok prompt: states the authorised-use condition",
+          "Authorised investigation only" in p)
+    check("tiktok prompt: asks for report.md", "report.md" in p)
+    check("tiktok prompt: defines the confidence levels",
+          "CONFIRMED" in p and "PROBABLE" in p and "UNVERIFIED" in p)
+
+    for needle in ("**What**", "**Where**", "**Confidence**", "**Means**",
+                   "**Verify**", "| Phase | Ran? | Result |",
+                   "## Headline", "Gaps and next steps"):
+        check(f"tiktok prompt: report format has {needle!r}", needle in p)
+
+    p_url = osint.build_prompt(tk, "https://www.tiktok.com/@charlidamelio?lang=en",
+                               case)
+    check("tiktok prompt: normalises a pasted profile URL",
+          "charlidamelio" in p_url and "?lang=en" not in p_url)
+
+    # ---- the measured facts -------------------------------------------
+    check("tiktok prompt: names the rehydration blob as the payload",
+          "__UNIVERSAL_DATA_FOR_REHYDRATION__" in p)
+    check("tiktok prompt: warns there are no og: tags in the raw HTML",
+          "og:" in p and "JavaScript" in p)
+    check("tiktok prompt: names oembed as the rate-limited wall",
+          "oembed" in p.lower() and "429" in p and "ratelimit triggered" in p)
+    check("tiktok prompt: says the oembed limiter is independent of the HTML one",
+          "independent" in p.lower())
+    check("tiktok prompt: says the HTTP status carries no existence signal",
+          "200" in p and "userInfo" in p and "10221" in p)
+    check("tiktok prompt: warns statusMsg lies",
+          "user banned" in p)
+    check("tiktok prompt: says the mobile surface is gone",
+          "404" in p and "m.tiktok.com" in p)
+    check("tiktok prompt: says the internal API returns an empty body",
+          "zero-byte" in p or "empty body" in p.lower())
+    check("tiktok prompt: says to use statsV2 not stats",
+          "statsV2" in p)
+    check("tiktok prompt: says the snowflake decode does not work",
+          "snowflake" in p.lower() and "does not work" in p.lower())
+    check("tiktok prompt: says createTime is plain Unix seconds",
+          "createTime" in p and "seconds" in p.lower())
+    check("tiktok prompt: says secUid is opaque",
+          "secUid" in p and "opaque" in p.lower())
+
+    check("tiktok prompt: requires a limits section",
+          "LIMITS" in p)
+
+
+def test_prompt_instagram(tmp: Path) -> None:
+    ig = osint.OSINT_KINDS["instagram"]
+    case = tmp / "igcase"
+    p = osint.build_prompt(ig, "nasa", case)
+
+    check("instagram prompt: carries the handle", "nasa" in p)
+    check("instagram prompt: carries the case dir", str(case) in p)
+    check("instagram prompt: no unsubstituted placeholders",
+          "{target}" not in p and "{case_dir}" not in p)
+    check("instagram prompt: states the authorised-use condition",
+          "Authorised investigation only" in p)
+    check("instagram prompt: asks for report.md", "report.md" in p)
+    check("instagram prompt: defines the confidence levels",
+          "CONFIRMED" in p and "PROBABLE" in p and "UNVERIFIED" in p)
+
+    for needle in ("**What**", "**Where**", "**Confidence**", "**Means**",
+                   "**Verify**", "| Phase | Ran? | Result |",
+                   "## Headline", "Gaps and next steps"):
+        check(f"instagram prompt: report format has {needle!r}", needle in p)
+
+    p_url = osint.build_prompt(ig, "https://www.instagram.com/nasa/", case)
+    check("instagram prompt: normalises a pasted profile URL",
+          "nasa" in p_url and "instagram.com/nasa" not in p_url)
+
+    # ---- the measured facts -------------------------------------------
+    # Instagram is the kind where the *obvious* route fails in a way that looks
+    # like success, so the walls are the most important part of the playbook.
+    check("instagram prompt: says ?__a=1 is a zero-byte 201",
+          "__a=1" in p and "201" in p and "zero-byte" in p)
+    check("instagram prompt: says every JSON API endpoint needs a login",
+          "401" in p and "require_login" in p)
+    check("instagram prompt: names the enumeration oracles as 429",
+          "429" in p and "web_create_ajax" in p)
+    check("instagram prompt: says the profile HTML is identical real vs fake",
+          "byte-identical" in p and "634" in p)
+    check("instagram prompt: says the profile URL carries no existence signal",
+          "tells you nothing" in p and "byte-identical" in p)
+    check("instagram prompt: names the crawler surface as the one live route",
+          "Googlebot" in p and "RelayPreloader" in p)
+    check("instagram prompt: gives the exact Googlebot UA string",
+          "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" in p)
+    check("instagram prompt: warns the gate is the exact string, not the word",
+          "bare `Googlebot/2.1`" in p or "bare Googlebot" in p)
+    check("instagram prompt: names the record key to parse",
+          "xig_user_by_igid_v2" in p)
+    check("instagram prompt: names the record fields",
+          "follower_count" in p and "biography" in p and "is_private" in p)
+    check("instagram prompt: says the crawler size difference is the oracle",
+          "1.3 MB" in p and "634 KB" in p)
+    check("instagram prompt: says the IGID prefix is a fixed namespace",
+          "178414" in p and "namespace" in p)
+    check("instagram prompt: says there is no creation timestamp",
+          "no creation timestamp" in p.lower() or "creation timestamp" in p)
+    check("instagram prompt: warns off the snowflake decode",
+          "snowflake" in p.lower())
+    check("instagram prompt: warns third-party viewers are unreliable",
+          "third-party" in p.lower() and "hijacked" in p)
+    check("instagram prompt: says the Facebook picture pivot does not resolve",
+          "graph.facebook.com" in p and "silhouette" in p)
+
+    check("instagram prompt: requires a limits section",
+          "LIMITS" in p)
+
+
 # ---------------------------------------------------------------------------
 # Wiring — the command must be reachable from every surface
 # ---------------------------------------------------------------------------
@@ -723,6 +1060,9 @@ async def main() -> int:
         test_prompt(tmp)
         test_prompt_github(tmp)
         test_prompt_discord(tmp)
+        test_prompt_facebook(tmp)
+        test_prompt_tiktok(tmp)
+        test_prompt_instagram(tmp)
         test_wiring()
         await test_ui(tmp)
 

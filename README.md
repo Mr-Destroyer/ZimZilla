@@ -489,14 +489,14 @@ Run `/osint` with no arguments for the menu:
 |---|---|---|
 | `email` | email address | **built** |
 | `phone` | phone number | not built yet |
-| `facebook` | profile URL or id | not built yet |
-| `tiktok` | username or profile URL | not built yet |
-| `instagram` | username or profile URL | not built yet |
+| `facebook` | profile URL, id or username | **built** |
+| `tiktok` | username or profile URL | **built** |
+| `instagram` | username or profile URL | **built** |
 | `discord` | username or user id | **built** |
 | `github` | username | **built** |
 
-The unbuilt kinds are listed so the surface is discoverable; selecting one
-says so and stops rather than pretending to work. Each is a drop-in playbook
+The one unbuilt kind is listed so the surface is discoverable; selecting it
+says so and stops rather than pretending to work. It is a drop-in playbook
 away — the registry in `zimzilla/osint.py` is the only place that changes.
 
 **`email`** works the address through seven phases: validation and provider
@@ -524,7 +524,7 @@ unwrapped, so `https://github.com/torvalds` and `torvalds` are the same run.
 /osint github https://github.com/torvalds    # same thing
 ```
 
-**`discord`** is the most closed of the three, and the playbook is written
+**`discord`** is the most closed of the kinds, and the playbook is written
 around that rather than pretending otherwise — an agent that spends its phases
 hammering a `401` produces a report that says nothing. Unauthenticated, Discord
 gives you almost nothing about a user: `api/v10/users/<id>` is `401`, and
@@ -563,6 +563,148 @@ is never used.
 /osint discord https://discord.com/users/80351110224678912   # same as above
 ```
 
+**`facebook`** is the kind where the obvious approach is the wrong one, so the
+playbook opens by naming the wall. Unauthenticated, `facebook.com/<user>`
+returns **HTTP 400** — a 1542-byte XHTML-MP error shell with no `og:` tags and
+no JSON to parse — and the usual workarounds are all dead: `m.facebook.com`
+301-redirects straight back to the `www` 400, and **spoofing `Googlebot` gets
+you a 301 to the same error shell** with no meta tags at all. Every guide that
+tells you to read `og:title` off the profile is describing a page Facebook
+stopped serving years ago. The Graph **node** endpoints are walled too:
+`graph.facebook.com/<id>` answers `An access token is required to request this
+resource` (code 104), and a bare username node fails differently with **403**
+`(#200) Provide valid app ID`. Fetch the 400 **once**, record it as the finding
+it is, and stop.
+
+What *does* work is one endpoint, and the playbook is built on it:
+
+- **`graph.facebook.com/<id>/picture` is a free existence oracle.** A real
+  account returns **302** to a `scontent.*.fbcdn.net` URL; an id that does not
+  exist returns **400**. This is the only unauthenticated request that
+  distinguishes a real account from a fake one, so it is the spine of phase 2.
+- **The avatar is also a fingerprint.** Accounts with no custom picture all
+  return the *same* byte-identical 1876-byte image, md5
+  `3e8f62364b0f574a7d18a6c8b26730f1`. Hashing the fetch tells you instantly
+  whether you have a real photo, and a hash shared across two accounts is a
+  link between them. Ask for `?type=large` (`s200x200` where the default reads
+  `s50x50`) and reverse-image-search the result.
+- **One trap is named rather than discovered.** The numeric id in a CDN avatar
+  filename is **not** the owner's id — its middle and last fields both return
+  400 when fed to the picture endpoint. It looks like an id, it is not one.
+- **The Internet Archive is the profile's memory.** The CDX API enumerates
+  every capture, and a timestamped capture often serves the page Facebook no
+  longer will — a 2023 capture of a personal profile returned the person's real
+  name in `og:title` and a populated `og:description`. Expect asymmetry: a
+  *Page* is archived far more often than a personal profile, so a thin capture
+  list is not evidence the account is new.
+
+The pivot is the **display name** and the **avatar** — a real name feeds
+`sherlock`/`maigret` and the breach sources, and a reused avatar hash links
+accounts across platforms. Breached secrets are described, **never reproduced**.
+
+```bash
+/osint facebook nasa
+/osint facebook https://www.facebook.com/nasa
+/osint facebook https://www.facebook.com/people/Some-Name/100012345678901/
+/osint facebook 100012345678901
+```
+
+**`tiktok`** is the kind where the HTML lies least, once you know which part of
+it to read. TikTok server-renders a full account record into
+`__UNIVERSAL_DATA_FOR_REHYDRATION__`, and that blob is the run: `userInfo`
+present with `statusCode` 0 means the handle is taken, and it carries the id,
+`secUid`, nickname, signature, bio link, avatar and `statsV2`. `userInfo`
+**absent** (with `statusCode` 10221) means no profile is served — and that
+`statusMsg` reads `"user banned"`, which is a lie the playbook tells you not to
+believe.
+
+The walls are named up front, because two of them cost the most time:
+
+- **There are zero `og:` meta tags in the raw HTML.** The older guides all say
+  to read `og:title`; `grep` for it returns nothing, on a real profile and on a
+  nonexistent one alike. Nonexistent handles are not even a 404 — a 26-character
+  garbage handle returns `HTTP 200` with a ~85 KB body, so a status code proves
+  nothing here. Read the blob, not the code.
+- **The oEmbed endpoint is a one-shot.** It answers `HTTP 429` with the body
+  `ratelimit triggered`, and the limit **escalates**: measured 429 on the first
+  call, 200 once after a ~20-second pause, then 429 on three rapid calls, still
+  429 after 75 seconds, still 429 after two minutes. Spend it once, write the
+  answer down, never loop it.
+- **The limiters are independent, which is the useful part.** In the same
+  second, profile HTML returned `200` (88737 bytes) while oEmbed returned `429`.
+  An oEmbed 429 does **not** mean the run is blocked — the HTML path keeps
+  working, and in practice was not rate-limited at all.
+- **A 200 is not a success.** `m.tiktok.com` is simply dead — `404`, 250 bytes,
+  no mobile surface to fall back on. The embed path
+  (`/embed/@<handle>`) returns 200 and 43 KB with **no** rehydration blob in
+  it, and the internal API answers 200 with `content_type: application/json`
+  and **size 0**. Always check the byte count and the blob's presence before
+  believing a request worked.
+
+Two tempting inferences are refuted by measurement rather than left to chance:
+`statsV2` is the real source of counts (`stats` is stale, and both are strings),
+and **the Discord snowflake decode does not port.** TikTok ids look like
+snowflakes and are not: on an account whose `createTime` is 2019-12-12,
+`(id >> 22) + 1420070400000` does not reproduce it. `createTime` is Unix
+seconds — use it. `secUid` is opaque and is recorded only as a stable
+cross-reference key. Phase 7 anchors the timeline on `createTime`, and the
+handle pivots out through `sherlock`/`maigret` and the email kind.
+
+```bash
+/osint tiktok charlidamelio
+/osint tiktok @charlidamelio
+/osint tiktok https://www.tiktok.com/@charlidamelio
+```
+
+**`instagram`** is the kind where the profile page is a decoy, and the playbook
+has to say so before anything else, because the failure mode is a report that
+claims a handle does not exist when it simply could not be read.
+
+Every unauthenticated JSON route is closed. `?__a=1` returns **HTTP 201 with a
+zero-byte body** — not a 200, not a payload. `api/v1/users/<handle>/info/`
+returns **401** `{"require_login":true,"status":"fail"}`; `graphql/query/`
+returns the same 401; the mobile host `i.instagram.com` returns **400**; and
+`account_recovery_send_ajax/` returns **429**. Worse, the plain profile fetch is
+**byte-identical for a real handle and a fake one**: `200`, ~634 KB, a
+JavaScript application shell with no `og:` tags and no profile data in it. It is
+neither a hit nor a miss — it carries no information at all, and reading it as
+absence is the trap.
+
+There is exactly one live unauthenticated route, and the gate is the **exact**
+user-agent string:
+
+- **Send the full Googlebot UA** —
+  `Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)` —
+  and Instagram serves a **server-rendered** page, roughly **1.3 MB** for a real
+  handle, carrying the entire profile record in `xig_user_by_igid_v2` plus real
+  `og:` tags.
+- **That size difference is a free existence test.** A handle that does not
+  exist gets the **634 KB shell** under the same UA — no blob, no `og:` tags.
+  "Blob present at ~1.3 MB" is a CONFIRMED existence finding; "shell at ~634 KB"
+  is a CONFIRMED absence. Both are findings; neither is a guess.
+- **The gate is the string, not the word.** A bare `Googlebot/2.1` or
+  `googlebot` gets **nothing**. `Googlebot-Image/1.0` works; `bingbot` does not.
+  Partial credit does not exist here.
+- **`og:` tags corroborate independently** — `og:title` gives the display name
+  and handle, `og:image` a signed CDN URL that really fetches. Save and hash the
+  avatar: a shared hash is a link between accounts, as with every other kind.
+
+Two things Instagram does not give, stated so they are not hunted for: there is
+**no creation timestamp** and **no snowflake to decode** (the numeric `pk` is
+opaque), and the IGID prefix `178414` is a fixed namespace — every account
+measured begins with it, so it encodes nothing about the account. The Meta
+sibling endpoint does not resolve an Instagram account either:
+`graph.facebook.com/<pk>/picture` returns **302** to the *generic Meta
+silhouette* for every Instagram pk tried, so it is not a hit, not a miss, and
+carries no information. Phase 8 says plainly that no account age could be
+established; phase 9 lists what a session would have added.
+
+```bash
+/osint instagram nasa
+/osint instagram https://www.instagram.com/nasa/
+/osint instagram 17841400000000000
+```
+
 **Why it is fast.** The unauthenticated GitHub API allows only 60 requests an
 hour, and spending them one call per step is what used to make this run drag.
 The playbook is built to avoid it: it checks `rate_limit` once up front, then
@@ -581,8 +723,8 @@ explains itself instead of dumping tool output. It opens with a `## Headline`
 and a coverage table showing which phases ran, and closes with `## Gaps and
 next steps`. A section that found nothing says so explicitly: an empty section
 is a finding, not an omission. The format is shared by every kind, so the email,
-github and discord reports read the same way — and all three render through the
-same result tree described below.
+github, discord, facebook, tiktok and instagram reports read the same way — and
+all of them render through the same result tree described below.
 
 **Where evidence lands, and where it goes.** Each run gets its own directory
 under `<state_dir>/osint/<kind>-<target>-<timestamp>/` — by default
