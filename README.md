@@ -492,7 +492,7 @@ Run `/osint` with no arguments for the menu:
 | `facebook` | profile URL or id | not built yet |
 | `tiktok` | username or profile URL | not built yet |
 | `instagram` | username or profile URL | not built yet |
-| `discord` | user id or invite | not built yet |
+| `discord` | username or user id | **built** |
 | `github` | username | **built** |
 
 The unbuilt kinds are listed so the surface is discoverable; selecting one
@@ -524,6 +524,45 @@ unwrapped, so `https://github.com/torvalds` and `torvalds` are the same run.
 /osint github https://github.com/torvalds    # same thing
 ```
 
+**`discord`** is the most closed of the three, and the playbook is written
+around that rather than pretending otherwise — an agent that spends its phases
+hammering a `401` produces a report that says nothing. Unauthenticated, Discord
+gives you almost nothing about a user: `api/v10/users/<id>` is `401`, and
+`discord.com/users/<id>` is a JavaScript shell whose `og:title` is the generic
+Discord marketing string. So the run does the two things that *do* work, in
+this order:
+
+- **The id-derived facts, which are free and exact.** A snowflake is not
+  opaque: `(id >> 22) + 1420070400000` is the Unix millisecond the account was
+  created, and `(id >> 22) % 6` picks the default avatar. Both are computed
+  locally — no request, no rate limit — and the creation date anchors the whole
+  run. An account from 2016 and one from last month are different findings.
+- **The cross-platform pivot, which is the payload.** A Discord handle is very
+  often the same string its owner uses on platforms that *do* answer, so the
+  run pivots through `sherlock`/`maigret` and the same Gravatar/breach/`holehe`
+  logic `/osint email` already uses. The account-creation date is what
+  disambiguates "the same person" from "a common word".
+
+Two limits are stated rather than discovered: the only unauthenticated username
+probe (`username-attempt-unauthed`, which answers taken/available) rate-limits
+almost immediately and its `retry_after` **escalates** — 161s, then 2028s within
+a handful of requests — so it is a one-shot check, never a loop; and the guild
+`widget.json` endpoint — the one rich native source, and only for guilds that
+have widgets switched on — is **anonymised**: member ids come back as
+`"0","1","2"` and usernames truncated, so members cannot be attributed from it.
+What it is good for is the *guild*: name, size, channels and an invite code,
+which resolve through `invites/<code>?with_counts=true`. The report ends with a
+`LIMITS` section saying exactly what a token would have added, because for this
+kind that is one of the most useful parts of it. If the operator supplies their
+own `DISCORD_TOKEN` the picture changes completely — a scraped or self-bot token
+is never used.
+
+```bash
+/osint discord someuser
+/osint discord 80351110224678912
+/osint discord https://discord.com/users/80351110224678912   # same as above
+```
+
 **Why it is fast.** The unauthenticated GitHub API allows only 60 requests an
 hour, and spending them one call per step is what used to make this run drag.
 The playbook is built to avoid it: it checks `rate_limit` once up front, then
@@ -541,8 +580,9 @@ what it **Means** in plain language, and how to **Verify** it — so the report
 explains itself instead of dumping tool output. It opens with a `## Headline`
 and a coverage table showing which phases ran, and closes with `## Gaps and
 next steps`. A section that found nothing says so explicitly: an empty section
-is a finding, not an omission. The format is shared by every kind, so the email
-and github reports read the same way.
+is a finding, not an omission. The format is shared by every kind, so the email,
+github and discord reports read the same way — and all three render through the
+same result tree described below.
 
 **Where evidence lands, and where it goes.** Each run gets its own directory
 under `<state_dir>/osint/<kind>-<target>-<timestamp>/` — by default

@@ -436,7 +436,256 @@ and what the operator should do with that.
 """
 
 
-#: The registry. `email` is built; the rest are advertised and stubbed.
+# ---------------------------------------------------------------------------
+# The discord playbook
+# ---------------------------------------------------------------------------
+# Discord is the most closed of the three built kinds, and the playbook is
+# written around that rather than pretending otherwise. Measured on this box,
+# unauthenticated:
+#
+#   * `api/v10/users/<id>` and `users/@me` -> 401. There is NO unauthenticated
+#     user endpoint. Discord removed anonymous profile browsing; the old
+#     `discordapp.com/api/v6/users/<id>` path that old guides cite is gone.
+#   * `discord.com/users/<id>` returns a 75 KB HTML shell with generic
+#     `og:title` "Discord - Group Chat That's All Fun & Games" and no snowflake
+#     anywhere in it — it is a JS app, not a server-rendered profile.
+#   * `guilds/<id>/widget.json` works and is the one rich native source, but it
+#     is **anonymised**: member ids come back as "0","1","2"… and usernames
+#     truncated to "4...", with discriminator "0000". It is a roster of who is
+#     online *in a guild*, not an identity.
+#   * `unique-username/username-attempt-unauthed` answers taken/available, but
+#     rate-limits hard and *escalates* — the retry_after climbed from 161s to
+#     2028s across a handful of probes during research. It is a one-shot check,
+#     not a loop.
+#
+# So the honest shape of a Discord run is: pin down the numeric id, get what
+# the id alone yields (creation date, default avatar, account era), then do the
+# real work *off* Discord — the cross-platform handle pivot, which is where a
+# username actually turns into a person. The playbook says all of this plainly,
+# including what is impossible, because an agent that spends its phases
+# hammering a 401 endpoint produces a report that says nothing.
+
+DISCORD_PLAYBOOK = """\
+# Discord OSINT recon — {target}
+
+Authorised investigation only. You are running a recon pass on a Discord
+account the operator has declared in scope. Work autonomously through the
+phases below; do not stop to ask permission between steps. If a tool is
+missing or a request is refused, note it and continue with what works.
+
+EVIDENCE DIRECTORY
+------------------
+{case_dir}
+
+Write every artefact you produce into that directory: raw API responses, HTML
+captures, downloaded avatars, and the final `report.md`. Use absolute paths.
+
+WHAT DISCORD WILL AND WILL NOT GIVE YOU — READ THIS FIRST
+--------------------------------------------------------
+This run is the most constrained of the OSINT kinds, and knowing the walls in
+advance is most of the work. Unauthenticated, Discord gives you **almost
+nothing about a user**:
+
+  * **There is no unauthenticated user endpoint.** `GET
+    https://discord.com/api/v10/users/<id>` returns `401 Unauthorized`. Every
+    older guide that cites `discordapp.com/api/v6/users/<id>` is describing an
+    API that no longer answers; do not spend a phase rediscovering the 401.
+  * **The profile page is a JavaScript shell.** `https://discord.com/users/<id>`
+    returns ~75 KB of HTML whose `og:title` is the generic Discord marketing
+    string. There is no profile JSON embedded in it. Fetch it once for the
+    record, then move on — do not parse it looking for data that is not there.
+  * **The one username probe is rate-limited and escalates.** `POST
+    https://discord.com/api/v10/unique-username/username-attempt-unauthed`
+    with body `{{"username":"<handle>"}}` returns `{{"taken":true|false}}` — the
+    only unauthenticated way to test whether a handle exists. It rate-limits
+    almost immediately and the `retry_after` **climbs** (measured: 161s, then
+    2028s within a handful of requests). Spend it **once**, deliberately, and
+    record the answer. Never put it in a loop or run it per-candidate.
+  * **What the id alone gives you is real and free** — do that first, it costs
+    nothing and cannot be rate-limited (see phase 2).
+
+The consequence: **the payload of this run is off Discord, not on it.** A
+Discord handle is very often the same string as the person's handle elsewhere,
+and those platforms are far more generous. Phases 4 and 5 are where this run
+earns its keep; phases 1-3 exist to give you the id and the exact spelling to
+pivot on.
+
+BUDGET AND PACE
+---------------
+  * **One script per phase, not one command per fact.** Each tool call is a
+    full model round-trip; a script that writes five files in one call is five
+    times faster than five calls. This matters most here, because so much of
+    the run is fetches.
+  * **`curl -sS -m 15`** on every request, with a real User-Agent. A hang with
+    no timeout is a stalled run.
+  * **Record every refusal as a finding.** A 401, a 429, a dead service — each
+    is a coverage row, not a silence. The report's `Gaps and next steps`
+    section is where the operator learns what this run could not reach.
+
+METHOD
+------
+Work the phases in order. Phases 1-3 establish the account and the exact
+identifier; phases 4-5 turn it into a person.
+
+**1. Resolve the target to a numeric id.**
+   Everything downstream keys on the snowflake, so establish it first. The
+   operator may hand you either form:
+   - **A numeric id** (17-20 digits) — that is the target; use it directly.
+   - **A username** — Discord dropped discriminators in 2023, so a modern
+     handle is a bare string (`someuser`), while an old account may still be
+     cited as `someuser#1234`. Note which form you were given.
+   To turn a handle into an id, in order of preference:
+   - **`https://discord.id/` and `https://discordlookup.com/`** — public lookup
+     sites that resolve a username or id to a profile card. Both are
+     Cloudflare-fronted and their JSON API paths move; fetch the HTML page and
+     read the card rather than guessing an endpoint. Treat anything they return
+     as UNVERIFIED — they are third-party caches, not Discord.
+   - **The username probe** (one call, see above) to confirm the handle exists
+     at all before you invest in it.
+   - **`sherlock`/`maigret`** if installed — note that sherlock's Discord check
+     uses the same rate-limited endpoint, so it will not do better than one
+     call, and it may be blocked entirely.
+
+**2. The free id-derived facts — do these first, they cost nothing.**
+   A snowflake is not opaque: its high bits are a timestamp, and the default
+   avatar is derived from it. Both are computed locally, with no request and no
+   rate limit. Write a script that, for the id, produces:
+   - **Account creation time.** `(id >> 22) + 1420070400000` is the Unix
+     millisecond the account was created. This is exact and is the anchor fact
+     of the whole run — an account created in 2016 and one created last month
+     are different kinds of finding.
+   - **The default avatar.** If the account has never set a custom avatar, its
+     avatar is `https://cdn.discordapp.com/embed/avatars/<(id >> 22) % 6>.png`.
+     Fetch it (a plain CDN GET, no auth, no limit) and save it. A default avatar
+     is itself a finding: it is weak evidence the account is a lurker, a bot, or
+     freshly made.
+   - **The custom avatar**, if you have the avatar hash from any source, is
+     `https://cdn.discordapp.com/avatars/<id>/<hash>.png?size=1024`. Save it and
+     reverse-image-search it by URL (Google Images, Yandex, TinEye) — the one
+     route from a Discord account to a face.
+   Record the creation timestamp and both avatar results before anything else,
+   so that even if every later phase is blocked the run has produced something.
+
+**3. Discord-native surface — what is actually reachable.**
+   - **Guild widget** — the one rich unauthenticated endpoint.
+     `https://discord.com/api/v10/guilds/<guild_id>/widget.json` returns the
+     guild's name, `presence_count`, channel names and an `instant_invite`.
+     **It is anonymised: member `id` values come back as sequential strings
+     ("0","1","2"…), usernames are truncated to a few characters plus "…", and
+     `discriminator` is "0000".** Do not try to attribute members from it — the
+     ids are not real and the names are cut. Its value is the *guild*: which
+     servers the target is associated with, their size, and the invite code.
+     Not every guild enables it; a `403`/`404` means widgets are off, which is
+     normal and is a coverage row, not a failure.
+   - **Invites** — `https://discord.com/api/v10/invites/<code>?with_counts=true`
+     resolves an invite to its guild: name, description, `approximate_member_count`,
+     `approximate_presence_count`, channel, and the guild's features. Useful for
+     characterising a community the target is part of.
+   - **Guild metadata** — `https://discord.com/api/v10/guilds/<id>` and
+     `/guilds/<id>/preview` are worth one attempt each; they are sometimes open
+     for large public guilds. Do not retry a 401.
+   - **If a token is available** (`DISCORD_TOKEN` in the environment), the
+     picture changes completely — `users/<id>`, `users/<id>/profile` and mutual
+     guilds all answer, giving username, global display name, avatar/banner
+     hashes, account flags and connected accounts. **Use it only when the
+     operator has provided their own token, never a scraped or self-bot one**,
+     and never hard-code it. If no token is present, say so in the report as a
+     coverage gap rather than treating it as a dead end — it is the single
+     largest difference between a thin run and a rich one.
+   - **Note explicitly in the report** which of the above were unavailable and
+     why. "Discord exposes no user data without authentication" is the correct,
+     useful finding here, not an empty section.
+
+**4. The cross-platform handle pivot — the payload of this run.**
+   This is where a Discord username becomes a person, and it is almost entirely
+   off Discord. The handle the operator gave you is frequently the same string
+   the target uses on platforms that *do* answer.
+   - **Run `sherlock <handle>` and `maigret <handle>` if installed** (maigret
+     first if present — far more sites, and it reports confidence per hit).
+     Write the full output to the evidence directory. These are the highest
+     yield per second in the entire run.
+   - **Try the obvious variants** — the handle with and without separators,
+     with a trailing digit, capitalisation changes. A Discord handle is often a
+     slight mutation of the same person's GitHub or Reddit name.
+   - **For every confirmed hit, capture the platform, the URL and the evidence
+     that it is the same person** (matching avatar, matching bio, linked
+     account, matching creation era). A shared handle is PROBABLE at best; it
+     is CONFIRMED only when something links the two accounts explicitly.
+   - **Feed any email or other handle you recover back through the existing
+     kinds** — `holehe` for accounts on an address, Gravatar for a face, the
+     breach sources for a name. This is the same logic `/osint email` and
+     `/osint github` already use; reuse it rather than reimplementing it.
+   - **Reverse-image-search the avatar** from phase 2. A Discord avatar reused
+     as a profile picture elsewhere is a strong same-person link.
+
+**5. Identity correlation and breach exposure.**
+   - **Breach sources keyed on whatever the pivot produced.** Discord itself
+     has had significant breaches (a 2025 support-ticket exposure among them) —
+     if the target's data appears, that is a CONFIRMED finding about the
+     *account*, and it is worth stating precisely which breach and what fields.
+   - **Paste and code search** for the handle: GitHub code/commit search, grep.app,
+     psbdmp, searchcode. Developers leak Discord webhooks and bot tokens in
+     repos constantly — if the target has, note it as exposure **without
+     reproducing the token itself** (describe it and its location; the
+     operator's job is to tell the owner, not to use it).
+   - **Correlate everything against the creation date from phase 2.** An account
+     created in 2016 that shares a handle with a 2016 GitHub account is a much
+     stronger link than one created last week. The timeline is the disambiguator
+     between "the same person" and "a common word".
+
+**6. Timeline.**
+   Reconstruct a dated sequence: account creation (phase 2, exact), the first
+   and last activity you can date from the guild and platform evidence, and any
+   breach dates. Gaps and bursts are as informative here as in the other kinds.
+
+{report_guide}
+{confidence_guide}
+A handle match across platforms is **PROBABLE** by default. It is CONFIRMED
+only when something explicitly links the accounts — a shared avatar hash, a
+cross-reference in a bio, a linked account, a shared recovery address. Do not
+upgrade a plausible handle match to CONFIRMED on the strength of the handle
+alone; a common word is not an identity.
+
+The account-creation timestamp decoded from the snowflake is **CONFIRMED** —
+it is arithmetic on the id, not a source's claim.
+
+REPORT
+------
+Finish by writing `report.md` into the evidence directory. It opens with the
+`## Headline` block and the coverage table, then these sections in order:
+
+    1. ACCOUNT          id, username (and legacy discriminator if given),
+                        creation date, account age, avatar (custom or default)
+    2. ID DERIVATION    the snowflake arithmetic — creation time, default
+                        avatar index — shown so the operator can check it
+    3. GUILDS           guilds and invites reached, with size and description;
+                        state plainly that widget members are anonymised
+    4. HANDLE PIVOT     table: platform · URL · evidence · confidence
+    5. IDENTITY         names, aliases, linked accounts, avatar reuse
+    6. EXPOSURE         breaches, leaked tokens/webhooks (described, not quoted)
+    7. TIMELINE         dated reconstruction, anchored on the creation time
+    8. LIMITS           exactly what Discord refused without a token, and what
+                        a token would have added
+
+Section 8 is not padding — for this kind it is one of the most useful parts of
+the report, because it tells the operator precisely what was reachable and what
+was not, and whether supplying a token is worth it next time.
+
+Every finding inside those sections is written as a five-line block — What,
+Where, Confidence, Means, Verify — and for every pivot give the URL and the
+evidence that links it. A section that found nothing says so explicitly rather
+than being dropped. The format, the coverage table and the closing `## Gaps and
+next steps` section are specified in full above; follow them exactly, they are
+what makes the report readable.
+
+Close the turn with a short prose summary of the headline findings: what the id
+established, which other platforms the handle resolved on, and what the operator
+should do with that.
+"""
+
+
+#: The registry. `email`, `github` and `discord` are built; the rest are
+#: advertised and stubbed.
 OSINT_KINDS: dict[str, Kind] = {
     "email": Kind(
         name="email",
@@ -449,7 +698,13 @@ OSINT_KINDS: dict[str, Kind] = {
     "facebook": _stub("facebook", "Facebook profile recon", "profile URL or id"),
     "tiktok": _stub("tiktok", "TikTok account recon", "username or profile URL"),
     "instagram": _stub("instagram", "Instagram account recon", "username or profile URL"),
-    "discord": _stub("discord", "Discord account recon", "user id or invite"),
+    "discord": Kind(
+        name="discord",
+        blurb="Discord account recon — id, guilds, cross-platform pivot",
+        target_label="Discord username or user id",
+        built=True,
+        playbook=DISCORD_PLAYBOOK,
+    ),
     "github": Kind(
         name="github",
         blurb="GitHub account recon — emails, keys, orgs, repos",
@@ -481,6 +736,18 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
 # (a pasted URL, an email, a space), not to re-implement GitHub's signup form.
 _GITHUB_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
+# A Discord snowflake. Discord's epoch is 2015-01-01, so a real id is 17-20
+# digits today; 17 is the floor that still admits the earliest accounts.
+_DISCORD_ID_RE = re.compile(r"^\d{17,20}$")
+
+# Discord's own username rule since discriminators were dropped in 2023:
+# 2-32 characters, lowercase letters, digits, `.` and `_`. An *older* account
+# may still be written with a legacy discriminator (`name#1234`), which is kept
+# because the discriminator dates the account — so that form is validated as
+# name-plus-four-digits rather than rejected for the `#`.
+_DISCORD_NAME_RE = re.compile(r"^[a-z0-9._]{2,32}$")
+_DISCORD_LEGACY_RE = re.compile(r"^[A-Za-z0-9._]{2,32}#\d{4}$")
+
 
 def normalise_email(target: str) -> str:
     """Trim and lowercase the domain, keeping the local part's case.
@@ -511,6 +778,33 @@ def normalise_github(target: str) -> str:
     return handle
 
 
+def normalise_discord(target: str) -> str:
+    """Reduce a target to a bare Discord handle or numeric id.
+
+    Discord accepts two forms and both are legitimate targets: a **snowflake**
+    (the numeric id, 17-20 digits) and a **username**. Since discriminators
+    were dropped in 2023 a modern handle is a bare string; an older account may
+    still be written `name#1234`, and that form is kept as typed because the
+    discriminator is itself a finding about the account's age.
+
+    A pasted profile URL is unwrapped the same way `normalise_github` does it —
+    it is the common way this gets typed, and a bare handle is one edit away.
+    Unlike GitHub, a Discord profile URL carries the *numeric id*
+    (`discord.com/users/<id>`), so unwrapping it yields an id, not a name.
+    """
+    handle = target.strip().rstrip("/")
+    for prefix in ("https://discord.com/users/", "http://discord.com/users/",
+                   "https://discordapp.com/users/", "discord.com/users/",
+                   "https://discord.com/", "discord.com/"):
+        if handle.lower().startswith(prefix):
+            handle = handle[len(prefix):]
+            break
+    # A pasted `<@id>` / `<@!id>` mention is another way an id arrives.
+    if handle.startswith("<@") and handle.endswith(">"):
+        handle = handle[2:-1].lstrip("!&")
+    return handle.strip()
+
+
 def normalise(kind: Kind, target: str) -> str:
     """The canonical form of *target* for *kind*.
 
@@ -522,6 +816,8 @@ def normalise(kind: Kind, target: str) -> str:
         return normalise_email(target)
     if kind.name == "github":
         return normalise_github(target)
+    if kind.name == "discord":
+        return normalise_discord(target)
     return target.strip()
 
 
@@ -536,6 +832,15 @@ def validate(kind: Kind, target: str) -> tuple[bool, str]:
     elif kind.name == "github":
         if not _GITHUB_RE.match(normalise_github(target)):
             return False, f"not a valid GitHub username: {target}"
+    elif kind.name == "discord":
+        # Either form is a valid target: a snowflake id, a modern username, or
+        # a legacy `name#1234`. A *pasted URL* is already unwrapped by
+        # `normalise_discord`, so by here a URL has become its id and passes.
+        handle = normalise_discord(target)
+        if not (_DISCORD_ID_RE.match(handle)
+                or _DISCORD_NAME_RE.match(handle)
+                or _DISCORD_LEGACY_RE.match(handle)):
+            return False, f"not a valid Discord username or user id: {target}"
     return True, ""
 
 

@@ -56,8 +56,8 @@ def test_registry() -> None:
     # this test should be updated on purpose rather than passing by accident —
     # it is the reminder that a new playbook needs its own coverage.
     built = [n for n, k in osint.OSINT_KINDS.items() if k.built]
-    check("registry: email and github are the built kinds",
-          sorted(built) == ["email", "github"], f"{built}")
+    check("registry: email, discord and github are the built kinds",
+          sorted(built) == ["discord", "email", "github"], f"{built}")
 
     # The stubs must NOT carry a playbook — otherwise a stub would look
     # runnable to build_prompt and the "not built" guard would be the only
@@ -134,6 +134,52 @@ def test_validation() -> None:
     check("validate: github names its own label in the error",
           not ok and "GitHub username" in err, err)
 
+    # ---- discord ---------------------------------------------------------
+    # Two legitimate target forms: a snowflake id and a username. Both must
+    # pass, because the operator has no way to know which one they were given
+    # and either is a real identifier.
+    dc = osint.OSINT_KINDS["discord"]
+
+    for handle in ["someuser", "user.name", "user_name", "ab", "x" * 32,
+                   "80351110224678912", "613425648685547541",
+                   # A legacy discriminator dates the account, so it is kept.
+                   "olduser#1234"]:
+        ok, err = osint.validate(dc, handle)
+        check(f"validate: accepts discord {handle!r}", ok, err)
+
+    # A pasted profile URL carries the *numeric id* on Discord (unlike GitHub,
+    # where it carries the handle), so it unwraps to an id.
+    for pasted in ["https://discord.com/users/80351110224678912",
+                   "http://discord.com/users/80351110224678912",
+                   "discord.com/users/80351110224678912",
+                   "https://discord.com/users/80351110224678912/"]:
+        ok, err = osint.validate(dc, pasted)
+        check(f"validate: accepts the URL form {pasted!r}", ok, err)
+
+    # A mention is another way an id arrives in a paste.
+    for mention in ["<@80351110224678912>", "<@!80351110224678912>"]:
+        ok, err = osint.validate(dc, mention)
+        check(f"validate: accepts the mention form {mention!r}", ok, err)
+
+    for handle in ["", "a", "x" * 33, "Has Space", "user#12", "user#12345",
+                   "not a handle!", "a@b.com"]:
+        ok, _ = osint.validate(dc, handle)
+        check(f"validate: rejects discord {handle!r}", not ok)
+
+    ok, err = osint.validate(dc, "   ")
+    check("validate: discord names its own label in the error",
+          not ok and "Discord" in err, err)
+
+    # A bare number is ambiguous and *both* readings are legitimate: Discord
+    # usernames may be all digits (2-32 chars), and an id is 17-20 digits. So
+    # a short number is accepted as a username, and a 17-20 digit one is
+    # accepted as either. The distinction is the playbook's job, not
+    # validation's — refusing a digits-only username would refuse a real one.
+    ok, err = osint.validate(dc, "12345")
+    check("validate: a digits-only username is accepted", ok, err)
+    ok, err = osint.validate(dc, "80351110224678912")
+    check("validate: a snowflake is accepted", ok, err)
+
 
 def test_normalise() -> None:
     # Domain lowercased, local part's case preserved — the local part is
@@ -164,13 +210,41 @@ def test_normalise() -> None:
           osint.normalise_github("https://github.com/torvalds/linux")
           == "torvalds/linux")
 
+    # The discord normaliser unwraps a pasted profile URL, which on Discord
+    # carries the numeric id rather than a handle.
+    check("normalise: a bare discord handle is unchanged",
+          osint.normalise_discord("someuser") == "someuser")
+    check("normalise: strips a discord profile URL to its id",
+          osint.normalise_discord("https://discord.com/users/80351110224678912")
+          == "80351110224678912",
+          osint.normalise_discord("https://discord.com/users/80351110224678912"))
+    check("normalise: strips a discordapp URL too",
+          osint.normalise_discord("https://discordapp.com/users/80351110224678912")
+          == "80351110224678912")
+    check("normalise: strips a trailing slash and surrounding space",
+          osint.normalise_discord("  discord.com/users/80351110224678912/  ")
+          == "80351110224678912")
+    # A mention (`<@id>` / `<@!id>`) is another way an id arrives in a paste.
+    check("normalise: unwraps a user mention",
+          osint.normalise_discord("<@80351110224678912>") == "80351110224678912"
+          and osint.normalise_discord("<@!80351110224678912>")
+          == "80351110224678912")
+    # The legacy discriminator is part of the identity and is NOT stripped —
+    # it dates the account, which is a finding.
+    check("normalise: keeps a legacy discriminator",
+          osint.normalise_discord("  OldUser#1234  ") == "OldUser#1234",
+          osint.normalise_discord("  OldUser#1234  "))
+
     # The shared dispatch picks the right one per kind, so the UI label, the
     # evidence path and the playbook cannot disagree.
     check("normalise: dispatches by kind",
           osint.normalise(gh, "https://github.com/torvalds") == "torvalds"
           and osint.normalise(osint.OSINT_KINDS["email"], " Bob@GMail.COM ")
           == "Bob@gmail.com"
-          and osint.normalise(osint.OSINT_KINDS["phone"], "  +1555  ") == "+1555")
+          and osint.normalise(osint.OSINT_KINDS["phone"], "  +1555  ") == "+1555"
+          and osint.normalise(osint.OSINT_KINDS["discord"],
+                              "https://discord.com/users/80351110224678912")
+          == "80351110224678912")
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +481,82 @@ def test_prompt_github(tmp: Path) -> None:
           "60 requests" in p)
 
 
+def test_prompt_discord(tmp: Path) -> None:
+    dc = osint.OSINT_KINDS["discord"]
+    case = tmp / "dccase"
+    p = osint.build_prompt(dc, "someuser", case)
+
+    check("discord prompt: carries the handle", "someuser" in p)
+    check("discord prompt: carries the case dir", str(case) in p)
+    check("discord prompt: no unsubstituted placeholders",
+          "{target}" not in p and "{case_dir}" not in p)
+    check("discord prompt: states the authorised-use condition",
+          "Authorised investigation only" in p)
+    check("discord prompt: asks for report.md", "report.md" in p)
+    check("discord prompt: defines the confidence levels",
+          "CONFIRMED" in p and "PROBABLE" in p and "UNVERIFIED" in p)
+
+    # Same shared report format as the other two playbooks — this is the
+    # assertion that keeps every kind's report structurally identical, and so
+    # parseable by the same tree reader.
+    for needle in ("**What**", "**Where**", "**Confidence**", "**Means**",
+                   "**Verify**", "| Phase | Ran? | Result |",
+                   "## Headline", "Gaps and next steps"):
+        check(f"discord prompt: report format has {needle!r}", needle in p)
+
+    # A pasted URL must be normalised to the bare id, so the agent and the
+    # report title both see the identifier rather than a URL.
+    p_url = osint.build_prompt(dc, "https://discord.com/users/80351110224678912",
+                               case)
+    check("discord prompt: normalises a pasted profile URL",
+          "80351110224678912" in p_url and "discord.com/users/8" not in p_url)
+
+    # ---- the measured facts -------------------------------------------
+    # Discord is the most closed kind, and the playbook's value is that it says
+    # so. These pin the facts established by probing the live API, so that an
+    # edit cannot quietly reintroduce an endpoint that returns 401 and cost a
+    # whole run rediscovering it.
+    check("discord prompt: warns there is no unauthenticated user endpoint",
+          "401" in p and "no unauthenticated user endpoint" in p.lower())
+    check("discord prompt: names the rate-limited username probe",
+          "username-attempt-unauthed" in p)
+    check("discord prompt: warns the rate limit escalates",
+          "retry_after" in p and "climbs" in p)
+    check("discord prompt: says the probe is one call, not a loop",
+          "Never put it in a loop" in p)
+    check("discord prompt: warns the widget is anonymised",
+          "anonymised" in p and '"0","1","2"' in p)
+    check("discord prompt: says the profile page is a JS shell",
+          "JavaScript shell" in p)
+
+    # The free, local, exact derivation — the anchor fact of the run.
+    check("discord prompt: gives the snowflake epoch arithmetic",
+          "(id >> 22) + 1420070400000" in p)
+    check("discord prompt: gives the default-avatar derivation",
+          "embed/avatars/" in p and "(id >> 22) % 6" in p)
+
+    # The pivot, which is where the run actually earns its keep.
+    for needle in ("sherlock", "maigret", "cross-platform", "reverse-image"):
+        check(f"discord prompt: covers {needle!r}", needle in p.lower())
+
+    # The restraint that matters, same as github's: a leaked token is
+    # described, never reproduced.
+    check("discord prompt: says not to reproduce leaked tokens",
+          "without\n     reproducing the token itself" in p
+          or "reproducing the token itself" in p)
+
+    # The token tier is offered honestly — used if the operator supplied one,
+    # never scraped, and reported as a gap when absent.
+    check("discord prompt: mentions the token tier", "DISCORD_TOKEN" in p)
+    check("discord prompt: forbids a scraped token",
+          "never a scraped" in p)
+
+    # The report must end by saying what was NOT reachable. For this kind that
+    # is one of the most useful sections, so it is pinned.
+    check("discord prompt: requires a limits section",
+          "LIMITS" in p and "a token would have added" in p)
+
+
 # ---------------------------------------------------------------------------
 # Wiring — the command must be reachable from every surface
 # ---------------------------------------------------------------------------
@@ -572,6 +722,7 @@ async def main() -> int:
         test_finalise(tmp)
         test_prompt(tmp)
         test_prompt_github(tmp)
+        test_prompt_discord(tmp)
         test_wiring()
         await test_ui(tmp)
 
