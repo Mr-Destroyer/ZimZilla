@@ -88,7 +88,7 @@ CATALOG = {
 }
 
 PROFILE_TEXT = (
-    'export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"\n'
+    'export ANTHROPIC_BASE_URL="https://openrouter.ai/api"\n'
     'export ANTHROPIC_AUTH_TOKEN="sk-or-fromprofile000000000000"\n'
     'export ANTHROPIC_MODEL="deepseek/deepseek-v4.1:free"\n'
     'export ANTHROPIC_API_KEY=""\n'
@@ -352,8 +352,8 @@ def test_profile_roundtrip() -> None:
           exports.get("ANTHROPIC_MODEL") == "deepseek/deepseek-v4.1:free")
     check("key: the endpoint is OpenRouter",
           o.is_openrouter(exports.get("ANTHROPIC_BASE_URL")))
-    check("key: the endpoint keeps the /api/v1 path",
-          exports.get("ANTHROPIC_BASE_URL") == "https://openrouter.ai/api/v1")
+    check("key: the endpoint is the SDK prefix, not the API root",
+          exports.get("ANTHROPIC_BASE_URL") == "https://openrouter.ai/api")
     check("key: the file is source-format", path.read_text().count("export ") == 4)
 
 
@@ -374,6 +374,11 @@ def test_active_key_recognises_host() -> None:
     from zimzilla import sources as s
 
     check("sources: the OpenRouter host is the openrouter source",
+          s.active_key("https://openrouter.ai/api") == "openrouter")
+    # Recognition is by host, so a profile written before the base URL was
+    # corrected still resolves to this source — and that matters, because such a
+    # profile is exactly what is sitting in an operator's environment right now.
+    check("sources: a pre-fix /api/v1 profile still resolves here",
           s.active_key("https://openrouter.ai/api/v1") == "openrouter")
     check("sources: the bare host too",
           s.active_key("https://openrouter.ai") == "openrouter")
@@ -425,7 +430,7 @@ def test_credential_precedence(tmp: Path) -> None:
                       creds is not None and creds[2] == str(own),
                       str(creds and creds[2]))
 
-                os.environ["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api/v1"
+                os.environ["ANTHROPIC_BASE_URL"] = o.DEFAULT_BASE_URL
                 os.environ["ANTHROPIC_AUTH_TOKEN"] = "sk-or-fromenv000000000000"
                 os.environ["ANTHROPIC_MODEL"] = "qwen/qwen4-72b:free"
                 creds = o.load_credentials()
@@ -488,7 +493,7 @@ def test_apply_and_guard() -> None:
     check("guard: an empty endpoint is overridable",
           o.applies_to_default_endpoint(""))
     check("guard: OpenRouter itself is NOT overridden",
-          not o.applies_to_default_endpoint("https://openrouter.ai/api/v1"))
+          not o.applies_to_default_endpoint(o.DEFAULT_BASE_URL))
     check("guard: another host is NOT overridden",
           not o.applies_to_default_endpoint("https://api.example.com"))
 
@@ -516,6 +521,64 @@ def test_no_key_is_echoed(tmp: Path) -> None:
     check("display: the origin is a path, not a key", "sk-" not in origin, origin)
 
 
+def test_the_composed_message_url_is_right() -> None:
+    """The URL the SDK actually builds — not the constant it is built from.
+
+    This is the test that was missing, and its absence is why a total failure
+    shipped: every turn 404'd while the suite stayed green. The old assertions
+    checked ``DEFAULT_BASE_URL == "https://openrouter.ai/api/v1"``, which was
+    *true* and also *wrong* — the SDK appends ``/v1/messages`` to whatever prefix
+    it is handed, so that constant composed to ``/api/v1/v1/messages``. Asserting
+    a constant can only ever restate the bug; asserting the composed URL is the
+    only thing that can catch it.
+
+    So this builds the request through the real client, exactly as a turn does,
+    and reads the resulting URL. It is the difference between "we configured the
+    string we meant to" and "a message can be sent".
+
+    The catalog is checked in the same breath, because the two paths are siblings
+    under one version segment and correcting either one alone breaks the other:
+    the base is ``/api``, messages are ``{base}/v1/messages`` (the SDK's doing),
+    models are ``{base}/v1/models`` (built by hand). A fix that moved the base to
+    ``/api/v1`` to please the messages path would silently 404 the catalog.
+    """
+    import anthropic
+    from anthropic._models import FinalRequestOptions
+
+    from zimzilla import openrouter as o
+    from zimzilla.agent import Agent
+    from zimzilla.config import Config
+
+    cfg = Config(base_url=o.DEFAULT_BASE_URL, auth_token="sk-or-x0000000000000000")
+    agent = Agent(cfg)
+    opts = FinalRequestOptions(method="post", url="/v1/messages",
+                               json_data={}, headers={})
+    composed = str(agent.client._build_request(opts).url)
+
+    check("url: the message request lands on /api/v1/messages",
+          composed == "https://openrouter.ai/api/v1/messages", composed)
+    check("url: there is no doubled /v1 in the path",
+          "/v1/v1/" not in composed, composed)
+    # The host and the single version segment are the whole assertion; spelling
+    # out what a regression would look like keeps the failure message useful.
+    check("url: the base is the prefix BEFORE /v1, not the API root",
+          o.DEFAULT_BASE_URL == "https://openrouter.ai/api", o.DEFAULT_BASE_URL)
+
+    # The catalog must still resolve, and to the same place it always did — the
+    # fix moved the base, so this is the half that could have been broken by it.
+    seen = {}
+
+    def capture(req, timeout=None):
+        seen["url"] = req.full_url
+        return _Resp(json.dumps(CATALOG).encode())
+
+    o.clear_cache()
+    with mock.patch("urllib.request.urlopen", capture):
+        o.fetch_models(use_cache=False)
+    check("url: the catalog still lands on /api/v1/models",
+          seen.get("url") == "https://openrouter.ai/api/v1/models", seen.get("url"))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="zim-or-test-"))
     # Pin the module's paths to the temp tree before anything imports it.
@@ -538,6 +601,7 @@ def main() -> int:
     test_apply_and_guard()
     test_selection_file_is_shared()
     test_no_key_is_echoed(tmp)
+    test_the_composed_message_url_is_right()
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print()

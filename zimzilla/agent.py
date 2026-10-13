@@ -891,7 +891,32 @@ class Agent:
                 "proxy may not offer that name."
             )
         if isinstance(e, anthropic.RateLimitError):
-            return "rate limited — retries exhausted."
+            # A free tier is throttled per model, not per account, so the fix is
+            # usually a different free model rather than waiting — measured on
+            # OpenRouter, where three free models answered 429 while the other
+            # eleven on the same key answered fine in the same minute.
+            return (
+                "rate limited (429) — this model's free tier is throttled. "
+                "Another free model from /models will usually answer now."
+            )
+        # 403. On OpenRouter a free model can be gated to an allowlist of
+        # "agentic harnesses" — measured: ``thinkingmachines/inkling:free``
+        # answers 403 ``permission_denied`` with "only available on agentic
+        # harnesses" for every caller not on that list. No header lifts it
+        # (X-Title and Referer were both tried and both still 403'd), so this is
+        # a genuine allowlist and NOT something to work around: claiming to be a
+        # listed app to get in would be misrepresenting the client. What is owed
+        # is the truth — this model will not serve this session, whatever is
+        # done — plus the way out, which is that it is one of fourteen and the
+        # other thirteen are unaffected. Without this branch the raw SDK dict
+        # (nested error/message/metadata) was printed at the operator.
+        if isinstance(e, anthropic.PermissionDeniedError):
+            return (
+                "this model is gated to an allowlist of apps (403). The key is "
+                "fine and other free models work — pick another with /models. "
+                "A few free models are reserved for specific agentic harnesses "
+                "and will refuse any other client."
+            )
         if isinstance(e, anthropic.BadRequestError):
             msg = str(e)
             if "model" in msg.lower():

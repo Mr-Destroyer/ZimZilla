@@ -1,11 +1,14 @@
 """OpenRouter — a hosted Anthropic-protocol gateway, as a ZimZilla source.
 
-OpenRouter is a remote endpoint (``https://openrouter.ai/api/v1``) that fronts
+OpenRouter is a remote endpoint (``https://openrouter.ai/api``) that fronts
 hundreds of models behind one key. Measured on this box, not assumed:
 
 * ``POST /api/v1/messages`` answers with an Anthropic-shaped 401 when no key is
   sent — i.e. the Messages protocol is served natively, so there is no
-  translation layer to write and none is written.
+  translation layer to write and none is written. Note the shape of that URL
+  against :data:`DEFAULT_BASE_URL`: the ``/v1`` is the SDK's, appended to the
+  prefix it is handed. Getting that wrong is a 404 on every turn while the
+  catalog still works, which is exactly what happened here once.
 * ``GET /api/v1/models`` answers **with no key at all** — 463 models when this
   was written. The catalog is public, which is the fact that shapes this module:
   the free list can be shown, and a model chosen, *before* the operator has set
@@ -51,10 +54,24 @@ ZIMZILLA_HOME = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzill
 CLAUDE_SOURCE = Path(os.environ.get("ZIMZILLA_CLAUDE_SOURCE")
                      or (Path.home() / "claude-source"))
 
-#: The canonical host. Matching is by this substring, so ``https://openrouter.ai/api/v1``,
-#: a trailing slash and any subdomain path all count as the same source.
+#: The canonical host. Matching is by this substring, so a trailing slash and any
+#: subdomain path all count as the same source.
 HOST = "openrouter.ai"
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+#: The SDK's ``base_url`` — and it is the PREFIX BEFORE ``/v1``, not the API root.
+#: The Anthropic SDK appends ``/v1/messages`` to whatever it is given (see
+#: ``_build_request``), so this composes to ``/api/v1/messages``, which is where
+#: OpenRouter actually serves the Messages protocol (a 401 without a key, i.e. the
+#: path exists).
+#:
+#: It used to be ``https://openrouter.ai/api/v1``, which composed to
+#: ``/api/v1/v1/messages`` and 404'd on *every* turn — measured live, after a model
+#: switch that reported success. Nothing caught it because the catalog is built
+#: separately and kept working, so ``/models`` looked fine while no message could
+#: be sent. BeatAPI and TokenHarbour never hit this: both have no path component,
+#: so the doubled ``/v1`` had nothing to collide with. Their shape — origin here,
+#: ``/v1`` added at each call site — is the one to copy.
+DEFAULT_BASE_URL = "https://openrouter.ai/api"
 
 #: The profile this module writes and reads for the in-TUI key.
 PROFILE = ZIMZILLA_HOME / "openrouter" / "source"
@@ -385,7 +402,14 @@ def fetch_models(token: str = "", *, timeout: float = 20.0,
         if hit and (time.monotonic() - hit[1]) < CACHE_TTL:
             return hit[0], ""
 
-    url = f"{DEFAULT_BASE_URL}/models"
+    # The catalog lives at ``/api/v1/models`` — the ``/v1`` is spelled out here
+    # rather than inherited from DEFAULT_BASE_URL, because that constant is the
+    # SDK's *prefix* (``/api``) and does not carry it. The two paths are siblings
+    # under the same version segment, not the same prefix: messages are
+    # ``{base}/v1/messages`` by the SDK's own appending, models are
+    # ``{base}/v1/models`` by hand. Spelling both out is what stops one being
+    # "fixed" into breaking the other, which is precisely how this shipped.
+    url = f"{DEFAULT_BASE_URL}/v1/models"
     # NO `anthropic-version` here, and this is not an oversight. Sending it
     # flips this endpoint into the *Anthropic* Models API shape: paginated at 20
     # entries with `has_more`/`first_id`/`last_id` and every id prefixed

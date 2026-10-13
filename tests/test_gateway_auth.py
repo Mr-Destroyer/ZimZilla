@@ -27,6 +27,13 @@ wrong thing anyway.
    billing state with one obvious fix; it rendered as a generic error string, and
    before fix 1 it was indistinguishable from a bad key.
 
+4. **A gated model and a throttled free tier both read as raw SDK dicts.**
+   OpenRouter reserves some ``:free`` models for an allowlist of apps (403
+   ``permission_denied``, "only available on agentic harnesses") and throttles
+   others per model (429). Neither is an auth failure and neither is fixable from
+   here, but both have a true, useful answer — the key is fine, pick another
+   model — and both were instead printed as ``{'type': 'error', ...}``.
+
 No network: every case is constructed locally.
 """
 
@@ -177,7 +184,9 @@ def _status_error(code: int, body: dict) -> anthropic.APIStatusError:
     subclass, so the base is correct there and ``_friendly_error`` reads its
     ``status_code``.
     """
-    cls = {401: anthropic.AuthenticationError}.get(code, anthropic.APIStatusError)
+    cls = {401: anthropic.AuthenticationError,
+           403: anthropic.PermissionDeniedError,
+           429: anthropic.RateLimitError}.get(code, anthropic.APIStatusError)
     resp = httpx2.Response(
         code, json=body,
         request=httpx2.Request("POST", "https://api.beatapi.io/v1/messages"))
@@ -205,6 +214,44 @@ def test_a_real_auth_failure_is_still_an_auth_failure() -> None:
     check("401: it does not claim a billing problem", "no credit" not in msg, msg)
 
 
+def test_a_gated_model_is_not_an_auth_failure() -> None:
+    """403 permission_denied must name the gate, not read as a bad key.
+
+    Measured live: ``thinkingmachines/inkling:free`` on OpenRouter answers 403
+    with "only available on agentic harnesses". The key is valid and thirteen
+    other free models on it work in the same minute, so "check your key" would
+    send the operator to re-check something that is fine — and before this
+    branch existed the raw SDK dict was printed at them instead.
+    """
+    err = _status_error(403, {"error": {
+        "type": "error",
+        "error": {"type": "permission_error", "error_type": "permission_denied",
+                  "message": "only available on agentic harnesses."}}})
+    msg = Agent._friendly_error(err)
+    check("403: the gate is named", "gated" in msg, msg)
+    check("403: it says the key is fine", "key is fine" in msg, msg)
+    check("403: it points at another model", "/models" in msg, msg)
+    check("403: it is not reported as an auth failure",
+          "authentication failed" not in msg, msg)
+    check("403: it does not leak a raw python dict",
+          "{'type'" not in msg and "permission_error" not in msg, msg)
+
+
+def test_a_throttled_free_model_suggests_another_model() -> None:
+    """429 on a free tier is per-model, so the useful advice is 'pick another'.
+
+    Measured: three free OpenRouter models 429'd while eleven others on the same
+    key answered, in the same minute — so "wait and retry" is the wrong advice.
+    """
+    err = _status_error(429, {"error": {"type": "rate_limit_exceeded",
+                                        "message": "Rate limit exceeded"}})
+    msg = Agent._friendly_error(err)
+    check("429: it names the throttle", "rate limited" in msg, msg)
+    check("429: it points at another free model", "/models" in msg, msg)
+    check("429: it is not reported as an auth failure",
+          "authentication failed" not in msg, msg)
+
+
 def main() -> int:
     # Cleared for the WHOLE run, not per case: the SDK falls back to these
     # variables itself when a client is built with no credential, so restoring
@@ -224,6 +271,8 @@ def main() -> int:
         test_freebie_in_the_middle_is_not_free,
         test_a_zero_balance_is_reported_as_a_billing_state,
         test_a_real_auth_failure_is_still_an_auth_failure,
+        test_a_gated_model_is_not_an_auth_failure,
+        test_a_throttled_free_model_suggests_another_model,
     ):
         fn()
 

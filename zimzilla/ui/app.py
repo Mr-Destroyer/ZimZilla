@@ -1904,17 +1904,43 @@ class ZimZillaApp(App):
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
-        # TokenHarbour's list is fetched, so an un-warmed cache would leave
-        # `models` as the Logfare fallback and reject a model the gateway does
-        # serve. Fetch it here instead — this is an explicit switch, so one
-        # network round-trip is the right price for a correct answer.
-        if active == "tokenharbour" and th_catalog is None:
-            creds = th_mod.load_credentials()
-            if creds is not None:
-                fetched, _ = th_mod.fetch_models(creds[0])
-                if fetched is not None:
+        # Every hosted gateway's list is FETCHED, so a cold cache leaves `models`
+        # as the Logfare fallback — and the check below would then reject a model
+        # the gateway genuinely serves, against a list from a different provider.
+        # Fetch it here instead: this is an explicit switch, so one network
+        # round-trip is the right price for a correct answer.
+        #
+        # This branch used to be TokenHarbour's alone, which is exactly how the
+        # bug got in: the fix was written for the first gateway that needed it
+        # and every gateway added afterwards silently inherited the Logfare list.
+        # Measured on OpenRouter — `/model dots-studio/dots-3-note-preview:free`
+        # was refused as "not served by openrouter" while it was the first row of
+        # `/models openrouter`, and the session was then left on the Logfare
+        # default and 402'd on the next turn. A wrong list is worse than no list.
+        #
+        # OpenRouter needs no credential for this and TokenHarbour does, so the
+        # key is optional here rather than required.
+        if active in ("tokenharbour", "beatapi", "openrouter") and (
+                models is None or name not in models):
+            fetched = None
+            if active == "tokenharbour":
+                if th_catalog is None:
+                    creds = th_mod.load_credentials()
+                    if creds is not None:
+                        fetched, _ = th_mod.fetch_models(creds[0])
+                else:
+                    fetched = list(th_catalog)
+            elif active == "openrouter":
+                creds = or_mod.load_credentials()
+                fetched, _ = or_mod.fetch_models(creds[0] if creds else "")
+            elif active == "beatapi":
+                creds = beat_mod.load_credentials()
+                if creds is not None:
+                    fetched, _ = beat_mod.fetch_models(creds[0])
+            if fetched is not None:
+                if active == "tokenharbour":
                     th_catalog = fetched
-                    models = tuple(m.id for m in fetched)
+                models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
         # old behaviour — accept anything — is right there.
