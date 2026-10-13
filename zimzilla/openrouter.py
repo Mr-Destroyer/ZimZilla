@@ -23,7 +23,7 @@ The catalog is the OpenAI-shaped listing; that header belongs on
 ``/v1/messages``.
 
 Two things make it different enough to live in its own module, exactly as
-TokenHarbour and BeatAPI do:
+TokenHarbour does:
 
 * **The credential is set, not discovered.** There is no shipped profile — the
   operator supplies their own key with ``/openrouter-api-setup``. It is kept in
@@ -68,9 +68,9 @@ HOST = "openrouter.ai"
 #: ``/api/v1/v1/messages`` and 404'd on *every* turn — measured live, after a model
 #: switch that reported success. Nothing caught it because the catalog is built
 #: separately and kept working, so ``/models`` looked fine while no message could
-#: be sent. BeatAPI and TokenHarbour never hit this: both have no path component,
-#: so the doubled ``/v1`` had nothing to collide with. Their shape — origin here,
-#: ``/v1`` added at each call site — is the one to copy.
+#: be sent. TokenHarbour never hit this: its base has no path component, so the
+#: doubled ``/v1`` had nothing to collide with. That shape — origin in the
+#: constant, ``/v1`` added at each call site — is the one to copy.
 DEFAULT_BASE_URL = "https://openrouter.ai/api"
 
 #: The profile this module writes and reads for the in-TUI key.

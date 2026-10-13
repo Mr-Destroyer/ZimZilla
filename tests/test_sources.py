@@ -130,29 +130,26 @@ def test_start_proxy_does_not_flock() -> None:
 
 
 def test_remote_gateways_are_identified_by_host() -> None:
-    """The three hosted gateways have no port to match on.
+    """The hosted gateways have no port to match on.
 
     Logfare and Token Juice are local proxies, found by the port in their URL.
-    TokenHarbour, BeatAPI and OpenRouter are remote, so ``active_key`` has to
-    recognise them by host instead — and it must check them *before* the port
-    regex, or a hosted URL falls through to ``None`` and the session is reported
-    as pointing at nothing.
+    TokenHarbour and OpenRouter are remote, so ``active_key`` has to recognise
+    them by host instead — and it must check them *before* the port regex, or a
+    hosted URL falls through to ``None`` and the session is reported as pointing
+    at nothing.
     """
     check("host: tokenharbour is recognised",
           sources.active_key("https://tokenharbor.ai") == "tokenharbour")
-    check("host: beatapi is recognised",
-          sources.active_key("https://api.beatapi.io") == "beatapi")
     check("host: openrouter is recognised",
           sources.active_key("https://openrouter.ai/api/v1") == "openrouter")
 
-    # The three must not be confused for one another, whatever order the checks
+    # The two must not be confused for one another, whatever order the checks
     # happen to run in.
     keys = {
         sources.active_key("https://tokenharbor.ai"),
-        sources.active_key("https://api.beatapi.io"),
         sources.active_key("https://openrouter.ai/api/v1"),
     }
-    check("host: the three gateways are distinct", len(keys) == 3, str(sorted(keys)))
+    check("host: the two gateways are distinct", len(keys) == 2, str(sorted(keys)))
 
     check("host: an unknown host is still unknown",
           sources.active_key("https://api.example.com") is None)
@@ -168,8 +165,8 @@ def test_builtin_keys_survive_a_restart() -> None:
     — so gating them the same way would silently drop the selection and put the
     next launch back on Logfare.
     """
-    check("builtin: all three remote gateways are listed",
-          {"tokenharbour", "beatapi", "openrouter"} <= sources.BUILTIN_KEYS,
+    check("builtin: both remote gateways are listed",
+          {"tokenharbour", "openrouter"} <= sources.BUILTIN_KEYS,
           str(sorted(sources.BUILTIN_KEYS)))
 
     with tempfile.TemporaryDirectory() as td:
@@ -184,7 +181,7 @@ def test_builtin_keys_survive_a_restart() -> None:
         empty_home.mkdir()
         with mock.patch.object(sources, "ZIMZILLA_HOME", zhome), \
              mock.patch.object(sources, "DEFAULT_HOME", empty_home):
-            for key in ("tokenharbour", "beatapi", "openrouter"):
+            for key in ("tokenharbour", "openrouter"):
                 sources.set_current(key)
                 check(f"builtin: {key} survives a restart",
                       sources.current_key() == key, str(sources.current_key()))
@@ -203,13 +200,11 @@ def test_models_for_reads_the_remote_catalogs() -> None:
     "this source serves nothing", and the two must not be confused or /model
     would show an empty list on a cold start instead of the declared one.
     """
-    from zimzilla import beatapi as beat_mod
     from zimzilla import openrouter as or_mod
     from zimzilla import tokenharbour as th_mod
 
     for key, mod, url in (
         ("tokenharbour", th_mod, "https://tokenharbor.ai"),
-        ("beatapi", beat_mod, "https://api.beatapi.io"),
         ("openrouter", or_mod, "https://openrouter.ai/api/v1"),
     ):
         mod.clear_cache()

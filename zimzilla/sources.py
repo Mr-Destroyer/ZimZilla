@@ -104,10 +104,10 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
     None means "not a known source" — the caller should fall back to the
     default registry rather than showing an empty list.
 
-    Logfare's, TokenHarbour's, BeatAPI's and OpenRouter's lists are fetched, not
-    declared, so they come from a catalog cache rather than MODELS_BY_KEY. A
-    cold cache yields None, and the caller falls back to the declared list —
-    which is why the per-source *-models commands exist to warm it.
+    Logfare's, TokenHarbour's and OpenRouter's lists are fetched, not declared,
+    so they come from a catalog cache rather than MODELS_BY_KEY. A cold cache
+    yields None, and the caller falls back to the declared list — which is why
+    the per-source *-models commands exist to warm it.
     """
     key = active_key(base_url)
     if key is None:
@@ -119,10 +119,6 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
     if key == "tokenharbour":
         from . import tokenharbour as th_mod
         cached = th_mod.cached_ids()
-        return tuple(cached) if cached else None
-    if key == "beatapi":
-        from . import beatapi as beat_mod
-        cached = beat_mod.cached_ids()
         return tuple(cached) if cached else None
     if key == "openrouter":
         from . import openrouter as or_mod
@@ -216,11 +212,11 @@ def _state_file() -> Path:
 
 
 #: Sources that are always selectable, whether or not `discover()` finds them
-#: on this machine. TokenHarbour, BeatAPI and OpenRouter are remote: they have
-#: no local profile, service or config to discover, so gating them on
-#: discover() would silently discard the selection and drop a session back onto
-#: Logfare at the next launch.
-BUILTIN_KEYS = frozenset({"tokenharbour", "beatapi", "openrouter"})
+#: on this machine. TokenHarbour and OpenRouter are remote: they have no local
+#: profile, service or config to discover, so gating them on discover() would
+#: silently discard the selection and drop a session back onto Logfare at the
+#: next launch.
+BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter"})
 
 
 def current_key() -> str | None:
@@ -258,13 +254,10 @@ def active_key(base_url: str) -> str | None:
     """
     # Imported locally: sources is imported by these modules' callers, and a
     # module-level import would make them import each other.
-    from . import beatapi as beat_mod
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
-    if beat_mod.is_beatapi(base_url):
-        return "beatapi"
     if or_mod.is_openrouter(base_url):
         return "openrouter"
     m = re.search(r":(\d{2,5})(?:/|$)", base_url or "")

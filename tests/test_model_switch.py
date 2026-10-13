@@ -22,13 +22,13 @@ Logfare's list. A name not in *that* list is then rejected as "not served by
 its own; against a gateway it is a list from the wrong provider, and a wrong
 list is worse than no list, because it refuses things that work.
 
-**Why this test covers three gateways and not one.** The original warm-up branch
-was written for TokenHarbour alone — ``if active == "tokenharbour"``. BeatAPI and
-OpenRouter were added later and silently inherited the broken path, because the
-guard named one gateway rather than the *class* of gateway that needs it. A test
-that pinned only OpenRouter would let the next provider repeat it. So all three
-are driven here, through the real app, and the fourth case asserts that a
-non-gateway source is left alone.
+**Why this test covers every gateway and not one.** The original warm-up branch
+was written for TokenHarbour alone — ``if active == "tokenharbour"``. OpenRouter
+was added later and silently inherited the broken path, because the guard named
+one gateway rather than the *class* of gateway that needs it. A test that pinned
+only OpenRouter would let the next provider repeat it. So both are driven here,
+through the real app, and the final case asserts that a non-gateway source is
+left alone.
 
 No network: each gateway's ``fetch_models`` is stubbed.
 """
@@ -91,12 +91,10 @@ async def _case_gateway(wd: Path, key: str, base_url: str, model: str) -> None:
     The cache is cold by construction — nothing has fetched for this process's
     gateway module in this temp home — which is the state that triggered the bug.
     """
-    from zimzilla import beatapi as beat_mod
     from zimzilla import openrouter as or_mod
     from zimzilla import tokenharbour as th_mod
 
-    mod = {"beatapi": beat_mod, "openrouter": or_mod,
-           "tokenharbour": th_mod}[key]
+    mod = {"openrouter": or_mod, "tokenharbour": th_mod}[key]
 
     cfg = _cfg(wd, base_url)
     app = ZimZillaApp(cfg)
@@ -127,8 +125,6 @@ async def _case_gateway(wd: Path, key: str, base_url: str, model: str) -> None:
 
 
 async def test_a_gateway_model_is_not_policed_against_logfare(wd: Path) -> None:
-    await _case_gateway(wd / "beat", "beatapi",
-                        "https://api.beatapi.io", "deepseek-v3.2-free")
     await _case_gateway(wd / "or", "openrouter",
                         "https://openrouter.ai/api",
                         "dots-studio/dots-3-note-preview:free")

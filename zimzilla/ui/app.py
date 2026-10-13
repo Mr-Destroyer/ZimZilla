@@ -22,7 +22,6 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from .. import ad as ad_mod
-from .. import beatapi as beat_mod
 from .. import crack as crack_mod
 from .. import hunt as hunt_mod
 from .. import logfare as lf_mod
@@ -71,10 +70,9 @@ CRACK_DEFAULT_BUDGET = 1800.0
 
 
 #: Column the model id is padded to in `/models`, before its blurb. Wide enough
-#: for a BeatAPI id (`deepseek-v3.2-free`) with room to spare, and narrower than
-#: most OpenRouter ids — which is the point of the over-long branch in
-#: `_show_models`: those wrap rather than truncate, because the id is what the
-#: operator retypes.
+#: for a TokenHarbour id with room to spare, and narrower than most OpenRouter
+#: ids — which is the point of the over-long branch in `_show_models`: those wrap
+#: rather than truncate, because the id is what the operator retypes.
 _MODEL_COL = 34
 
 
@@ -1647,8 +1645,7 @@ class ZimZillaApp(App):
         # Setting a key or reading a catalog does not touch the running turn, so
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
-        "beatapi-api-setup", "openrouter-api-setup",
-        "zim-beatapi", "zim-openrouter", "models",
+        "openrouter-api-setup", "zim-openrouter", "models",
         "logfare-models",
         # Reading an archived report back is a disk read and a write to the
         # transcript; it starts no turn and touches nothing the live one owns.
@@ -1687,12 +1684,10 @@ class ZimZillaApp(App):
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
-            "zim-beatapi": lambda a: self._cmd_zim_gateway("beatapi"),
             "zim-openrouter": lambda a: self._cmd_zim_gateway("openrouter"),
             "zim-source": lambda a: self._cmd_zim_source(None),
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
-            "beatapi-api-setup": lambda a: self._cmd_gateway_key("beatapi", a),
             "openrouter-api-setup": lambda a: self._cmd_gateway_key("openrouter", a),
             "models": lambda a: self._cmd_models(a),
             "logfare-models": lambda a: self._cmd_logfare_models(a),
@@ -1724,12 +1719,10 @@ class ZimZillaApp(App):
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
-            ("/zim-beatapi", "switch upstream to BeatAPI      (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
-            ("/beatapi-api-setup <key>", "store your BeatAPI API key"),
             ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
             ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-models", "fetch the live catalog; show what is up"),
@@ -1920,7 +1913,7 @@ class ZimZillaApp(App):
         #
         # OpenRouter needs no credential for this and TokenHarbour does, so the
         # key is optional here rather than required.
-        if active in ("tokenharbour", "beatapi", "openrouter") and (
+        if active in ("tokenharbour", "openrouter") and (
                 models is None or name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -1933,10 +1926,6 @@ class ZimZillaApp(App):
             elif active == "openrouter":
                 creds = or_mod.load_credentials()
                 fetched, _ = or_mod.fetch_models(creds[0] if creds else "")
-            elif active == "beatapi":
-                creds = beat_mod.load_credentials()
-                if creds is not None:
-                    fetched, _ = beat_mod.fetch_models(creds[0])
             if fetched is not None:
                 if active == "tokenharbour":
                     th_catalog = fetched
@@ -2389,25 +2378,22 @@ class ZimZillaApp(App):
             self._sys_line("fetching the free model list…")
             self._fetch_tokenharbour_models(token)
 
-    # ---- hosted gateways: BeatAPI and OpenRouter --------------------------
+    # ---- hosted gateway: OpenRouter ---------------------------------------
     #
-    # These two are the same shape of thing as TokenHarbour — a remote endpoint
-    # speaking the Anthropic protocol, with a credential the operator *sets*
-    # rather than one the launcher discovers — so the three commands they need
-    # are written once each here, parameterised by kind, rather than six times.
-    # TokenHarbour keeps its own originals because it predates this and its
-    # transcript wording is referenced elsewhere.
+    # The same shape of thing as TokenHarbour — a remote endpoint speaking the
+    # Anthropic protocol, with a credential the operator *sets* rather than one
+    # the launcher discovers — so the commands it needs are written once here,
+    # parameterised by kind. TokenHarbour keeps its own originals because it
+    # predates this and its transcript wording is referenced elsewhere.
 
     def _gateway(self, kind: str):
         """``(module, label)`` for a hosted gateway key. ``None`` if unknown."""
-        if kind == "beatapi":
-            return beat_mod, "BeatAPI"
         if kind == "openrouter":
             return or_mod, "OpenRouter"
         return None
 
     def _cmd_gateway_key(self, kind: str, args) -> None:
-        """/beatapi-api-setup | /openrouter-api-setup [key] — store the key.
+        """/openrouter-api-setup [key] — store the key.
 
         Written to ~/.zimzilla/<kind>/source, mode 600, in the same
         ``export VAR="value"`` format every other profile uses — so it can be
@@ -2467,7 +2453,7 @@ class ZimZillaApp(App):
         self._sys_line(f"switch to it with /zim-{kind}")
 
     def _cmd_zim_gateway(self, kind: str) -> None:
-        """/zim-beatapi | /zim-openrouter — repoint the session at the gateway.
+        """/zim-openrouter — repoint the session at the gateway.
 
         No local proxy to start and no shipped profile: the key comes from
         wherever the operator put it — the environment (a sourced
@@ -2535,7 +2521,7 @@ class ZimZillaApp(App):
                     "them, or name one: /models openrouter", warn=True)
                 return
 
-        known = {"logfare", "tokenjuice", "tokenharbour", "beatapi", "openrouter"}
+        known = {"logfare", "tokenjuice", "tokenharbour", "openrouter"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -2545,14 +2531,17 @@ class ZimZillaApp(App):
         # A gateway whose catalog is gated needs its key before there is
         # anything to show. OpenRouter is deliberately absent from this check:
         # its catalog is public, which is the whole point of naming it here.
-        if key in ("beatapi", "tokenharbour"):
-            mod = self._gateway(key)[0]
-            if not mod.has_key():
-                _, label = self._gateway(key)
-                self._sys_line(
-                    f"no {label} key — set one with /{key}-api-setup <key>",
-                    warn=True)
-                return
+        #
+        # TokenHarbour is asked directly rather than through `_gateway`, which
+        # knows only the gateways whose commands it parameterises and returns
+        # None for TokenHarbour — which predates it and keeps its own commands.
+        # `self._gateway("tokenharbour")[0]` was a TypeError, so this command
+        # crashed for every operator who ran it without a TokenHarbour key.
+        if key == "tokenharbour" and not th_mod.has_key():
+            self._sys_line(
+                "no TokenHarbour key — set one with /tokenharbour-api-setup <key>",
+                warn=True)
+            return
         self._sys_line(f"fetching the {key} catalog…")
         self._fetch_models(key)
 
@@ -2567,12 +2556,6 @@ class ZimZillaApp(App):
 
         Runs on the worker thread; touches no widget.
         """
-        if kind == "beatapi":
-            mod = beat_mod
-            creds = mod.load_credentials()
-            if creds is None:
-                return None, "no key"
-            return mod.free_models(creds[0])
         if kind == "openrouter":
             # Keyless on purpose: the catalog is public, so this works before
             # /openrouter-api-setup has run. Send the key when there is one, so
@@ -2600,7 +2583,7 @@ class ZimZillaApp(App):
         if models is None:
             self._sys_line(f"{kind}: {err}", warn=True)
             return
-        label = {"beatapi": "BEATAPI", "openrouter": "OPENROUTER",
+        label = {"openrouter": "OPENROUTER",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE"}.get(
                      kind, kind.upper())
         t = Text()
@@ -2631,12 +2614,6 @@ class ZimZillaApp(App):
                 t.append(m.blurb + "\n", style=p.dim)
             t.append("\n  pick one with  ", style=p.dim)
             t.append("/model <name>\n", style=f"bold {p.primary}")
-        if kind == "beatapi":
-            # The limit is real and surprising, and it comes from the 429 body
-            # rather than the docs — so it is stated here, where someone about
-            # to point a long run at BeatAPI will see it.
-            t.append(f"  {beat_mod.FREE_RATE_NOTE} · paid models need a "
-                     "topped-up balance\n", style=p.amber)
         if kind == "openrouter":
             t.append("  free = :free suffix and a zero price · tools-capable only\n",
                      style=p.dim)
@@ -4803,13 +4780,11 @@ class ZimZillaApp(App):
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
-            ("/zim-beatapi", "switch upstream to BeatAPI", "zim-beatapi"),
             ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
             ("/tokenharbour-api-setup", "store your TokenHarbour API key",
              "tokenharbour-api-setup"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free",
              "tokenharbour-models"),
-            ("/beatapi-api-setup", "store your BeatAPI API key", "beatapi-api-setup"),
             ("/openrouter-api-setup", "store your OpenRouter API key",
              "openrouter-api-setup"),
             ("/models", "free models of an upstream — /models [source]", "models"),

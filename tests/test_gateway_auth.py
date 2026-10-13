@@ -1,28 +1,31 @@
-"""Regressions for three bugs found by pointing the harness at BeatAPI live.
+"""Regressions for bugs found by pointing the harness at a hosted gateway live.
 
 Run:  python tests/test_gateway_auth.py   (from an activated venv)
 
-None of these three were caught by the existing suite, and all three were
-shipping-blocking in the same way: the operator was told something false about
-their own tooling. They are grouped here because they share that shape — each is
-a case where the harness had all the information needed to be right and said the
-wrong thing anyway.
+None of these were caught by the existing suite, and all were shipping-blocking
+in the same way: the operator was told something false about their own tooling.
+They are grouped here because they share that shape — each is a case where the
+harness had all the information needed to be right and said the wrong thing
+anyway.
 
 1. **A bearer token and a placeholder key were sent together.** The client was
    built with ``api_key=cfg.api_key or "placeholder"``, so a session pointed at a
    gateway with an ``auth_token`` sent BOTH ``Authorization: Bearer <token>`` and
-   ``x-api-key: placeholder``. BeatAPI validates ``x-api-key`` and rejects the
-   request 401 before it ever looks at the bearer — so a perfectly good key
-   reported as "authentication failed".
+   ``x-api-key: placeholder``. That gateway validates ``x-api-key`` and rejects
+   the request 401 before it ever looks at the bearer — so a perfectly good key
+   reported as "authentication failed". Both gateways still in the tree send
+   ``x-api-key`` on their own catalog fetches, so this is not a quirk of the one
+   it was measured against.
 
 2. **A free model was billed at the paid model's rate.** ``price_for`` tolerates
-   prefixes so dated and provider-qualified names resolve. BeatAPI's giveaway is
-   ``deepseek-v4.1-flash-free``, which starts with the paid ``deepseek-v4.1-flash``
-   row, so the free model was charged $0.28/Mtok — and an *unknown* free model
-   fell through to ``DEFAULT_PRICE`` at $1/$3. The operator saw a cost line for a
-   model they were told costs nothing.
+   prefixes so dated and provider-qualified names resolve. A giveaway named
+   ``deepseek-v4.1-flash-free`` starts with the paid ``deepseek-v4.1-flash`` row,
+   so the free model was charged $0.28/Mtok — and an *unknown* free model fell
+   through to ``DEFAULT_PRICE`` at $1/$3. The operator saw a cost line for a
+   model they were told costs nothing. The ``-free`` convention is retained here
+   because it is the one the prefix loop is most dangerous against.
 
-3. **A zero balance was reported as an auth failure.** BeatAPI answers a paid
+3. **A zero balance was reported as an auth failure.** A gateway answers a paid
    model on an un-topped-up account with 402 ``insufficient_credits``. That is a
    billing state with one obvious fix; it rendered as a generic error string, and
    before fix 1 it was indistinguishable from a bad key.
@@ -74,7 +77,7 @@ def _cfg(**kw) -> Config:
     every case here would be asserting about the shell rather than the code.
     """
     return Config.from_env(workdir=Path("."),
-                           base_url="https://api.beatapi.io", **kw)
+                           base_url="https://openrouter.ai/api", **kw)
 
 
 def _auth_headers(cfg: Config) -> dict[str, str]:
@@ -132,7 +135,7 @@ def test_no_credential_sends_no_auth_header() -> None:
 
 def test_a_free_suffix_is_priced_at_zero() -> None:
     """The bug: prefix tolerance billed ``…-free`` at the paid row's rate."""
-    check("price: BeatAPI's -free suffix is free", price_for("deepseek-v4.1-flash-free") == (0.0, 0.0),
+    check("price: a -free suffix is free", price_for("deepseek-v4.1-flash-free") == (0.0, 0.0),
           str(price_for("deepseek-v4.1-flash-free")))
     check("price: OpenRouter's :free suffix is free",
           price_for("dots-studio/dots-3-note-preview:free") == (0.0, 0.0),
@@ -189,7 +192,7 @@ def _status_error(code: int, body: dict) -> anthropic.APIStatusError:
            429: anthropic.RateLimitError}.get(code, anthropic.APIStatusError)
     resp = httpx2.Response(
         code, json=body,
-        request=httpx2.Request("POST", "https://api.beatapi.io/v1/messages"))
+        request=httpx2.Request("POST", "https://openrouter.ai/api/v1/messages"))
     return cls("boom", response=resp, body=body)
 
 

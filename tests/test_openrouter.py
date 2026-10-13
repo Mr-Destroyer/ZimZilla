@@ -392,10 +392,10 @@ def test_active_key_recognises_host() -> None:
           s.active_key("https://api.example.com") is None)
 
     # The two gateways must not be confused for each other.
-    check("sources: openrouter is not beatapi",
-          s.active_key("https://openrouter.ai/api/v1") != "beatapi")
-    check("sources: beatapi is not openrouter",
-          s.active_key("https://api.beatapi.io") != "openrouter")
+    check("sources: openrouter is not tokenharbour",
+          s.active_key("https://openrouter.ai/api/v1") != "tokenharbour")
+    check("sources: tokenharbour is not openrouter",
+          s.active_key("https://tokenharbor.ai") != "openrouter")
 
 
 def test_credential_precedence(tmp: Path) -> None:
@@ -446,10 +446,10 @@ def test_credential_precedence(tmp: Path) -> None:
                       creds is not None and creds[2] == str(own),
                       str(creds and creds[2]))
 
-                # And a BEATAPI endpoint must not be read as an OpenRouter one.
-                os.environ["ANTHROPIC_BASE_URL"] = "https://api.beatapi.io"
+                # And a TokenHarbour endpoint must not be read as an OpenRouter one.
+                os.environ["ANTHROPIC_BASE_URL"] = "https://tokenharbor.ai"
                 creds = o.load_credentials()
-                check("creds: a BeatAPI endpoint is not OpenRouter",
+                check("creds: a TokenHarbour endpoint is not OpenRouter",
                       creds is not None and creds[2] == str(own),
                       str(creds and creds[2]))
     finally:

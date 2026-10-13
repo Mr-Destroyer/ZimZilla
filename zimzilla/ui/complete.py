@@ -35,11 +35,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-tokenjuice", "switch upstream to Token Juice (:4000)"),
     ("/zim-source", "show upstream sources and status"),
     ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
-    ("/zim-beatapi", "switch upstream to BeatAPI (hosted)"),
     ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
-    ("/beatapi-api-setup", "store your BeatAPI API key"),
     ("/openrouter-api-setup", "store your OpenRouter API key"),
     ("/models", "free models of an upstream — /models [source]"),
     ("/save", "write the session to disk"),
@@ -176,10 +174,10 @@ class CompletionPopup(VerticalScroll):
                     "ad": ["tools"],
                     # The argument exists for OpenRouter, whose catalog is
                     # public and worth seeing before a key is set. Offering all
-                    # five rather than just that one keeps the popup honest
+                    # four rather than just that one keeps the popup honest
                     # about what /models accepts.
                     "models": ["logfare", "tokenjuice", "tokenharbour",
-                               "beatapi", "openrouter"],
+                               "openrouter"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

@@ -9,7 +9,6 @@ from pathlib import Path
 
 from . import __version__
 from . import logfare as lf_mod
-from . import beatapi as beat_mod
 from . import openrouter as or_mod
 from . import sources as sources_mod
 from . import tokenharbour as th_mod
@@ -158,8 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     # somewhere deliberate — the gateway itself, or any other host — is left
     # exactly as they set it, so a stale selection file cannot hijack it.
     _remembered = sources_mod.current_key()
-    for _key, _mod in (("tokenharbour", th_mod), ("beatapi", beat_mod),
-                       ("openrouter", or_mod)):
+    for _key, _mod in (("tokenharbour", th_mod), ("openrouter", or_mod)):
         if _remembered == _key and _mod.applies_to_default_endpoint(cfg.base_url):
             _mod.apply_to(cfg)
             break

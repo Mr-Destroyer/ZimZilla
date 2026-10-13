@@ -282,11 +282,15 @@ class Agent:
             # A bearer token and an ``x-api-key`` are two credentials, and the
             # SDK sends whichever of them it has. Sending both is not "more
             # authenticated" — an upstream that validates ``x-api-key`` rejects
-            # the request before it ever looks at the bearer. Measured against
-            # BeatAPI:
+            # the request before it ever looks at the bearer. Measured on a
+            # gateway that did exactly that:
             #
             #   auth_token + api_key="placeholder"  → 401 invalid_api_key
             #   auth_token + api_key=None           → 200
+            #
+            # Both gateways still in the tree send ``x-api-key`` on their own
+            # catalog fetches, so the trap is live for them too — this is not a
+            # property of the provider it was first measured against.
             #
             # So the two are mutually exclusive: when a bearer token is present
             # it is the ONLY credential sent, and any ``api_key`` alongside it is
@@ -944,11 +948,11 @@ class Agent:
                 "timeout both look like this."
             )
         # 402. A gateway that has run out of credit is not an auth failure and
-        # not a bad request — it is a billing state with one obvious fix, and on
-        # BeatAPI it is what a PAID model returns on a zero-balance account
-        # (measured: ``insufficient_credits``). Said plainly, because the free
-        # models on the same key still work, so "try again" would be wrong and
-        # "check your key" would send the operator to re-check a key that is fine.
+        # not a bad request — it is a billing state with one obvious fix, and it
+        # is what a PAID model returns on a zero-balance account (measured:
+        # ``insufficient_credits``). Said plainly, because the free models on the
+        # same key still work, so "try again" would be wrong and "check your key"
+        # would send the operator to re-check a key that is fine.
         if getattr(e, "status_code", None) == 402:
             return (
                 "the account has no credit for this model (402). Free models "
