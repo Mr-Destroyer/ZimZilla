@@ -70,32 +70,48 @@ def is_dark(hex_color: str) -> bool:
     return 299 * r + 587 * g + 114 * b < 128_000
 
 
-def detect_background() -> str | None:
-    """The terminal's background as ``#rrggbb``, or None.
+def query(payload: bytes, timeout: float = _TIMEOUT) -> bytes:
+    """Write *payload* to the terminal and return whatever it writes back.
 
-    None when stdin is not a tty (a pipe, a test harness, a cron job), when the
-    terminal does not answer within the timeout, when the reply is unparseable,
-    or when the colour is too light to use — see :func:`is_dark`.
+    One raw-mode session: switch the tty to raw, write the escape sequence,
+    read until every query in the payload has been answered or the timeout
+    expires, then restore the terminal.
+
+    Shared by every OSC query this package makes, because the subtle part is
+    not the reading — it is the *restoring*. Textual takes the tty over
+    immediately after a query, so raw mode must be undone on every path out,
+    including the failing ones, and anything left in the input buffer must be
+    drained or Textual reads the reply as keystrokes. Both live here once.
+
+    Returns ``b""`` when there is no tty, when the terminal does not answer, or
+    when the query fails for any other reason — a terminal that does not
+    implement an OSC is not an error, it is an answer of "no".
     """
     if not (sys.stdin and sys.stdin.isatty()):
-        return None
+        return b""
     try:
         import termios
         import tty
     except ImportError:  # not POSIX
-        return None
+        return b""
 
     fd = sys.stdin.fileno()
     try:
         saved = termios.tcgetattr(fd)
     except Exception:  # noqa: BLE001 — any failure means "cannot query"
-        return None
+        return b""
+
+    # One terminator per query asked. A single-query payload therefore behaves
+    # exactly as before; a multi-query one reads until the last reply lands
+    # rather than stopping at the first, which is what makes the batched
+    # colour query in termcolors.py one round-trip instead of seventeen.
+    wanted = max(1, payload.count(b"?"))
 
     reply = b""
     try:
         tty.setraw(fd)
-        os.write(fd, b"\x1b]11;?\x1b\\")
-        deadline = time.monotonic() + _TIMEOUT
+        os.write(fd, payload)
+        deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -103,19 +119,19 @@ def detect_background() -> str | None:
             ready, _, _ = select.select([fd], [], [], remaining)
             if not ready:
                 break
-            chunk = os.read(fd, 256)
+            chunk = os.read(fd, 4096)
             if not chunk:
                 break
             reply += chunk
-            if b"\x1b\\" in reply or b"\x07" in reply:
+            if reply.count(b"\x1b\\") + reply.count(b"\x07") >= wanted:
                 break
         # Anything past the terminator is not ours. Drain it, or Textual reads
         # it as keystrokes once it takes the tty over.
         while select.select([fd], [], [], 0)[0]:
-            if not os.read(fd, 256):
+            if not os.read(fd, 4096):
                 break
     except Exception:  # noqa: BLE001 — a failed query is not an error
-        return None
+        return b""
     finally:
         # Restore before anything else can read the terminal: Textual takes the
         # tty over immediately after this and must not inherit raw mode.
@@ -124,5 +140,15 @@ def detect_background() -> str | None:
         except Exception:  # noqa: BLE001
             pass
 
-    bg = parse_background(reply)
+    return reply
+
+
+def detect_background() -> str | None:
+    """The terminal's background as ``#rrggbb``, or None.
+
+    None when stdin is not a tty (a pipe, a test harness, a cron job), when the
+    terminal does not answer within the timeout, when the reply is unparseable,
+    or when the colour is too light to use — see :func:`is_dark`.
+    """
+    bg = parse_background(query(b"\x1b]11;?\x1b\\"))
     return bg if bg and is_dark(bg) else None

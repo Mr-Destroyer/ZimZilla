@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -890,6 +891,325 @@ async def test_termbg(wd: Path) -> None:
                   app.palette.bg == "#101315", app.palette.bg)
 
 
+# ---- the system theme -----------------------------------------------------
+
+async def test_system_theme(wd: Path) -> None:
+    """`system`: the terminal's own colours, adopted whole.
+
+    omarchy's `aether` themes generate a scheme from each wallpaper and install
+    it as the terminal's palette, so the terminal is the one place the current
+    colours can be read from. Every check here is offline against captured
+    replies — the suite runs piped, with no tty to ask.
+    """
+    from unittest import mock
+
+    from zimzilla import theme as theme_mod
+    from zimzilla.termcolors import detect_colors, parse_colors
+    from zimzilla.theme import (PALETTES, SYSTEM_THEME, THEME_NAMES,
+                                get_palette, system_palette)
+
+    # ---- parsing: one batched reply carries every answer -------------------
+    reply = (b"\x1b]11;rgb:1010/1313/1515\x1b\\"
+             b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"
+             b"\x1b]4;1;rgb:ff00/0000/0000\x1b\\"
+             b"\x1b]4;3;rgb:ffff/bb00/0000\x1b\\"
+             b"\x1b]4;6;rgb:0000/ffff/aaaa\x1b\\"
+             b"\x1b]4;8;rgb:3333/3333/3333\x1b\\")
+    c = parse_colors(reply)
+    check("termcolors: the background parses", c.bg == "#101315", repr(c.bg))
+    check("termcolors: the foreground parses", c.fg == "#ffffff", repr(c.fg))
+    # `ff00` is 65280 of a possible 65535, which is 254 — not 255. The scaling
+    # is the honest one (value / (16**digits - 1)), so a 16-bit reply lands one
+    # step below the naive top-byte truncation on every channel that is not
+    # `ffff`. It looks like an off-by-one and is not: `ffff` gives exactly 255,
+    # and that is the value a terminal means by full brightness.
+    check("termcolors: the ANSI slots land on their own indices",
+          c.ansi == {1: "#fe0000", 3: "#ffba00", 6: "#00ffaa", 8: "#333333"},
+          repr(c.ansi))
+    check("termcolors: a slot that was not answered is absent, not black",
+          0 not in c.ansi and 15 not in c.ansi)
+    check("termcolors: the #rrggbb form parses for a slot",
+          parse_colors(b"\x1b]4;4;#1e1e2e\x1b\\").ansi == {4: "#1e1e2e"})
+    check("termcolors: garbage yields nothing rather than raising",
+          not parse_colors(b"garbage").any()
+          and parse_colors(b"").bg is None and parse_colors(b"").ansi == {})
+    # A slot index outside the standard sixteen is not a palette slot.
+    check("termcolors: an out-of-range slot is dropped",
+          parse_colors(b"\x1b]4;99;rgb:ffff/0000/0000\x1b\\").ansi == {})
+    check("termcolors: detection declines without a tty",
+          detect_colors() is None, repr(detect_colors()))
+
+    # ---- the tty path, against a pty standing in for the terminal --------
+    # Everything above parses captured bytes; none of it touches the raw-mode
+    # write/read/restore that actually gets those bytes, which is the part with
+    # the real failure modes (raw mode left on, the reply read as keystrokes).
+    # The suite itself runs piped, so this forks a pty and plays the terminal.
+    if hasattr(os, "fork"):
+        import pty
+        import select as sel
+
+        slots = [b"4545/4747/5a5a", b"f3f3/8b8b/a8a8", b"a6a6/e3e3/a1a1",
+                 b"f9f9/e2e2/afaf", b"8989/b4b4/fafa", b"cbcb/a6a6/f7f7",
+                 b"9494/e2e2/d5d5", b"baba/bfbf/cccc", b"5858/5b5b/7070",
+                 b"f3f3/8b8b/a8a8", b"a6a6/e3e3/a1a1", b"f9f9/e2e2/afaf",
+                 b"8989/b4b4/fafa", b"cbcb/a6a6/f7f7", b"9494/e2e2/d5d5",
+                 b"baba/bfbf/cccc"]
+        # Every channel four digits and every value distinct from its neighbours,
+        # so a reply landing on the wrong slot shows up as a wrong colour rather
+        # than coincidentally matching.
+        answer = (b"\x1b]11;rgb:1e1e/2e2e/3e3e\x1b\\"
+                  b"\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\"
+                  + b"".join(b"\x1b]4;%d;rgb:%s\x1b\\" % (i, v)
+                              for i, v in enumerate(slots)))
+
+        pid, pfd = pty.fork()
+        if pid == 0:  # the "app", with the pty slave as its tty
+            try:
+                from zimzilla.termcolors import detect_colors as dc
+                cc = dc(timeout=2.0)
+                got = ("none" if cc is None else
+                       f"{cc.bg} {cc.fg} {len(cc.ansi)} {cc.ansi.get(1)} {cc.ansi.get(8)}")
+                os.write(1, ("RESULT " + got + "\n").encode())
+            except BaseException as e:  # noqa: BLE001
+                os.write(1, f"RESULT raised {e!r}\n".encode())
+            finally:
+                os._exit(0)
+
+        seen, res = b"", b""
+        answered = False
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and b"RESULT" not in res:
+            r, _, _ = sel.select([pfd], [], [], 0.2)
+            if not r:
+                continue
+            try:
+                chunk = os.read(pfd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            if not answered:
+                seen += chunk
+                # Answer once all eighteen queries have arrived; the child is
+                # still blocked reading at that point.
+                if seen.count(b"\x1b]") >= 18:
+                    os.write(pfd, answer)
+                    answered = True
+            else:
+                res += chunk
+        try:
+            os.close(pfd)
+        except OSError:
+            pass
+        os.waitpid(pid, 0)
+
+        verdict = res.decode(errors="replace").strip()
+        check("termcolors: the queries go out batched, not one at a time",
+              seen.count(b"\x1b]") >= 18, f"{seen.count(b'\x1b]')} sequences")
+        check("termcolors: the tty path really reads and parses a reply",
+              "RESULT #1e2e3e #cdd6f4 16 #f38ba8 #585b70" in verdict, verdict[-80:])
+        check("termcolors: and leaves the terminal restored afterwards",
+              "raised" not in verdict and "none" not in verdict, verdict[-80:])
+
+    # ---- the palette it builds ---------------------------------------------
+    pal = system_palette(c)
+    check("theme: system takes the terminal's foreground as primary",
+          pal.primary == "#ffffff", pal.primary)
+    check("theme: system takes the terminal's background",
+          pal.bg == "#101315", pal.bg)
+    check("theme: the ANSI roles map conventionally",
+          (pal.dim, pal.accent, pal.red, pal.amber)
+          == ("#333333", "#00ffaa", "#fe0000", "#ffba00"),
+          f"{pal.dim} {pal.accent} {pal.red} {pal.amber}")
+    check("theme: glow follows primary, as the green palette's does",
+          pal.glow == pal.primary)
+
+    # A partial reply degrades field by field, not all at once: no ANSI slots
+    # answered here, so every role falls through to green's value while the
+    # background — the one thing that *was* reported — is still adopted.
+    pp = system_palette(parse_colors(b"\x1b]11;rgb:1010/1313/1515\x1b\\"))
+    check("theme: a missing ANSI slot falls back to green's value",
+          (pp.dim, pp.accent, pp.red, pp.amber)
+          == (PALETTES["green"].dim, PALETTES["green"].accent,
+              PALETTES["green"].red, PALETTES["green"].amber),
+          f"{pp.dim} {pp.accent} {pp.red} {pp.amber}")
+    check("theme: a partially-answered terminal still gets its background",
+          pp.bg == "#101315", pp.bg)
+    check("theme: no colours at all gives exactly the green palette",
+          system_palette(None) == PALETTES["green"])
+
+    # ---- the light rule (the operator's decision) --------------------------
+    # The three fixed palettes refuse a light background — neon on white is
+    # unreadable. `system` does not: its colours come from the terminal, so
+    # contrast is the theme author's problem, and refusing would mean the UI
+    # ignoring the very wallpaper it was asked to match.
+    light = parse_colors(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"
+                         b"\x1b]10;rgb:0000/0000/0000\x1b\\")
+    check("theme: system adopts a light background",
+          system_palette(light).bg == "#ffffff", system_palette(light).bg)
+    check("theme: green still refuses one",
+          get_palette("green", light.dark_bg).bg == "#000000",
+          get_palette("green", light.dark_bg).bg)
+    check("theme: get_palette routes system to the terminal's colours",
+          get_palette(SYSTEM_THEME, colors=c).bg == "#101315")
+    check("theme: every name in THEME_NAMES resolves to a palette",
+          all(get_palette(n).name for n in THEME_NAMES), str(THEME_NAMES))
+    check("theme: system is offered alongside the three fixed ones",
+          THEME_NAMES == ["green", "amber", "cyan", "system"], str(THEME_NAMES))
+
+    # ---- persistence: the choice survives a restart ------------------------
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td) / ".zimzilla"
+        with mock.patch.object(theme_mod, "ZIMZILLA_HOME", home):
+            check("theme: nothing remembered on a fresh home",
+                  theme_mod.current_theme() is None)
+            theme_mod.set_current_theme("amber")
+            check("theme: the choice round-trips",
+                  theme_mod.current_theme() == "amber",
+                  repr(theme_mod.current_theme()))
+            theme_mod.set_current_theme(SYSTEM_THEME)
+            check("theme: system round-trips too",
+                  theme_mod.current_theme() == SYSTEM_THEME)
+            theme_mod.set_current_theme("not-a-theme")
+            check("theme: an unknown name is ignored, not written",
+                  theme_mod.current_theme() == SYSTEM_THEME,
+                  repr(theme_mod.current_theme()))
+            # A file naming a theme this build does not have — left by an older
+            # or newer one — is ignored rather than obeyed, so it cannot put the
+            # UI into a state it has no palette for.
+            (home / "current-theme").write_text("vaporwave\n")
+            check("theme: a name from another build is refused",
+                  theme_mod.current_theme() is None,
+                  repr(theme_mod.current_theme()))
+            # A home that cannot be written must not break the TUI. Pointing
+            # ZIMZILLA_HOME at an existing *file* makes mkdir fail, which is the
+            # real shape of a read-only or misconfigured home.
+            blocker = Path(td) / "not-a-dir"
+            blocker.write_text("")
+            with mock.patch.object(theme_mod, "ZIMZILLA_HOME", blocker):
+                try:
+                    theme_mod.set_current_theme("cyan")
+                    check("theme: an unwritable home does not raise", True)
+                except OSError as e:
+                    check("theme: an unwritable home does not raise", False, repr(e))
+
+    # ---- the launch-time precedence, through the real argparse ------------
+    # The checks above cover the state file; this covers what __main__ does with
+    # it, which is the half the operator actually sees. `app.run` is stubbed so
+    # main() can be driven to completion without a terminal: everything up to
+    # the palette — argparse, the precedence, Config.from_env — runs for real.
+    import zimzilla.__main__ as main_mod
+    from zimzilla.ui import app as app_ui
+
+    seen: list = []
+
+    class _StubApp:
+        def __init__(self, cfg, term_bg=None, term_colors=None):
+            seen.append(cfg.theme)
+            self.cfg = cfg
+
+        def run(self) -> None:
+            pass
+
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td) / ".zimzilla"
+        with mock.patch.object(theme_mod, "ZIMZILLA_HOME", home), \
+             mock.patch.object(app_ui, "ZimZillaApp", _StubApp), \
+             mock.patch.dict(os.environ, {"ZIMZILLA_UPDATED": "1",
+                                          "ANTHROPIC_AUTH_TOKEN": "x"}), \
+             mock.patch.object(sys, "argv", ["zimzilla"]):
+            def launched(*argv: str) -> str:
+                seen.clear()
+                main_mod.main([*argv, "--workdir", str(wd)])
+                return seen[-1]
+
+            check("theme: a fresh launch opens on green",
+                  launched() == "green", launched())
+            theme_mod.set_current_theme("amber")
+            check("theme: a remembered theme comes back on the next launch",
+                  launched() == "amber", launched())
+            check("theme: system is remembered like any other",
+                  (theme_mod.set_current_theme(SYSTEM_THEME), launched())[1]
+                  == SYSTEM_THEME)
+            # An explicit flag is authoritative, and — the part worth pinning —
+            # it does NOT rewrite the memory. A one-off `--theme green` must not
+            # quietly forget the wallpaper theme the operator chose.
+            check("theme: --theme overrides the remembered choice",
+                  launched("--theme", "green") == "green")
+            check("theme: ...without overwriting what was remembered",
+                  theme_mod.current_theme() == SYSTEM_THEME,
+                  repr(theme_mod.current_theme()))
+            check("theme: and the memory is back on the next plain launch",
+                  launched() == SYSTEM_THEME, launched())
+            # A name left by another build falls through to green rather than
+            # being handed to get_palette, which has no palette for it.
+            (home / "current-theme").write_text("vaporwave\n")
+            check("theme: a stale name falls through to green",
+                  launched() == "green", launched())
+
+    # ---- and it reaches the app --------------------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        with mock.patch.object(theme_mod, "ZIMZILLA_HOME", Path(td) / ".zimzilla"):
+            app = ZimZillaApp(_cfg(wd, boot_rain=False, theme=SYSTEM_THEME),
+                              term_colors=c)
+            async with app.run_test(size=(100, 30)) as pilot:
+                app.pop_screen()
+                await pilot.pause()
+                check("theme: the app opens in the terminal's colours",
+                      app.palette.bg == "#101315"
+                      and app.palette.primary == "#ffffff",
+                      f"{app.palette.bg} {app.palette.primary}")
+
+                # A wallpaper change re-themes the terminal; /theme system
+                # re-reads it. The registered theme name is unchanged
+                # ("zim-system") and Textual's `theme` reactive does not fire on
+                # a same-value set, so this is precisely the case that
+                # _apply_palette's refresh_css() exists for.
+                app.term_colors = parse_colors(
+                    b"\x1b]11;rgb:0011/2233/4455\x1b\\"
+                    b"\x1b]10;rgb:aaaa/bbbb/cccc\x1b\\")
+                app._cmd_theme([SYSTEM_THEME])
+                await pilot.pause()
+                await pilot.pause()
+                check("theme: re-reading system after a wallpaper change repaints",
+                      app.palette.bg == "#002244"
+                      and str(app.screen.styles.background) == "Color(0, 34, 68)",
+                      f"{app.palette.bg} screen={app.screen.styles.background}")
+
+                # The escape hatch back to a fixed palette.
+                app._cmd_theme(["green"])
+                await pilot.pause()
+                check("theme: /theme green switches back",
+                      app.theme_name == "green"
+                      and app.palette == PALETTES["green"],
+                      f"{app.theme_name} {app.palette.bg}")
+
+                # An unknown theme is refused, and the UI is left where it was.
+                app._cmd_theme(["vaporwave"])
+                await pilot.pause()
+                blob = " ".join(
+                    " ".join(s.text for s in app.query_one("#transcript").lines).split())
+                check("theme: an unknown theme is refused and the UI left alone",
+                      "unknown theme: vaporwave" in blob
+                      and app.theme_name == "green", blob[-90:])
+
+            # A terminal that answered nothing: system must degrade to green AND
+            # say so, rather than showing green under a "theme: system" badge.
+            blind = ZimZillaApp(_cfg(wd, boot_rain=False, theme=SYSTEM_THEME),
+                                term_colors=None)
+            async with blind.run_test(size=(100, 30)) as pilot:
+                blind.pop_screen()
+                await pilot.pause()
+                blind._cmd_theme([SYSTEM_THEME])
+                await pilot.pause()
+                blob = " ".join(
+                    " ".join(s.text for s in blind.query_one("#transcript").lines).split())
+                check("theme: a terminal that reports nothing says so",
+                      "did not report its colours" in blob, blob[-90:])
+                check("theme: and falls back to the green palette",
+                      blind.palette == PALETTES["green"], blind.palette.bg)
+
+
 # ---- /team ----------------------------------------------------------------
 
 def test_team_roster(wd: Path) -> None:
@@ -1726,6 +2046,7 @@ async def main() -> int:
         await test_ui(wd)
         await test_ui_rails(wd)
         await test_termbg(wd)
+        await test_system_theme(wd)
         test_default_model(wd)
         test_team_roster(wd)
         test_team_waves(wd)

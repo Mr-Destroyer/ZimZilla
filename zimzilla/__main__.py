@@ -15,6 +15,7 @@ from . import tokenharbour as th_mod
 from . import update as update_mod
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL, find_agents_file
 from .scope import find_legacy_scope
+from .theme import THEME_NAMES, current_theme
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="DEPRECATED — replaced by --allow / --deny; ignored with a warning")
     parser.add_argument("--unsafe", action="store_true",
                         help="disable the filesystem sandbox (paths may escape the workdir)")
-    parser.add_argument("--theme", default=None, choices=["green", "amber", "cyan"],
-                        help="colour theme")
+    parser.add_argument("--theme", default=None, choices=THEME_NAMES,
+                        help="colour theme (system = match the terminal's own colours)")
     parser.add_argument("--rain", action="store_true",
                         help="start with matrix rain on in the shell (off by default for readability)")
     parser.add_argument("--no-rain", action="store_true",
@@ -129,6 +130,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         agents_path = find_agents_file(workdir)
 
+    # Which theme to open with. An explicit --theme wins; failing that, whatever
+    # was last chosen with /theme, so a restart lands back on it; failing both,
+    # the config default (green). ``from_env`` ignores None overrides, so
+    # resolving the precedence into one value here is what makes the remembered
+    # choice take effect — and what keeps ``--theme`` authoritative over it.
+    theme = args.theme or current_theme()
+
     # Shell rain is off unless requested. --no-rain kills rain everywhere,
     # including the boot screen.
     cfg = Config.from_env(
@@ -138,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         deny_path=deny_path,
         legacy_scope_path=legacy_scope,
         unsafe=args.unsafe or None,
-        theme=args.theme,
+        theme=theme,
         max_tokens=args.max_tokens,
         mode=args.mode,
         agents_path=agents_path,
@@ -225,15 +233,23 @@ def main(argv: list[str] | None = None) -> int:
             os.execv(sys.executable, [sys.executable, "-m", "zimzilla", *raw_argv])
 
     from .ui.app import ZimZillaApp
-    from .termbg import detect_background
+    from .termcolors import detect_colors
 
-    # Ask the terminal for its own background and paint the whole interface in
-    # it. A terminal draws its padding — the gutter around the text grid — in
-    # that colour, and a TUI cannot paint outside the grid, so a hardcoded
-    # background leaves a frame of the wrong colour around everything. This is
-    # best-effort: a terminal that does not answer costs one short timeout and
-    # the palette keeps its own black.
-    app = ZimZillaApp(cfg, term_bg=detect_background())
+    # Ask the terminal for its own colours. A terminal draws its padding — the
+    # gutter around the text grid — in its own background, and a TUI cannot
+    # paint outside the grid, so a hardcoded background leaves a frame of the
+    # wrong colour around everything. The same reply carries the foreground and
+    # the sixteen ANSI slots, which is what the `system` theme is built from —
+    # so this is one round-trip either way, not two.
+    #
+    # Best-effort throughout: a terminal that does not answer costs one short
+    # timeout, the palettes keep their own colours, and `system` falls back to
+    # green. term_bg is filtered to a *dark* background because the three fixed
+    # palettes are neon-on-black; `system` reads the unfiltered colours, since
+    # it takes its text colour from the same place as its background.
+    colors = detect_colors()
+    app = ZimZillaApp(cfg, term_bg=colors.dark_bg if colors else None,
+                      term_colors=colors)
     app.run()
     return 0
 

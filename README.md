@@ -221,7 +221,7 @@ will restart the checkout under you on the next launch.
 --deny PATH          hosts that are never touched
 --agents PATH        the doctrine file `zim` mode follows (default: workdir,
                      its parent, ~/.zimzilla, then ~)
---theme {green,amber,cyan}
+--theme {green,amber,cyan,system}
 --rain               start with matrix rain on
 --no-rain            no rain anywhere
 --max-tokens N       max output tokens per reply
@@ -420,7 +420,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/model [name]` | show or switch the model |
 | `/cost` | session token + cost breakdown |
 | `/scope` | scope status and entries |
-| `/theme green\|amber\|cyan` | switch palette |
+| `/theme green\|amber\|cyan\|system` | switch palette — `system` adopts the terminal's own colours |
 | `/rain` | toggle the matrix rain |
 | `/save [name]` | write the session to disk |
 | `/load [name]` | restore a session |
@@ -1167,8 +1167,10 @@ zimzilla/                     the package
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
   update.py                   launch-time check for new commits
-  theme.py                    green / amber / cyan palettes
+  theme.py                    green / amber / cyan / system palettes, and the
+                              remembered choice ($ZIMZILLA_HOME/current-theme)
   termbg.py                   asks the terminal for its own background
+  termcolors.py               ...and for its foreground and 16 ANSI slots
   ui/                         the terminal interface
 
 allow.yaml.example            declared targets

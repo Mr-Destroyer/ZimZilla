@@ -20,7 +20,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from ..osint import KIND_ORDER as OSINT_KIND_ORDER
-from ..theme import Palette
+from ..theme import THEME_NAMES, Palette
 
 # (command, description)
 SLASH_COMMANDS: list[tuple[str, str]] = [
@@ -30,7 +30,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/cost", "session token and cost breakdown"),
     ("/scope", "show scope guard status"),
     ("/rain", "toggle the matrix-rain background"),
-    ("/theme", "switch palette: green | amber | cyan"),
+    ("/theme", "switch palette: green | amber | cyan | system"),
     ("/zim-logfare", "switch upstream to Logfare (:4001)"),
     ("/zim-tokenjuice", "switch upstream to Token Juice (:4000)"),
     ("/zim-source", "show upstream sources and status"),
@@ -59,7 +59,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 ]
 
 MODE_NAMES = ["auto", "edits", "plan", "zim", "danger", "uncensored"]
-THEME_NAMES = ["green", "amber", "cyan"]
+# THEME_NAMES is imported from theme.py rather than declared here, so the popup
+# and `/theme` cannot disagree about which themes exist — the two lists had
+# already drifted apart once.
 
 MAX_ROWS = 8
 MAX_FILES = 200

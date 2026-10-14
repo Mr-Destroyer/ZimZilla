@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from zimzilla import osint_tree as ot  # noqa: E402
 from zimzilla.config import Config  # noqa: E402
-from zimzilla.theme import get_palette  # noqa: E402
+from zimzilla.theme import THEME_NAMES, get_palette  # noqa: E402
 from zimzilla.ui.app import ZimZillaApp  # noqa: E402
 from zimzilla.ui.complete import SLASH_COMMANDS  # noqa: E402
 
@@ -620,8 +620,11 @@ def test_render() -> None:
     check("render: the tree carries every parsed node",
           nodes(tree) >= parsed, f"{nodes(tree)} nodes vs {parsed} findings")
 
-    # Colours come from the palette, so the tree reads in any theme.
-    for theme in ("green", "amber", "cyan"):
+    # Colours come from the palette, so the tree reads in any theme. Iterating
+    # THEME_NAMES rather than a hardcoded trio is what makes a newly-added theme
+    # get checked here without anyone remembering to come back and edit this —
+    # the list had already drifted from the one the UI offers once.
+    for theme in THEME_NAMES:
         t = ot.render_tree(node, get_palette(theme))
         check(f"render: it renders under the {theme} palette", t is not None)
 

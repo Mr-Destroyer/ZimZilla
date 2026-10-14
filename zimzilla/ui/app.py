@@ -8,7 +8,10 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the import graph flat
+    from ..termcolors import TerminalColors
 
 from rich.text import Text
 from textual import on, work
@@ -36,7 +39,8 @@ from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
 from ..agent import Agent, Deliverable
 from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
-from ..theme import THINKING_VERBS, agent_color, get_palette
+from ..theme import (SYSTEM_THEME, THEME_NAMES, THINKING_VERBS, agent_color,
+                     get_palette, set_current_theme)
 from . import renderers as R
 from .boot import BootScreen
 from .complete import CompletionPopup, _iter_files
@@ -802,14 +806,21 @@ class ZimZillaApp(App):
         Binding("ctrl+k", "palette", "commands", priority=True),
     ]
 
-    def __init__(self, cfg: Config, term_bg: str | None = None) -> None:
+    def __init__(self, cfg: Config, term_bg: str | None = None,
+                 term_colors: "TerminalColors | None" = None) -> None:
         super().__init__()
         self.cfg = cfg
         #: The terminal's own background, detected over OSC 11 by __main__. None
         #: on a terminal that does not answer, in which case the palette keeps
         #: its own black. Stored so /theme can re-skin onto the same colour.
         self.term_bg = term_bg
-        self.palette = get_palette(cfg.theme, term_bg)
+        #: The terminal's full palette (background, foreground, the 16 ANSI
+        #: slots), detected in the same round-trip. Only the `system` theme
+        #: reads it — and it is kept rather than consumed at construction so
+        #: `/theme system` can build from it without asking the terminal again
+        #: (which would mean another raw-mode session mid-render).
+        self.term_colors = term_colors
+        self.palette = get_palette(cfg.theme, term_bg, colors=term_colors)
         self.theme_name = cfg.theme
         self.rain_on = cfg.rain
         self.agent = Agent(cfg, permission_handler=self.request_permission)
@@ -1715,7 +1726,7 @@ class ZimZillaApp(App):
             ("/cost", "session token and cost breakdown"),
             ("/scope", "show allow.yaml / out-of-scope.yaml status"),
             ("/rain", "toggle the matrix-rain background"),
-            ("/theme green|amber|cyan", "switch the color theme"),
+            ("/theme green|amber|cyan|system", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
@@ -2078,15 +2089,28 @@ class ZimZillaApp(App):
 
     def _cmd_theme(self, args) -> None:
         if not args:
-            self._sys_line("usage: /theme green | amber | cyan", warn=True)
+            self._sys_line("usage: /theme " + " | ".join(THEME_NAMES), warn=True)
             return
         name = args[0].lower()
-        if name not in ("green", "amber", "cyan"):
+        if name not in THEME_NAMES:
             self._sys_line(f"unknown theme: {name}", warn=True)
             return
         self.theme_name = name
-        self.palette = get_palette(name, self.term_bg)
+        self.palette = get_palette(name, self.term_bg, colors=self.term_colors)
+        # Persist BEFORE applying, so the choice survives even if the repaint
+        # below throws — a theme that took effect but was not remembered is the
+        # worse of the two failures.
+        set_current_theme(name)
         self._apply_palette()
+
+        if name == SYSTEM_THEME and self.term_colors is None:
+            # Say so rather than showing green under a "theme:system" badge.
+            # A terminal that does not answer OSC 4 is a real thing, and the
+            # operator would otherwise have no way to tell why nothing changed.
+            self._sys_line(
+                "theme switched to system — but this terminal did not report "
+                "its colours, so the green palette is showing", warn=True)
+            return
         self._sys_line(f"theme switched to {name}", ok=True)
 
     # ---- upstream sources ------------------------------------------------
@@ -2671,6 +2695,18 @@ class ZimZillaApp(App):
             theme = p.rich_theme()
             self.register_theme(theme)
             self.theme = theme.name
+            # Re-registering under the same name does NOT repaint: Textual's
+            # `theme` reactive is skipped when the value it is set to is the one
+            # it already holds, so the app keeps rendering the stylesheet
+            # compiled against the OLD palette. That is invisible for
+            # green/amber/cyan, whose theme name changes on every switch — but
+            # `/theme system` re-applied after a wallpaper change re-registers
+            # "zim-system" with new colours and the name is identical, so the
+            # screen stays on the previous wallpaper's background. Measured:
+            # the palette object updated and the rendered screen did not.
+            # refresh_css() recompiles against the theme just registered, which
+            # is the part the reactive would otherwise have done.
+            self.refresh_css()
         except Exception:
             pass
 
@@ -4822,7 +4858,7 @@ class ZimZillaApp(App):
             ))
 
         # Themes.
-        for name in ("green", "amber", "cyan"):
+        for name in THEME_NAMES:
             entries.append(PaletteEntry(
                 key=f"theme:{name}", title=f"theme {name}", group="theme",
                 run=(lambda n=name: self._cmd_theme([n])),
