@@ -178,6 +178,68 @@ def test_web_tools(wd: Path) -> None:
     check("search_web ignores a page with no results",
           websearch.parse_results("<html><body>nothing here</body></html>") == [])
 
+    # ---- the fallback backends, offline ----------------------------------
+    # These parsers exist because DDG answered exactly two queries from this
+    # IP and then served an HTTP 202 anti-bot page in place of results — which
+    # the old code reported as "the results page format may have changed".
+    # Nothing in the suite touched the live endpoint, so that shipped silently.
+    # The shapes below are the ones the live services actually returned.
+    fourget = (
+        '{"status":"ok","web":[{"title":"NGINX Reverse Proxy",'
+        '"description":"Configure nginx as a reverse proxy.",'
+        '"url":"https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/",'
+        '"date":"","type":"web","thumb":"","sublink":"","table":[]}]}'
+    )
+    got = websearch.parse_4get(fourget)
+    check("4get: a title, url and snippet are read",
+          len(got) == 1 and got[0].url.startswith("https://docs.nginx.com")
+          and got[0].title == "NGINX Reverse Proxy"
+          and "reverse proxy" in got[0].snippet,
+          str(got))
+    # A 4get instance that is broken says so in "status". Reading that as an
+    # empty result set is the same class of lie the DDG challenge was.
+    try:
+        websearch.parse_4get('{"status":"Failed to grep pageLayout(d)","web":[]}')
+        check("4get: a non-ok status raises", False, "no raise")
+    except ValueError as e:
+        check("4get: a non-ok status raises",
+              "pageLayout" in str(e) or "status" in str(e), str(e))
+
+    # Mwmbl's title/extract are run-lists of {value, is_bold}, not strings.
+    mwmbl = (
+        '[{"url":"https://nginx.org/en/docs/",'
+        '"title":[{"value":"nginx","is_bold":true},{"value":" docs","is_bold":false}],'
+        '"extract":[{"value":"Official documentation.","is_bold":false}],'
+        '"source":"nginx.org"}]'
+    )
+    got = websearch.parse_mwmbl(mwmbl)
+    check("mwmbl: run-objects are joined into a title",
+          len(got) == 1 and got[0].title == "nginx docs", str(got))
+    check("mwmbl: the extract runs become the snippet",
+          got[0].snippet == "Official documentation.", str(got))
+
+    rightdao = (
+        '<div class="title"><a href="https://linuxize.com/post/nginx-reverse-proxy/"'
+        ' target="_blank"><div class="ellipsis-lg"><span class="em">nginx</span>'
+        ' reverse proxy</div></a></div>'
+        '<div class="description">A guide to configuring <b>nginx</b>.</div>'
+    )
+    got = websearch.parse_rightdao(rightdao)
+    check("rightdao: the anchor and its description are paired",
+          len(got) == 1 and got[0].title == "nginx reverse proxy"
+          and got[0].snippet == "A guide to configuring nginx.", str(got))
+
+    # ---- the challenge is named, not misreported -------------------------
+    challenge = ('<form id="challenge-form" '
+                 'action="//duckduckgo.com/anomaly.js?cc=botnet&sv=1">')
+    check("ddg: a 202 is recognised as the anti-bot interstitial",
+          websearch.ddg_is_challenged(202, "<html>anything</html>"))
+    check("ddg: the challenge markers are recognised on a 200",
+          websearch.ddg_is_challenged(200, challenge))
+    check("ddg: an ordinary results page is not a challenge",
+          not websearch.ddg_is_challenged(
+              200, "<a class='result-link' href='https://x.test/'>x</a>"))
+
     # ---- html_to_text -----------------------------------------------------
     doc = (
         "<html><body><nav><a href='/'>Home</a></nav>"

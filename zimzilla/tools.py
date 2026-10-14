@@ -695,14 +695,14 @@ def _tool_web_search(args: dict, cfg) -> ToolResult:
     # only ever blocks named hosts. The engine itself is the operator's own
     # choice of endpoint, not a target.
     try:
-        results = _web_search(query, max_results=max_results)
+        results, backend = _web_search(query, max_results=max_results)
     except WebError as e:
         return ToolResult(f"web search failed: {e}", is_error=True)
 
     if not results:
-        return ToolResult(f"no results for {query!r}")
+        return ToolResult(f"no results for {query!r} ({backend})")
 
-    lines = [f"{len(results)} result(s) for {query!r}:", ""]
+    lines = [f"{len(results)} result(s) for {query!r} via {backend}:", ""]
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. {r.title}")
         lines.append(f"   {r.url}")
@@ -712,7 +712,7 @@ def _tool_web_search(args: dict, cfg) -> ToolResult:
     lines.append("Use web_fetch on a URL above to read the page in full.")
     return ToolResult(
         _truncate("\n".join(lines), cfg.max_output_chars),
-        meta={"results": len(results)},
+        meta={"results": len(results), "backend": backend},
     )
 
 
