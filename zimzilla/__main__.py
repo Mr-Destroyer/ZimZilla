@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -49,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-update", action="store_true",
                         help="skip the launch-time check for new commits on the upstream")
     parser.add_argument("--list-models", action="store_true", help="list known models and exit")
+    parser.add_argument("--panes", action="store_true",
+                        help="start in a tmux session where ctrl+b h / ctrl+b v open "
+                             "another ZimZilla pane, and the panes' agents can message each other")
     parser.add_argument("--version", action="version", version=f"zimzilla {__version__}")
     return parser
 
@@ -93,6 +97,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     workdir = Path(args.workdir).expanduser() if args.workdir else Path.cwd()
+
+    # --panes: hand the whole session to tmux. tmux owns ctrl+b and the splits;
+    # every pane re-runs this same command without --panes, so each one is an
+    # ordinary ZimZilla that happens to share a mailbox with its peers.
+    if args.panes and not os.environ.get("ZIMZILLA_PANE_SESSION"):
+        from . import panes as panes_mod
+
+        if not panes_mod.tmux_available():
+            print("zimzilla: --panes needs tmux — install it (e.g. `sudo apt install tmux`)",
+                  file=sys.stderr)
+            return 2
+        inner = [a for a in raw_argv if a != "--panes"]
+        launcher = _launcher_path()
+        base = [launcher] if launcher else [sys.executable, "-m", "zimzilla"]
+        zim_cmd = " ".join(shlex.quote(p) for p in [*base, *inner])
+        state = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
+        conf = panes_mod.write_tmux_conf(state, zim_cmd)
+        return panes_mod.launch(conf, zim_cmd, workdir)
+
 
     # Target scope: two files with one job each. allow.yaml arms the session
     # (its presence means the operator has declared their targets, so tools run

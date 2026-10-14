@@ -823,7 +823,16 @@ class ZimZillaApp(App):
         self.palette = get_palette(cfg.theme, term_bg, colors=term_colors)
         self.theme_name = cfg.theme
         self.rain_on = cfg.rain
-        self.agent = Agent(cfg, permission_handler=self.request_permission)
+        # Inside a ZimZilla tmux pane the main session can message its peers.
+        # Outside one, there is no mailbox and the peer tools stay off.
+        from .. import panes as _panes
+        self._in_pane = _panes.current_session() is not None
+        self.agent = Agent(
+            cfg,
+            permission_handler=self.request_permission,
+            can_peer=self._in_pane,
+            peer_inbox=self._drain_peer_inbox if self._in_pane else None,
+        )
         # While a modal (permission gate) is up, the prompt must be disabled so
         # approval keystrokes like "y" don't leak into it.
         self._modal_depth = 0
@@ -4782,6 +4791,22 @@ class ZimZillaApp(App):
                 self.call_after_refresh(self._drop_screen, screen, tries - 1)
         except Exception:
             pass
+
+    def _drain_peer_inbox(self) -> str:
+        """Unread pane messages, formatted for the start of the next turn."""
+        from .. import panes as _panes
+
+        session = _panes.current_session()
+        me = _panes.current_agent()
+        if not session or not me:
+            return ""
+        root = _panes.mailbox_root(self.cfg.state_dir, session)
+        _panes.register(root, me)
+        msgs = _panes.drain(root, me)
+        if not msgs:
+            return ""
+        return ("[messages from other ZimZilla panes]\n"
+                + _panes.format_messages(msgs))
 
     def _team_agent_factory(self, cfg: Config, **kw) -> Agent:
         """Build a team Agent. The seam tests replace to stub the model.

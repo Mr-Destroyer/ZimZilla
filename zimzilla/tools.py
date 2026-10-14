@@ -272,6 +272,44 @@ TOOL_SCHEMAS: list[dict] = [
     },
 ]
 
+#: Pane messaging. Advertised only to a pane-session agent (``Agent.can_peer``),
+#: which is what lets the ZimZilla panes talk to each other. See ``panes.py``.
+PEER_SCHEMAS: list[dict] = [
+    {
+        "name": "agent_peers",
+        "description": (
+            "List the other ZimZilla agents running in your tmux panes. Use it "
+            "to find out who you can message."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "agent_send",
+        "description": (
+            "Send a message to another ZimZilla agent in a pane. The recipient "
+            "sees it at the start of its next turn. Use agent_peers for names. "
+            "Messages are not replies: write what they need to act on."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Name of the recipient agent."},
+                "body": {"type": "string", "description": "The message."},
+            },
+            "required": ["to", "body"],
+        },
+    },
+    {
+        "name": "agent_inbox",
+        "description": (
+            "Read and clear your unread messages from other agents. Messages "
+            "also arrive automatically at the start of a turn; use this to "
+            "check mid-turn."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
 TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
 
 # Tools that require an explicit user confirmation.
@@ -287,6 +325,10 @@ HUNT_ONLY_TOOLS = {"report_finding"}
 #: reads the whole campaign, which a wave agent must not see — its brief is
 #: deliberately blind to the other agents' work. See ``Agent.can_hunt_read``.
 MAIN_ONLY_TOOLS = {"hunt_findings"}
+
+#: Tools that exist only for a pane-session agent. Withheld from /team workers
+#: and hunt agents, which are deliberately isolated from one another.
+PEER_TOOLS = {"agent_peers", "agent_send", "agent_inbox"}
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
               ".pytest_cache", ".ruff_cache", "dist", "build", ".idea", ".tox"}
@@ -1062,6 +1104,46 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
     return ToolResult("\n".join(parts))
 
 
+# ---- pane messaging ---------------------------------------------------------
+
+def _peer_root(cfg):
+    from . import panes
+
+    session = panes.current_session()
+    if not session:
+        raise ToolError("not running inside a ZimZilla tmux pane — "
+                        "start with `zimzilla --panes` and split with ctrl+b h / ctrl+b v")
+    return panes, panes.mailbox_root(cfg.state_dir, session), panes.current_agent() or "unknown"
+
+
+def _tool_agent_peers(args: dict, cfg) -> ToolResult:
+    panes, root, me = _peer_root(cfg)
+    panes.register(root, me)
+    others = [a for a in panes.known_agents(root) if a != me]
+    if not others:
+        return ToolResult(f"you are '{me}'. No other agents in this session yet.")
+    return ToolResult(f"you are '{me}'. Peers: {', '.join(others)}")
+
+
+def _tool_agent_send(args: dict, cfg) -> ToolResult:
+    panes, root, me = _peer_root(cfg)
+    panes.register(root, me)
+    try:
+        panes.send(root, me, _text(args.get("to", "")), _text(args.get("body", "")))
+    except ValueError as e:
+        return ToolResult(str(e), is_error=True)
+    return ToolResult(f"sent to {_text(args.get('to', ''))}")
+
+
+def _tool_agent_inbox(args: dict, cfg) -> ToolResult:
+    panes, root, me = _peer_root(cfg)
+    panes.register(root, me)
+    msgs = panes.drain(root, me)
+    if not msgs:
+        return ToolResult("no new messages")
+    return ToolResult(panes.format_messages(msgs))
+
+
 _DISPATCH = {
     "bash": _tool_bash,
     "read_file": _tool_read_file,
@@ -1074,6 +1156,9 @@ _DISPATCH = {
     "web_fetch": _tool_web_fetch,
     "report_finding": _tool_report_finding,
     "hunt_findings": _tool_hunt_findings,
+    "agent_peers": _tool_agent_peers,
+    "agent_send": _tool_agent_send,
+    "agent_inbox": _tool_agent_inbox,
 }
 
 

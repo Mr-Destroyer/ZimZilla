@@ -225,6 +225,8 @@ class Agent:
         tool_hook: ToolHook | None = None,
         can_report: bool = False,
         can_hunt_read: bool = True,
+        can_peer: bool = False,
+        peer_inbox: "Callable[[], str] | None" = None,
     ) -> None:
         self.cfg = cfg
         self.messages: list[dict] = []
@@ -248,6 +250,13 @@ class Agent:
         # would undo that. hunt._run_agent switches it off for the agents it
         # owns.
         self.can_hunt_read = can_hunt_read
+        # Whether the pane-messaging tools are advertised. Only the main session
+        # of a ZimZilla pane turns this on; /team workers and hunt agents keep
+        # the star topology and never see one another.
+        self.can_peer = can_peer
+        # Returns the text of any unread pane messages, or "". Called at the
+        # start of each turn so messages arrive without the model polling.
+        self.peer_inbox = peer_inbox
 
         # accounting
         self.session_input_tokens = 0
@@ -327,7 +336,10 @@ class Agent:
             deny = deny | tools_mod.HUNT_ONLY_TOOLS
         if not self.can_hunt_read:
             deny = deny | tools_mod.MAIN_ONLY_TOOLS
-        return [t for t in tools_mod.TOOL_SCHEMAS if t["name"] not in deny]
+        if not self.can_peer:
+            deny = deny | tools_mod.PEER_TOOLS
+        schemas = tools_mod.TOOL_SCHEMAS + tools_mod.PEER_SCHEMAS
+        return [t for t in schemas if t["name"] not in deny]
 
     def _denied(self, name: str) -> str | None:
         """Reason a tool is unavailable in this mode, or None if it is allowed."""
@@ -344,6 +356,8 @@ class Agent:
             return f"the {name} tool is only available to a hunt agent"
         # The mirror image: a hunt agent must not read the whole campaign, whose
         # other waves it is meant to work independently of.
+        if name in tools_mod.PEER_TOOLS and not self.can_peer:
+            return f"the {name} tool is only available to the main session in a pane"
         if name in tools_mod.MAIN_ONLY_TOOLS and not self.can_hunt_read:
             return (f"the {name} tool is not available inside a hunt — your "
                     "brief is deliberately independent of the other agents")
@@ -478,6 +492,13 @@ class Agent:
         # sees it before the instruction it applies to — and the history keeps
         # the plain user/assistant alternation it had. See ``notice``.
         notice = self._drain_notices()
+        if self.peer_inbox is not None:
+            try:
+                peer_text = self.peer_inbox()
+            except Exception:  # noqa: BLE001 - a broken mailbox must not stop a turn
+                peer_text = ""
+            if peer_text:
+                notice = f"{notice}\n\n{peer_text}" if notice else peer_text
         if notice:
             user_text = f"{notice}\n\n---\n\n{user_text}"
 
