@@ -305,17 +305,21 @@ or a colour diff of the change, and three keys:
 ## Upstreams
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
-points at, so it can run against a local LiteLLM proxy or a hosted gateway
-without any code caring which. Three sources are wired up:
+points at, so it can run against a local LiteLLM proxy, a hosted gateway or a
+peer-to-peer marketplace without any code caring which. Five sources are wired
+up:
 
-| Source | Endpoint | How it starts |
-|---|---|---|
-| **Logfare** | `:4001` | the bundled proxy — the default |
-| **Token Juice** | `:4000` | its own local proxy |
-| **TokenHarbour** | `tokenharbor.ai` | hosted — nothing to start |
+| Source | Endpoint | Key | How it starts |
+|---|---|---|---|
+| **Logfare** | `:4001` | discovered | the bundled proxy — the default |
+| **Token Juice** | `:4000` | discovered | its own local proxy |
+| **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
+| **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
+| **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 
-Switch with `/zim-logfare`, `/zim-tokenjuice` or `/zim-tokenharbour`; the choice
-is remembered, so the next launch comes back to the one that was working.
+Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-tokenharbour`,
+`/zim-openrouter` or `/zim-antseed`; the choice is remembered, so the next
+launch comes back to the one that was working.
 
 ### TokenHarbour
 
@@ -350,6 +354,64 @@ TokenHarbour's catalog is **live** — it changes, and some models are free:
 
 `/model` reads the fetched catalog, so free models sort to the top and the
 prices shown are the gateway's own rather than a local estimate.
+
+### AntSeed
+
+AntSeed is not a gateway. It is a peer-to-peer marketplace: independent sellers
+advertise models, and a **buyer** process you run locally routes your requests
+to them. Install it, then start the buyer once:
+
+```sh
+antseed buyer start          # serves http://localhost:8377
+```
+
+Then `/zim-antseed` — **there is no key to set.** The buyer authenticates
+nothing; a request with no `Authorization` header at all comes back 200.
+`/tokenharbour-api-setup`-style commands have nothing to store here, and
+ZimZilla says so rather than pretending.
+
+The catalog is public and changes constantly, so look before you switch:
+
+```
+/antseed-models            # the free models, each with the peer to pin
+/models antseed            # the same set, through the generic command
+```
+
+**Free means a free seller, not a free model.** A model is free when at least
+one peer serving it charges 0 in and 0 out. A model that is free in but paid out
+is a paid model, and is listed as one. Expect the free set to be a handful out
+of a few hundred — the exact count moves as sellers come and go, which is why
+`/antseed-models` fetches rather than quoting a number.
+
+**Why the list looks like `4668854b…@glm-4.5-flash`.** That `peer@model` form is
+AntSeed's own pinning syntax, and it is the whole point of this integration. The
+router ranks peers by price *and* trust, with `minTrustScore` defaulting to 60
+while free peers cluster below it — so asking for a free model by its bare name
+gets you
+
+```
+502 model_not_found: No policy-allowed peer currently serves model "glm-4.5-flash".
+```
+
+even though the peer is online. The pin bypasses that ranking, and it needs no
+client change at all: no header, no extra option, just the model id.
+
+A pin bypasses the *ranking*, not the seller. A seller is a stranger's machine,
+and it can be busy or refuse — on one measurement of the free pins, most
+answered with a real reply while others returned `429` or `502 "pinned peer
+could not complete"`. So ZimZilla lists every free pin rather than promising
+one, and `/model` orders them by protocol support and trust. If one 429s, try
+the next.
+
+Two smaller things worth knowing:
+
+- Every seller on the network advertises the OpenAI protocol and none advertises
+  Anthropic — the buyer translates for you. It works, but it is a translation,
+  not a native protocol, so the occasional `400 unsupported_protocol` from a
+  particular seller is a property of that seller rather than a bug here.
+- The reasoning models spend the token budget before emitting any text. A
+  200 with `content: []` and `stop_reason: max_tokens` at `--max-tokens 32`
+  becomes real prose at 256. ZimZilla's default is well clear of this.
 
 ---
 
@@ -429,9 +491,18 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/osint-tree [kind\|path]` | re-show a finished recon as a result tree |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
+| `/zim-logfare` | switch upstream to Logfare (`:4001`) |
+| `/zim-tokenjuice` | switch upstream to Token Juice (`:4000`) |
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
+| `/zim-openrouter` | switch upstream to OpenRouter (hosted) |
+| `/openrouter-api-setup <key>` | store your OpenRouter API key |
+| `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
+| `/antseed-models` | list AntSeed's free models, each with the peer to pin |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `antseed` |
+| `/zim-source` | show every upstream and its status |
+| `/scope-validator` | paste a programme overview → scope files + ranked targets |
 | `/bug-hunt [--fresh] [--wave N] <target>` | recon (reused if already done), then **one** wave of 10 agents |
 | `/ad [--fresh] [--wave N] [--lockout N] [--arm] <domain> --ack <domain>` | Active Directory campaign — gated and interlocked |
 | `/ad tools` | reprint the AD tool probe |

@@ -27,6 +27,7 @@ from textual.widgets import Input, Static
 
 from .. import ad as ad_mod
 from .. import crack as crack_mod
+from .. import antseed as as_mod
 from .. import hunt as hunt_mod
 from .. import logfare as lf_mod
 from .. import osint as osint_mod
@@ -1717,6 +1718,7 @@ class ZimZillaApp(App):
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
         "openrouter-api-setup", "zim-openrouter", "models",
+        "zim-antseed", "antseed-models",
         "logfare-models",
         # Reading an archived report back is a disk read and a write to the
         # transcript; it starts no turn and touches nothing the live one owns.
@@ -1757,10 +1759,12 @@ class ZimZillaApp(App):
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
             "zim-openrouter": lambda a: self._cmd_zim_gateway("openrouter"),
+            "zim-antseed": lambda a: self._cmd_zim_gateway("antseed"),
             "zim-source": lambda a: self._cmd_zim_source(None),
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
             "openrouter-api-setup": lambda a: self._cmd_gateway_key("openrouter", a),
+            "antseed-models": lambda a: self._cmd_models(["antseed"]),
             "models": lambda a: self._cmd_models(a),
             "logfare-models": lambda a: self._cmd_logfare_models(a),
             "exit": lambda a: self.exit(),
@@ -1792,10 +1796,12 @@ class ZimZillaApp(App):
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
+            ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
             ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
+            ("/antseed-models", "AntSeed's free models, and the peer to pin"),
             ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-models", "fetch the live catalog; show what is up"),
             ("/save [name]", "write the session to disk"),
@@ -1928,6 +1934,12 @@ class ZimZillaApp(App):
         # free flag the other sources have no equivalent of. Read once, here.
         th_catalog = (th_mod.cached_models()
                       if active == "tokenharbour" else None)
+        # AntSeed's is fetched too, and is the one catalog whose *ids are not
+        # what you type*: a free model is reached by pinning it to a seller, so
+        # the switchable name is `<peerId>@<model>`. Read once here, for the same
+        # reason as the others — the fetch is the slow part and this is a render.
+        as_catalog = (as_mod.cached_models()
+                      if active == "antseed" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -1938,8 +1950,9 @@ class ZimZillaApp(App):
             t.append(self.cfg.model + "\n", style=f"bold {p.accent}")
             if active:
                 src = sources_mod.discover().get(active)
-                label = src.label if src else ("TokenHarbour" if active == "tokenharbour"
-                                               else active)
+                hosted = {"tokenharbour": "TokenHarbour", "openrouter": "OpenRouter",
+                          "antseed": "AntSeed"}
+                label = src.label if src else hosted.get(active, active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
                 t.append(f"   ·   {self.cfg.base_url}\n", style=p.dim)
@@ -1947,15 +1960,29 @@ class ZimZillaApp(App):
             # Free first, then the rest. A hosted gateway's list is long and
             # changes; the operator almost always wants the free ones, so they
             # lead — with the model in use never hidden, whatever it costs.
-            order = self._model_display_order(models, th_catalog)
+            order = self._model_display_order(models, th_catalog or as_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
-                t.append(f"  {mark} {m:<26}", style=style)
-                note = self._model_note(m, th_catalog, lf_catalog)
+                # AntSeed's list is of *models*, but what is typed is a pinned
+                # id. Show the pin for the free ones, since that is the string
+                # that works — the bare name 502s against the trust floor.
+                shown = m
+                if active == "antseed" and as_catalog:
+                    for _m in as_catalog:
+                        if _m.id == m and _m.free:
+                            shown = _m.pin() or m
+                            break
+                t.append(f"  {mark} {shown:<26}", style=style)
+                note = self._model_note(m, th_catalog, lf_catalog, as_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
-            if active == "tokenharbour":
+            if active == "antseed":
+                t.append(
+                    "  the catalog is live — /antseed-models shows the free "
+                    "ones and\nthe seller to pin; pinning is what makes a free "
+                    "model actually route\n", style=p.dim)
+            elif active == "tokenharbour":
                 t.append("  the catalog is live — /tokenharbour-models refetches it\n",
                          style=p.dim)
             elif active == "logfare":
@@ -1986,8 +2013,13 @@ class ZimZillaApp(App):
         #
         # OpenRouter needs no credential for this and TokenHarbour does, so the
         # key is optional here rather than required.
-        if active in ("tokenharbour", "openrouter") and (
-                models is None or name not in models):
+        # A pinned id — `<peerId>@<model>` — is accepted by the gateway but is
+        # not in the catalog's id list, so it is unwrapped to its model before
+        # the membership test. Without this, every free AntSeed model would be
+        # refused by the very check that exists to catch typos.
+        check_name = name.split("@", 1)[1] if (active == "antseed" and "@" in name) else name
+        if active in ("tokenharbour", "openrouter", "antseed") and (
+                models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
                 if th_catalog is None:
@@ -1999,14 +2031,21 @@ class ZimZillaApp(App):
             elif active == "openrouter":
                 creds = or_mod.load_credentials()
                 fetched, _ = or_mod.fetch_models(creds[0] if creds else "")
+            elif active == "antseed":
+                if as_catalog is None:
+                    fetched, _ = as_mod.fetch_models()
+                else:
+                    fetched = list(as_catalog)
             if fetched is not None:
                 if active == "tokenharbour":
                     th_catalog = fetched
+                elif active == "antseed":
+                    as_catalog = fetched
                 models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
         # old behaviour — accept anything — is right there.
-        if active and name not in models:
+        if active and check_name not in models:
             self._sys_line(
                 f"{name} is not served by {active} — see /model for the list",
                 warn=True,
@@ -2041,7 +2080,8 @@ class ZimZillaApp(App):
         rest = [m for m in ids if m not in free and m != self.cfg.model]
         return head + frees + rest
 
-    def _model_note(self, name: str, catalog, lf_catalog=None) -> str:
+    def _model_note(self, name: str, catalog, lf_catalog=None,
+                    as_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -2052,8 +2092,14 @@ class ZimZillaApp(App):
         cannot know: whether the model is actually up. A model Logfare reports as
         unstable is called out, so a degraded pick is a choice rather than a
         surprise three turns in.
+
+        AntSeed's catalog is read last and is the only one that answers for a
+        *pinned* id as well as a bare one, since the name on screen is
+        ``<peerId>@<model>`` for a free model.
         """
         live = th_mod.price_for(name, catalog)
+        if live is None:
+            live = as_mod.price_for(name, as_catalog)
         if live is not None:
             pin, pout = live
             if pin == 0.0 and pout == 0.0:
@@ -2205,13 +2251,30 @@ class ZimZillaApp(App):
             mark = "◉" if active == "tokenharbour" else "○"
             style = f"bold {p.accent}" if active == "tokenharbour" else p.primary
             t.append(f"  {mark} {'tokenharbour':<12}", style=style)
-            t.append("hosted  TokenHarbour ", style=p.primary)
+            # Six spaces where the rows above carry ":4001  ", so the label
+            # column lines up. "tokenharbour" is exactly the 12-wide key column,
+            # so without this the two run together as "tokenharbourhosted".
+            t.append("      hosted  TokenHarbour  ", style=p.primary)
             if th is None:
                 t.append("no key — /tokenharbour-api-setup\n", style=p.amber)
             else:
                 t.append(f"key from {th[2]}\n", style=p.accent)
-            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice  or  "
-                     "/zim-tokenharbour\n", style=p.dim)
+            # AntSeed is local like the LiteLLM proxies but has no discover()
+            # entry and no key, so it is listed from its port being reachable —
+            # the only question that has an answer here.
+            port = as_mod.proxy_port()
+            up = as_mod.reachable()
+            mark = "◉" if active == "antseed" else "○"
+            style = f"bold {p.accent}" if active == "antseed" else p.primary
+            t.append(f"  {mark} {'antseed':<12}", style=style)
+            t.append(f":{port}  AntSeed      ", style=p.primary)
+            if up:
+                t.append("buyer up (free peers, no key)\n", style=p.accent)
+            else:
+                t.append("no buyer — `antseed buyer start`\n", style=p.amber)
+            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice,  "
+                     "/zim-tokenharbour\n                 or  /zim-openrouter,  "
+                     "/zim-antseed\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
 
@@ -2474,9 +2537,18 @@ class ZimZillaApp(App):
     # predates this and its transcript wording is referenced elsewhere.
 
     def _gateway(self, kind: str):
-        """``(module, label)`` for a hosted gateway key. ``None`` if unknown."""
+        """``(module, label)`` for a hosted gateway key. ``None`` if unknown.
+
+        AntSeed is included although it is not a *hosted* gateway and has no
+        key: it answers the same calls this table exists to parameterise
+        (``load_credentials``, ``apply_to``, ``set_current``, ``active_endpoint``),
+        so listing it here is what lets ``/zim-antseed`` share one code path
+        with the other two instead of growing a near-copy of it.
+        """
         if kind == "openrouter":
             return or_mod, "OpenRouter"
+        if kind == "antseed":
+            return as_mod, "AntSeed"
         return None
 
     def _cmd_gateway_key(self, kind: str, args) -> None:
@@ -2508,6 +2580,20 @@ class ZimZillaApp(App):
                 _, _, origin = creds
                 t.append("  source: ", style=p.dim)
                 t.append(origin + "\n\n", style=p.primary)
+            if kind == "antseed":
+                # There is no key to set, and offering a key box for a service
+                # that authenticates nothing would be a lie the operator only
+                # discovers by pasting one into it. Say what is actually needed.
+                t.append("  nothing to set — ", style=p.dim)
+                t.append(
+                    "the local buyer proxy takes no credential.\n"
+                    "  start it with ", style=p.dim)
+                t.append("antseed buyer start\n", style=f"bold {p.primary}")
+                t.append("  then switch with ", style=p.dim)
+                t.append("/zim-antseed\n", style=f"bold {p.primary}")
+                t.append(f"  preference   {mod.PROFILE}\n", style=p.dim)
+                self.query_one(ChatPane).write_block(t)
+                return
             t.append("  set it with  ", style=p.dim)
             t.append(f"/{kind}-api-setup <key>\n", style=f"bold {p.primary}")
             if kind == "openrouter":
@@ -2608,7 +2694,7 @@ class ZimZillaApp(App):
                     "them, or name one: /models openrouter", warn=True)
                 return
 
-        known = {"logfare", "tokenjuice", "tokenharbour", "openrouter"}
+        known = {"logfare", "tokenjuice", "tokenharbour", "openrouter", "antseed"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -2628,6 +2714,16 @@ class ZimZillaApp(App):
             self._sys_line(
                 "no TokenHarbour key — set one with /tokenharbour-api-setup <key>",
                 warn=True)
+            return
+        # AntSeed has no key to check, but it does have to be *running*: the
+        # buyer proxy only exists while `antseed buyer start` is up, and a fetch
+        # against a dead port would otherwise surface as a bare connection error
+        # rather than the one instruction that fixes it.
+        if key == "antseed" and not as_mod.reachable():
+            self._sys_line(
+                "no AntSeed buyer on "
+                f"localhost:{as_mod.proxy_port()} — start one with "
+                "`antseed buyer start`", warn=True)
             return
         self._sys_line(f"fetching the {key} catalog…")
         self._fetch_models(key)
@@ -2654,6 +2750,12 @@ class ZimZillaApp(App):
             if creds is None:
                 return None, "no key"
             return th_mod.free_models(creds[0])
+        if kind == "antseed":
+            # Keyless, like OpenRouter's. `usable_free_models` rather than
+            # `free_models`: a free model is only usable here if a free peer can
+            # be pinned, because the router's trust floor refuses free peers on
+            # its own — see the module header.
+            return as_mod.usable_free_models()
         if kind == "logfare":
             # Logfare's catalog is a health feed — it carries no pricing at all,
             # so there is no free tier to filter to. Reported as an empty list
@@ -2671,8 +2773,8 @@ class ZimZillaApp(App):
             self._sys_line(f"{kind}: {err}", warn=True)
             return
         label = {"openrouter": "OPENROUTER",
-                 "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE"}.get(
-                     kind, kind.upper())
+                 "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
+                 "antseed": "ANTSEED"}.get(kind, kind.upper())
         t = Text()
         t.append(f"  {label} — FREE MODELS\n\n", style=f"bold {p.accent}")
         if not models:
@@ -2693,17 +2795,36 @@ class ZimZillaApp(App):
                 # blurb — `…:free` and `free · 512k ctx` rendered as `freefree`.
                 # An over-long id instead wraps its blurb to the next line,
                 # indented under the id.
-                t.append(f"  {mark} {m.id}", style=style)
-                if len(m.id) <= _MODEL_COL:
-                    t.append(" " * (_MODEL_COL - len(m.id) + 1))
+                # For AntSeed the *pin* is what gets typed, not the bare id: the
+                # router's trust floor refuses free peers, so `glm-4.5-flash`
+                # answers 502 while `<peerId>@glm-4.5-flash` answers 200. Showing
+                # the bare id would hand the operator a name that looks right and
+                # fails on use, so the column carries the pinnable id and the
+                # model name is repeated underneath when the two differ.
+                shown = m.id
+                if kind == "antseed":
+                    pin = m.pin()
+                    if pin:
+                        shown = pin
+                t.append(f"  {mark} {shown}", style=style)
+                if len(shown) <= _MODEL_COL:
+                    t.append(" " * (_MODEL_COL - len(shown) + 1))
                 else:
                     t.append("\n    ")
                 t.append(m.blurb + "\n", style=p.dim)
+                if kind == "antseed" and shown != m.id:
+                    t.append(f"      → {m.id}\n", style=p.dim)
             t.append("\n  pick one with  ", style=p.dim)
             t.append("/model <name>\n", style=f"bold {p.primary}")
         if kind == "openrouter":
             t.append("  free = :free suffix and a zero price · tools-capable only\n",
                      style=p.dim)
+        if kind == "antseed":
+            t.append(
+                "  free = a seller charging 0 in and 0 out · the id shown is "
+                "pinned\n  to that seller (<peerId>@<model>), because the "
+                "router's trust floor\n  skips free peers on its own\n",
+                style=p.dim)
         self.query_one(ChatPane).write_block(t)
         self._refresh_model_choices()
 
@@ -5021,6 +5142,9 @@ class ZimZillaApp(App):
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
             ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
+            ("/zim-antseed", "switch upstream to AntSeed", "zim-antseed"),
+            ("/antseed-models", "AntSeed's free models, and the peer to pin",
+             "antseed-models"),
             ("/tokenharbour-api-setup", "store your TokenHarbour API key",
              "tokenharbour-api-setup"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free",

@@ -124,6 +124,10 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import openrouter as or_mod
         cached = or_mod.cached_ids()
         return tuple(cached) if cached else None
+    if key == "antseed":
+        from . import antseed as as_mod
+        cached = as_mod.cached_ids()
+        return tuple(cached) if cached else None
     return MODELS_BY_KEY.get(key) or None
 
 
@@ -215,8 +219,11 @@ def _state_file() -> Path:
 #: on this machine. TokenHarbour and OpenRouter are remote: they have no local
 #: profile, service or config to discover, so gating them on discover() would
 #: silently discard the selection and drop a session back onto Logfare at the
-#: next launch.
-BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter"})
+#: next launch. AntSeed is local but equally undiscoverable by `discover()`,
+#: which only knows the two LiteLLM proxies — its buyer is started and stopped
+#: by the operator, so requiring it to be up at selection time would lose the
+#: choice every time the proxy was down.
+BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "antseed"})
 
 
 def current_key() -> str | None:
@@ -254,12 +261,19 @@ def active_key(base_url: str) -> str | None:
     """
     # Imported locally: sources is imported by these modules' callers, and a
     # module-level import would make them import each other.
+    from . import antseed as as_mod
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
     if or_mod.is_openrouter(base_url):
         return "openrouter"
+    # Checked before the port match, and by port rather than by name: the buyer
+    # hands out a plain http://localhost:8377 with no "antseed" in it, and the
+    # regex below would otherwise find port 8377, miss it in source_for_port()
+    # (which only knows the two LiteLLM proxies) and return None.
+    if as_mod.is_antseed(base_url):
+        return "antseed"
     m = re.search(r":(\d{2,5})(?:/|$)", base_url or "")
     if not m:
         return None
