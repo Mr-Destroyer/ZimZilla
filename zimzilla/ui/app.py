@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import shutil
 import threading
 import time
@@ -39,6 +40,7 @@ from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
 from ..agent import Agent, Deliverable
 from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
+from ..scope import Scope
 from ..theme import (SYSTEM_THEME, THEME_NAMES, THINKING_VERBS, agent_color,
                      get_palette, set_current_theme)
 from . import renderers as R
@@ -532,6 +534,55 @@ class WaveOverlay(ModalScreen[None]):
             return
         size = self.size
         canvas.update(self.web.render(size.width, size.height))
+
+
+class ScopePasteScreen(ModalScreen[str | None]):
+    """A multi-line box for pasting a programme overview.
+
+    The prompt is one row and would fold a pasted overview into a single line,
+    so this takes the paste as a ``TextArea`` instead. ``ctrl+s`` submits the
+    text and ``escape`` cancels; a cancel dismisses with ``None``.
+    """
+
+    DEFAULT_CSS = """
+    ScopePasteScreen { align: center middle; background: $background 70%; }
+    #scope-paste-box {
+        width: 90%; height: 85%; border: round $secondary; padding: 1 2;
+        background: $surface;
+    }
+    #scope-paste-hint { height: auto; margin-bottom: 1; }
+    #scope-paste-text { height: 1fr; }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "run", priority=True),
+        Binding("escape", "cancel", "cancel", priority=True),
+    ]
+
+    def __init__(self, palette) -> None:
+        super().__init__()
+        self.palette = palette
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import TextArea
+        with Vertical(id="scope-paste-box"):
+            yield Static(
+                "Paste the whole programme overview — scope, out of scope, rules.\n"
+                "ctrl+s runs the validator · escape cancels",
+                id="scope-paste-hint",
+            )
+            yield TextArea(id="scope-paste-text", soft_wrap=True, show_line_numbers=False)
+
+    def on_mount(self) -> None:
+        self.query_one("#scope-paste-text").focus()
+
+    def action_submit(self) -> None:
+        from textual.widgets import TextArea
+        text = self.query_one("#scope-paste-text", TextArea).text
+        self.dismiss(text if text.strip() else None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class FindingsPanel(ModalScreen[None]):
@@ -1695,6 +1746,7 @@ class ZimZillaApp(App):
             "osint-tree": lambda a: self._cmd_osint_tree(a),
             "phish": lambda a: self._cmd_phish(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
+            "scope-validator": lambda a: self._cmd_scope_validator(a),
             "ad": lambda a: self._cmd_ad(a),
             "crack": lambda a: self._cmd_crack(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
@@ -1753,6 +1805,7 @@ class ZimZillaApp(App):
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
             ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
+            ("/scope-validator", "paste a programme overview → allow.yaml, out-of-scope.yaml, ranked targets"),
             ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
             ("/bug-hunt <target> --wave N", "run wave N specifically"),
             ("/ad <domain> --ack <domain>", "AD campaign — gated, interlocks on"),
@@ -1969,10 +2022,11 @@ class ZimZillaApp(App):
     def _model_display_order(self, models, catalog) -> list[str]:
         """The /model list, free models first.
 
-        Only TokenHarbour has a free tier, and only its catalog can tell free
-        from paid. For every other source the catalog is None and this is the
-        declared order unchanged — so the sort never reorders a list it has no
-        prices for, which would look like a bug in Logfare's catalog.
+        Only the hosted gateways have a free tier, and only their catalogs can
+        tell free from paid — so the caller passes whichever one is live. For
+        every other source the catalog is None and this is the declared order
+        unchanged, so the sort never reorders a list it has no prices for, which
+        would look like a bug in Logfare's catalog.
         """
         ids = list(models)
         if not catalog:
@@ -3330,6 +3384,131 @@ class ZimZillaApp(App):
             return None
 
     # ---- /bug-hunt --------------------------------------------------------
+    def _cmd_scope_validator(self, args) -> None:
+        """/scope-validator — paste a programme overview; write the scope files,
+        recon the in-scope hosts read-only, and rank them as a tree.
+
+        Opens a multi-line box so the whole overview arrives intact. Runs as a
+        worker, because it makes model calls and network requests.
+        """
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        def _got(text: str | None) -> None:
+            if not text:
+                self._sys_line("scope-validator cancelled", warn=True)
+                return
+            self._run_scope_validator(text)
+
+        self.push_screen(ScopePasteScreen(self.palette), _got)
+
+    @work(exclusive=True)
+    async def _run_scope_validator(self, overview: str) -> None:
+        from .. import scope_validator as sv
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        bar = self.query_one(StatusBar)
+
+        self.busy = True
+        self._cancelled = False
+        self._set_rain(False)
+        self._sys_line("scope-validator: reading the overview…")
+        try:
+            # 1. extract the structured scope from the pasted text
+            bar.set_activity("scope: reading", busy=True)
+            extracted = sv.parse_extraction(await self._collect_plain(
+                sv.EXTRACT_PROMPT.format(overview=overview)))
+            if extracted is None or not (extracted.in_scope or extracted.out_of_scope):
+                self._sys_line(
+                    "scope-validator: could not find any scope entries in that text — "
+                    "nothing was written", warn=True)
+                return
+            if self._cancelled:
+                return
+
+            # 2. write and verify the scope files in the working directory
+            allow, deny, skipped = sv.build_scope(extracted.in_scope, extracted.out_of_scope)
+            dest = Path(self.cfg.workdir)
+            allow_path, deny_path = sv.write_scope_files(
+                dest, allow, deny, programme=extracted.programme)
+            problems = sv.verify_scope_files(allow_path, deny_path)
+
+            # 3. read-only recon of the in-scope hosts, deny-list respected
+            hosts = [sv._host_of(e.asset) for e in extracted.in_scope]
+            hosts = [h for h in dict.fromkeys(hosts) if h]
+            self._sys_line(f"recon: {len(hosts)} in-scope host(s), read-only")
+            bar.set_activity("scope: recon", busy=True)
+            recon = await asyncio.to_thread(
+                sv.recon_all, hosts, self.agent.scope)
+
+            # 4. rank with the model, from the evidence
+            bar.set_activity("scope: ranking", busy=True)
+            in_assets = [e.asset for e in extracted.in_scope]
+            ranked_raw = sv.parse_ranking(await self._collect_plain(
+                sv.rank_prompt(extracted.programme, in_assets, recon)), in_assets)
+            ranked, summary = ranked_raw if ranked_raw else (
+                [sv.Ranked(a, i + 1, "unranked", "ranking unavailable") for i, a in enumerate(in_assets)],
+                "")
+
+            # 5. show the tree
+            t = Text()
+            t.append(f"  SCOPE VALIDATOR — {extracted.programme or 'programme'}\n\n",
+                     style=f"bold {p.accent}")
+            t.append(f"  wrote  {allow_path}\n", style=p.primary)
+            t.append(f"  wrote  {deny_path}\n", style=p.primary)
+            if skipped:
+                t.append(f"  skipped {len(skipped)} asset(s) the guard cannot hold: "
+                         f"{', '.join(skipped[:6])}\n", style=p.amber)
+            for prob in problems:
+                t.append(f"  ⚠ {prob}\n", style=p.amber)
+            if extracted.rules:
+                t.append("\n  RULES\n", style=f"bold {p.accent}")
+                for rule in extracted.rules[:12]:
+                    t.append(f"    · {rule}\n", style=p.dim)
+            t.append("\n  TARGET ORDER\n", style=f"bold {p.accent}")
+            if summary:
+                t.append(f"  {summary}\n", style=p.primary)
+            for r in ranked:
+                host = sv._host_of(r.asset)
+                t.append(f"    #{r.rank} ", style=f"bold {p.accent}")
+                t.append(f"[{r.value}] ", style=p.dim)
+                t.append(f"{r.asset}\n", style=p.primary)
+                if host in recon:
+                    t.append(f"        {sv.recon_line(recon[host])}\n", style=p.dim)
+                if r.why:
+                    t.append(f"        why: {r.why}\n", style=p.dim)
+            if extracted.out_of_scope:
+                t.append(f"\n  OUT OF SCOPE ({len(extracted.out_of_scope)})\n",
+                         style=f"bold {p.accent}")
+                for e in extracted.out_of_scope[:20]:
+                    t.append(f"    ✕ {e.asset}", style=p.primary)
+                    if e.note:
+                        t.append(f" — {e.note}", style=p.dim)
+                    t.append("\n")
+            t.append("\n  The scope files are a declaration of what you are cleared "
+                     "to test. Check them before you run a tool.\n", style=p.dim)
+            chat.write_block(t)
+
+            # The guard is re-read so the new files take effect this session.
+            self.agent.scope = Scope.load(allow_path, deny_path)
+            self._sync_rails()
+        except Exception as e:  # noqa: BLE001 - surface, never leave the UI busy
+            self._sys_line(f"scope-validator failed: {type(e).__name__}: {e}", warn=True)
+        finally:
+            self.busy = False
+            bar.set_activity("", busy=False)
+
+    async def _collect_plain(self, prompt: str) -> str:
+        """One model turn with no tools, returning only its text."""
+        parts: list[str] = []
+        planner = self._team_agent_factory(
+            dataclasses.replace(self.cfg, mode="plan"))
+        async for ev in planner.run_turn(prompt):
+            if ev.get("type") == "text_delta":
+                parts.append(ev.get("text", ""))
+        return "".join(parts)
+
     def _cmd_bug_hunt(self, args) -> None:
         """/bug-hunt [--fresh] [--wave N] <target> — recon, then one wave.
 

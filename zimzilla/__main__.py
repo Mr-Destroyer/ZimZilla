@@ -116,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
         conf = panes_mod.write_tmux_conf(state, zim_cmd)
         return panes_mod.launch(conf, zim_cmd, workdir)
 
-
     # Target scope: two files with one job each. allow.yaml arms the session
     # (its presence means the operator has declared their targets, so tools run
     # unattended); out-of-scope.yaml is the never-touch list. Each is looked for

@@ -47,6 +47,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/osint", "open-source recon on a target"),
     ("/osint-tree", "re-show a finished recon as a result tree"),
     ("/phish", "clone a login page and harvest creds"),
+    ("/scope-validator", "paste a programme overview → scope files + ranked targets"),
     ("/bug-hunt", "recon, then one wave of 10 agents"),
     ("/ad", "Active Directory campaign — gated and interlocked"),
     ("/crack", "crack hashes offline — CPU only, budgeted"),
