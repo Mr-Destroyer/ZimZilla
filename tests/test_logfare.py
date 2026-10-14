@@ -186,6 +186,58 @@ def test_cache() -> None:
     check("cache: clear_cache empties it", lf.cached_ids() is None)
 
 
+def test_cache_expiry() -> None:
+    """An expired catalog must not be served as if it were live.
+
+    The bug this pins: ``fetch_models`` has always refused to *reuse* an entry
+    past ``CACHE_TTL``, but ``cached_models`` read it back regardless — so a
+    catalog fetched once at startup was reported by ``/model`` for the rest of
+    the session, under the words "the catalog is live". Logfare retires models
+    without notice, which is the entire reason the list is fetched rather than
+    declared, so a list that never expires is the original bug wearing a hat.
+
+    Nothing here sleeps: the cache entry's timestamp is moved backwards instead,
+    which is the same thing to a ``monotonic()`` comparison and costs no time.
+    """
+    import time
+
+    from zimzilla import logfare as lf
+    from zimzilla import sources as s
+
+    proxy = "http://localhost:4001"
+    lf.clear_cache()
+    check("expiry: a cold cache has no age", lf.catalog_age() is None,
+          str(lf.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        lf.fetch_models()
+    check("expiry: a fresh catalog is served", lf.cached_ids() is not None)
+    check("expiry: its age is reported, and small",
+          (lf.catalog_age() or 999) < 5.0, str(lf.catalog_age()))
+
+    # Age it well past the TTL — the state a long-running session reaches on
+    # its own, with no code path having cleared the cache in between.
+    lf._CACHE[:] = [(lf._CACHE[0][0], time.monotonic() - (lf.CACHE_TTL + 60))]
+    check("expiry: an expired catalog reads as None",
+          lf.cached_models() is None, str(lf.cached_models()))
+    check("expiry: cached_ids agrees", lf.cached_ids() is None,
+          str(lf.cached_ids()))
+    check("expiry: the real age is still reported, unclamped",
+          (lf.catalog_age() or 0) >= lf.CACHE_TTL, str(lf.catalog_age()))
+    check("expiry: sources.models_for falls back rather than serving it",
+          s.models_for(proxy) is None, str(s.models_for(proxy)))
+    check("expiry: sources.catalog_for agrees", s.catalog_for(proxy) is None)
+    check("expiry: health_for finds nothing in an expired catalog",
+          lf.health_for("deepseek-v4.1-flash") is None)
+
+    # A re-fetch is what makes it live again — and fetch_models must not have
+    # been serving the stale entry to itself either.
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        lf.fetch_models()
+    check("expiry: refetching restores it", lf.cached_ids() is not None)
+    lf.clear_cache()
+
+
 def test_sources_prefers_live() -> None:
     """sources.models_for("logfare") is the fetched list, not the declaration."""
     from zimzilla import logfare as lf
@@ -256,6 +308,7 @@ def main() -> int:
     test_parse_is_total()
     test_fetch_is_total()
     test_cache()
+    test_cache_expiry()
     test_sources_prefers_live()
     test_declared_fallback_is_plausible()
     test_is_logfare()

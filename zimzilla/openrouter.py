@@ -467,18 +467,34 @@ def model_ids(token: str = "", **kw) -> tuple[list[str] | None, str]:
     return [m.id for m in models], ""
 
 
+def catalog_age() -> float | None:
+    """Seconds since the newest cache entry was filled, or ``None`` if none was."""
+    if not _CACHE:
+        return None
+    newest = max(entry[1] for entry in _CACHE.values())
+    return time.monotonic() - newest
+
+
 def cached_models() -> list[Model] | None:
     """The last-fetched catalog as :class:`Model` objects, or ``None``.
 
     ``/model`` runs on the UI thread and must not block on a fetch, so it reads
-    whatever the last fetch left behind. A cold cache returns ``None`` and the
-    caller falls back to its own list.
+    whatever the last fetch left behind.
+
+    **The ``CACHE_TTL`` check is load-bearing.** ``fetch_models`` has always
+    refused to *reuse* an entry past its TTL, but this read it back regardless —
+    so a catalog fetched once was reported as live for the rest of the session.
+    OpenRouter's list turns over constantly (free tiers especially), so a stale
+    one is exactly the wrong list this picker exists to avoid. An expired entry
+    now reads as ``None``, which callers already handle as "no catalog".
     """
     newest: tuple[list[Model], float] | None = None
     for entry in _CACHE.values():
         if newest is None or entry[1] > newest[1]:
             newest = entry
-    return list(newest[0]) if newest else None
+    if newest is None or (time.monotonic() - newest[1]) >= CACHE_TTL:
+        return None
+    return list(newest[0])
 
 
 def cached_ids() -> list[str] | None:

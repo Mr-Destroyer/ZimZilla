@@ -522,6 +522,48 @@ def test_cache_is_keyed_by_endpoint() -> None:
     check("cache: clearing empties it", a.cached_models() is None)
 
 
+def test_cache_expiry() -> None:
+    """An expired catalog must not be served as if it were live.
+
+    ``fetch_models`` has always refused to *reuse* an entry past ``CACHE_TTL``,
+    but ``cached_models`` read it back regardless — so a catalog fetched once
+    was reported by ``/model`` for the rest of the session. AntSeed's seller set
+    is the most volatile of any source here, since peers join and leave
+    constantly, so a stale list is the worst case of the four.
+
+    Nothing sleeps: the entry's timestamp is moved backwards, which is the same
+    thing to a ``monotonic()`` comparison. Note the value tuple here is
+    ``(at, models)`` — reversed relative to the other three modules.
+    """
+    import time
+
+    from zimzilla import antseed as a
+
+    a.clear_cache()
+    check("expiry: a cold cache has no age", a.catalog_age() is None,
+          str(a.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        a.fetch_models()
+    check("expiry: a fresh catalog is served", a.cached_ids() is not None)
+    check("expiry: its age is reported, and small",
+          (a.catalog_age() or 999) < 5.0, str(a.catalog_age()))
+
+    key = a._cache_key("")
+    at, models = a._CACHE[key]
+    a._CACHE[key] = (time.monotonic() - (a.CACHE_TTL + 60), models)
+    check("expiry: an expired catalog reads as None",
+          a.cached_models() is None, str(a.cached_models()))
+    check("expiry: cached_ids agrees", a.cached_ids() is None)
+    check("expiry: the real age is still reported, unclamped",
+          (a.catalog_age() or 0) >= a.CACHE_TTL, str(a.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        a.fetch_models()
+    check("expiry: refetching restores it", a.cached_ids() is not None)
+    a.clear_cache()
+
+
 # ---------------------------------------------------------------------------
 # endpoint identification
 # ---------------------------------------------------------------------------
@@ -736,6 +778,7 @@ def main() -> int:
     test_base_url_is_the_prefix_before_v1()
     test_fetch_is_total()
     test_cache_is_keyed_by_endpoint()
+    test_cache_expiry()
     test_is_antseed_by_port_not_name()
     test_active_key_does_not_confuse_sources()
     test_proxy_port_comes_from_the_buyer_config(tmp)

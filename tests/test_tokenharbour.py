@@ -167,6 +167,44 @@ def test_cache_is_keyed_by_token() -> None:
           len(calls) == 1 and models == [], str(len(calls)))
 
 
+def test_cache_expiry() -> None:
+    """An expired catalog must not be served as if it were live.
+
+    ``fetch_models`` has always refused to *reuse* an entry past ``CACHE_TTL``,
+    but ``cached_models`` read it back regardless — so a catalog fetched once
+    was reported by ``/model`` for the rest of the session. The picker exists to
+    show what the gateway serves now; a stale list is the bug it was written to
+    fix. Nothing sleeps: the entry's timestamp is moved backwards, which is the
+    same thing to a ``monotonic()`` comparison.
+    """
+    import time
+
+    from zimzilla import tokenharbour as th
+
+    th.clear_cache()
+    check("expiry: a cold cache has no age", th.catalog_age() is None,
+          str(th.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        th.fetch_models("key-a")
+    check("expiry: a fresh catalog is served", th.cached_ids() is not None)
+    check("expiry: its age is reported, and small",
+          (th.catalog_age() or 999) < 5.0, str(th.catalog_age()))
+
+    models, at = th._CACHE["key-a"]
+    th._CACHE["key-a"] = (models, time.monotonic() - (th.CACHE_TTL + 60))
+    check("expiry: an expired catalog reads as None",
+          th.cached_models() is None, str(th.cached_models()))
+    check("expiry: cached_ids agrees", th.cached_ids() is None)
+    check("expiry: the real age is still reported, unclamped",
+          (th.catalog_age() or 0) >= th.CACHE_TTL, str(th.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        th.fetch_models("key-a")
+    check("expiry: refetching restores it", th.cached_ids() is not None)
+    th.clear_cache()
+
+
 def test_free_models_only() -> None:
     from zimzilla import tokenharbour as th
 
@@ -360,6 +398,7 @@ def main() -> int:
     test_free_detection()
     test_fetch_is_total()
     test_cache_is_keyed_by_token()
+    test_cache_expiry()
     test_free_models_only()
     test_profile_roundtrip()
     test_looks_like_key()

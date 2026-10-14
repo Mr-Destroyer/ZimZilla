@@ -305,6 +305,44 @@ def test_fetch_is_total() -> None:
           models == [] and err == "", repr((models, err)))
 
 
+def test_cache_expiry() -> None:
+    """An expired catalog must not be served as if it were live.
+
+    ``fetch_models`` has always refused to *reuse* an entry past ``CACHE_TTL``,
+    but ``cached_models`` read it back regardless — so a catalog fetched once
+    was reported by ``/model`` for the rest of the session. OpenRouter's list
+    turns over constantly, free tiers especially, so a stale one is exactly the
+    wrong list this picker exists to avoid. Nothing sleeps: the entry's
+    timestamp is moved backwards, which is the same thing to ``monotonic()``.
+    """
+    import time
+
+    from zimzilla import openrouter as o
+
+    o.clear_cache()
+    check("expiry: a cold cache has no age", o.catalog_age() is None,
+          str(o.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        o.fetch_models()
+    check("expiry: a fresh catalog is served", o.cached_ids() is not None)
+    check("expiry: its age is reported, and small",
+          (o.catalog_age() or 999) < 5.0, str(o.catalog_age()))
+
+    models, at = o._CACHE[""]
+    o._CACHE[""] = (models, time.monotonic() - (o.CACHE_TTL + 60))
+    check("expiry: an expired catalog reads as None",
+          o.cached_models() is None, str(o.cached_models()))
+    check("expiry: cached_ids agrees", o.cached_ids() is None)
+    check("expiry: the real age is still reported, unclamped",
+          (o.catalog_age() or 0) >= o.CACHE_TTL, str(o.catalog_age()))
+
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        o.fetch_models()
+    check("expiry: refetching restores it", o.cached_ids() is not None)
+    o.clear_cache()
+
+
 def test_cache_is_keyed_by_token() -> None:
     """A key change refetches rather than serving another account's list."""
     from zimzilla import openrouter as o
@@ -594,6 +632,7 @@ def main() -> int:
     test_anthropic_version_header_is_not_sent()
     test_fetch_is_total()
     test_cache_is_keyed_by_token()
+    test_cache_expiry()
     test_profile_roundtrip()
     test_looks_like_key()
     test_active_key_recognises_host()

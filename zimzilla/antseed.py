@@ -478,10 +478,37 @@ def fetch_models(base_url: str = "", *, timeout: float = 20.0,
     return models, ""
 
 
-def cached_models() -> list[Model] | None:
-    """The last fetched catalog, or ``None`` if there is none. Never fetches."""
+def catalog_age() -> float | None:
+    """Seconds since the cache was filled, or ``None`` if it never was.
+
+    Not clamped to ``CACHE_TTL``: an expired catalog is the case worth
+    reporting, and the caller needs the real number to say how stale it is.
+    """
+    import time
+
     hit = _CACHE.get(_cache_key(""))
-    return hit[1] if hit else None
+    return (time.monotonic() - hit[0]) if hit else None
+
+
+def cached_models() -> list[Model] | None:
+    """The last fetched catalog, if it is still fresh — else ``None``.
+
+    Never fetches. **The ``CACHE_TTL`` check is load-bearing:** ``fetch_models``
+    has always refused to *reuse* an entry past its TTL, but this read it back
+    regardless, so a catalog fetched once was reported as live for the rest of
+    the session. AntSeed's seller set is the most volatile of any source here —
+    peers join and leave constantly — so a stale list is the worst case. An
+    expired entry now reads as ``None``, which callers already handle as "no
+    catalog".
+    """
+    import time
+
+    hit = _CACHE.get(_cache_key(""))
+    if not hit:
+        return None
+    if (time.monotonic() - hit[0]) >= CACHE_TTL:
+        return None
+    return hit[1]
 
 
 def cached_ids() -> list[str] | None:

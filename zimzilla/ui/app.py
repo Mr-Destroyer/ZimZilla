@@ -63,6 +63,40 @@ def _dedupe(items) -> list[str]:
     return list(dict.fromkeys(items))
 
 
+def _ago(seconds: float | None) -> str:
+    """A catalog's age in words — ``"just now"``, ``"4m old"``, ``"3h old"``.
+
+    ``None`` means nothing has been fetched, which is not an age and must not
+    render as one. `/model` uses this to say how current its list is instead of
+    asserting that it is current; the whole point of the line is that the two
+    cases — fetched a moment ago and fetched at startup — look identical
+    otherwise.
+    """
+    if seconds is None:
+        return "never fetched"
+    if seconds < 45:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m old"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h old"
+    return f"{int(seconds // 86400)}d old"
+
+
+def _catalog_clause(age: float | None, ttl: float) -> str:
+    """One honest clause about how current a fetched catalog is.
+
+    ``age`` is ``None`` when nothing was ever fetched. At or past ``ttl`` the
+    module's own readers have already handed back ``None`` in place of the
+    list, so calling that "live" would contradict the very list above it.
+    """
+    if age is None:
+        return "not fetched yet"
+    if age >= ttl:
+        return f"expired ({_ago(age)})"
+    return f"live ({_ago(age)})"
+
+
 #: `/crack`'s default budget. Thirty minutes, chosen so the ladder's *useful*
 #: stages actually fit the case this command exists for. A Kerberoast hash —
 #: what `/ad` produces — runs the dictionary in ~12s and best64 in ~16m on this
@@ -1977,23 +2011,27 @@ class ZimZillaApp(App):
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
+            # Say how current the list is, not merely that one exists. A cache
+            # filled at startup and a cache filled a second ago read identically
+            # in the transcript, and only one of them is worth trusting — so
+            # each of these names the age and its refresh command. The age is
+            # read from the module rather than assumed from the list being
+            # non-empty, which is what let a three-hour-old catalog be called
+            # "live".
             if active == "antseed":
                 t.append(
-                    "  the catalog is live — /antseed-models shows the free "
-                    "ones and\nthe seller to pin; pinning is what makes a free "
-                    "model actually route\n", style=p.dim)
+                    f"  catalog {_catalog_clause(as_mod.catalog_age(), as_mod.CACHE_TTL)}"
+                    " — /antseed-models shows the free\nones and the seller to "
+                    "pin; pinning is what makes a free model actually route\n",
+                    style=p.dim)
             elif active == "tokenharbour":
-                t.append("  the catalog is live — /tokenharbour-models refetches it\n",
-                         style=p.dim)
+                t.append(
+                    f"  catalog {_catalog_clause(th_mod.catalog_age(), th_mod.CACHE_TTL)}"
+                    " — /tokenharbour-models refetches it\n", style=p.dim)
             elif active == "logfare":
-                # Say where the list came from, because the two cases look
-                # identical in the transcript and only one of them is current.
-                if lf_catalog is None:
-                    t.append("  list not fetched yet — /logfare-models refreshes it\n",
-                             style=p.dim)
-                else:
-                    t.append("  the catalog is live — /logfare-models refetches it\n",
-                             style=p.dim)
+                t.append(
+                    f"  catalog {_catalog_clause(lf_mod.catalog_age(), lf_mod.CACHE_TTL)}"
+                    " — /logfare-models refetches it\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -2018,7 +2056,16 @@ class ZimZillaApp(App):
         # the membership test. Without this, every free AntSeed model would be
         # refused by the very check that exists to catch typos.
         check_name = name.split("@", 1)[1] if (active == "antseed" and "@" in name) else name
-        if active in ("tokenharbour", "openrouter", "antseed") and (
+        # Logfare is in this tuple for the same reason as the others, and its
+        # absence was the same bug a third time: its list is FETCHED, so with a
+        # cold or expired cache `models` is the hardcoded KNOWN_MODELS fallback,
+        # and a model Logfare serves right now gets refused as "not served by
+        # logfare" against a list that is not Logfare's. Measured on this box:
+        # `mimo-v2.6-flash` was live, absent from KNOWN_MODELS, and refused.
+        #
+        # It is also the source the operator is most likely to be on, so the
+        # wrong answer was the common case rather than the corner.
+        if active in ("tokenharbour", "openrouter", "antseed", "logfare") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -2036,11 +2083,20 @@ class ZimZillaApp(App):
                     fetched, _ = as_mod.fetch_models()
                 else:
                     fetched = list(as_catalog)
+            elif active == "logfare":
+                if lf_catalog is None:
+                    # The status API is public — no key, so this works before
+                    # anything has been authenticated.
+                    fetched, _ = lf_mod.fetch_models()
+                else:
+                    fetched = list(lf_catalog)
             if fetched is not None:
                 if active == "tokenharbour":
                     th_catalog = fetched
                 elif active == "antseed":
                     as_catalog = fetched
+                elif active == "logfare":
+                    lf_catalog = fetched
                 models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
@@ -2329,12 +2385,47 @@ class ZimZillaApp(App):
         self.cfg.base_url = src.base_url
         self.cfg.auth_token = token
         self.cfg.api_key = ""          # empty, so the auth_token stays authoritative
-        self.cfg.model = profile.get("ANTHROPIC_MODEL") or src.model
+        # The profile's model is *stored* — written by hand at setup and never
+        # revisited — so it can name a model the upstream has since retired.
+        # `src.model` cannot: it is a constant in `sources._build`. Check the
+        # stored one against the live catalog now, while this switch is already
+        # paying for a round-trip, instead of letting the first turn find out
+        # as a 404 from the upstream.
+        chosen = profile.get("ANTHROPIC_MODEL") or src.model
+        chosen, replaced = await self._verify_model_for(src, chosen)
+        self.cfg.model = chosen
+        if replaced:
+            self._sys_line(
+                f"{replaced} is no longer served by {src.label} — "
+                f"using {chosen}", warn=True)
         # Drop the cached client so the next turn rebuilds against the new host.
         self.agent._client = None
 
         sources_mod.set_current(src.key)
         self._refresh_after_source_change(src.label, f":{src.port}, {detail}")
+
+    async def _verify_model_for(self, src, name: str) -> tuple[str, str | None]:
+        """``(model_to_use, replaced_name_or_None)`` for a just-started source.
+
+        Only Logfare publishes a catalog, and only Logfare's local proxy has a
+        profile that can go stale, so this is where the check belongs. A fetch
+        that fails leaves the stored name alone: an unreachable status API is
+        not evidence that a model was retired, and refusing to switch on it
+        would be worse than the 404 it is trying to prevent.
+        """
+        if src.key != "logfare":
+            return name, None
+        models, _ = await asyncio.to_thread(lf_mod.fetch_models)
+        if not models:
+            return name, None
+        served = {m.id for m in models}
+        if name in served:
+            return name, None
+        # The declared default is the fallback, not the current name: it is the
+        # one string guaranteed to be both in the table and in the catalog.
+        if src.model in served:
+            return src.model, name
+        return name, None
 
     # ---- TokenHarbour ----------------------------------------------------
     # A hosted Anthropic-protocol gateway, not a local proxy: the key is set by

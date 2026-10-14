@@ -165,7 +165,11 @@ ANTHROPIC_MODEL=$MODEL_QWEN zimzilla   # via a profile alias
 
 Logfare retires models without notice, so ZimZilla fetches the live list from
 Logfare's own status API rather than trusting a baked-in one. `/logfare-models`
-shows what is up right now, with uptime, and `/model` is built from it.
+shows what is up right now, with uptime, and `/model` is built from it — and the
+fetched list expires after five minutes, so a long session cannot keep offering
+a catalog that has since moved on. `/model` says how old its list is
+(`catalog live (2m old)`, `catalog expired (1h old)`) rather than asserting that
+it is current.
 
 ### Updates
 

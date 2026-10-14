@@ -160,14 +160,39 @@ def model_ids(**kw) -> tuple[list[str] | None, str]:
     return [m.id for m in models], ""
 
 
+def catalog_age() -> float | None:
+    """Seconds since the cache was filled, or ``None`` if it never was.
+
+    The age is what lets a caller say *how* stale a list is instead of only
+    whether one exists. It is deliberately not clamped to ``CACHE_TTL``: an
+    expired catalog is exactly the case worth reporting, and a caller that
+    cannot see the real number cannot tell "fetched a minute ago" from
+    "fetched when this session started, hours ago".
+    """
+    return (time.monotonic() - _CACHE[0][1]) if _CACHE else None
+
+
 def cached_models() -> list[Model] | None:
-    """The last-fetched catalog, or ``None`` if nothing has been fetched.
+    """The last-fetched catalog, if it is still fresh — else ``None``.
 
     ``/model`` runs on the UI thread and must not block on a fetch, so it reads
     whatever the last ``/logfare-models`` (or the startup warm-up) left behind.
-    A cold cache returns ``None`` and the caller falls back to its own list.
+
+    **Expiry is checked here, and that is load-bearing.** This used to return
+    the last catalog however old it was, while ``fetch_models`` refused to
+    reuse anything past ``CACHE_TTL`` — so a cache filled once at startup was
+    served for the rest of the session, and ``/model`` called it live. Logfare
+    retires models without notice; the whole reason the catalog is fetched
+    rather than declared is that it changes. An expired cache now reads as
+    ``None``, which every caller already treats as "no catalog", so the
+    fallback and the honest "not fetched yet" wording both follow for free.
     """
-    return list(_CACHE[0][0]) if _CACHE else None
+    if not _CACHE:
+        return None
+    models, at = _CACHE[0]
+    if (time.monotonic() - at) >= CACHE_TTL:
+        return None
+    return list(models)
 
 
 def cached_ids() -> list[str] | None:
