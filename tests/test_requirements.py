@@ -61,6 +61,18 @@ def main() -> int:
     check("requirements: keeps textual's rich>=14.2 floor",
           bool(rich) and ">=14.2" in rich[0], str(rich))
 
+    # zimzilla/ui/markdown.py imports markdown_it directly. rich and textual
+    # both require it today, so it would arrive anyway — which is exactly why
+    # it needs declaring: an undeclared import that happens to work is one an
+    # upstream release can remove, and the failure would be an ImportError at
+    # startup, not a test failure.
+    check("requirements: declares markdown-it-py, which ui/markdown.py imports",
+          "markdown-it-py" in names, str(names))
+    md_mod = (ROOT / "zimzilla" / "ui" / "markdown.py").read_text()
+    check("requirements: and ui/markdown.py really does import it",
+          "from markdown_it import" in md_mod,
+          "no 'from markdown_it import' in ui/markdown.py")
+
     # Cross-check: the interpreter check setup.sh runs before it wires up a
     # proxy must test the HARNESS's deps, not the proxy's — `import litellm`
     # there would fail on every correctly-installed machine.

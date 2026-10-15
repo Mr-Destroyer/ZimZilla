@@ -346,13 +346,18 @@ class ChatPane(Vertical):
             return None
 
     def set_stream(self, text: str) -> None:
-        from .renderers import agent_text
+        from .markdown import markdown_text
 
         w = self._stream_widget()
         if w is None:
             return
         w.remove_class("hidden")
-        body = agent_text(text, self.palette).copy()
+        # The flat text form, not the renderable one: this runs on every delta
+        # and on the cursor blink, and a `Table` or a `Syntax` here would be
+        # rebuilt several times a second for a line that is still arriving.
+        # Markdown is resolved anyway, so the half-written answer reads as
+        # prose rather than as its own source while it streams.
+        body = markdown_text(text, self.palette).copy()
         cursor = "▊" if self._cursor_on else " "
         body.append(cursor, style=f"bold {self.palette.accent}")
         w.update(body)

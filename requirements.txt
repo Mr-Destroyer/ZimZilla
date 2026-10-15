@@ -21,6 +21,12 @@ textual>=0.80
 rich>=14.2.0
 pyyaml>=6.0
 
+# The assistant's markdown parser (zimzilla/ui/markdown.py). Listed explicitly
+# even though rich and textual both require it today — ZimZilla imports it
+# directly, and a transitive dependency it does not declare is one an upstream
+# release can take away without anything here noticing until import time.
+markdown-it-py>=2.2.0
+
 # zimzilla itself, editable, so the `zimzilla` console script is installed and
 # the package is importable from any directory.
 -e .

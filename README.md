@@ -78,6 +78,13 @@ want; it works out the steps, does them, and shows you everything it did.
 - **Edits like a human.** Changes arrive as diffs you can read before they land.
 - **Shows its work.** Every command, every file touched, every result — visible
   in the transcript as it happens, not buried in a log.
+- **Reads its own markdown.** A model answers in headings, bold, lists, tables
+  and fenced code whether or not anything asked it to. The transcript renders
+  that rather than showing you the source: `**Asset:**` arrives as a bold
+  **Asset**, a dash-and-space becomes a bullet, a pipe grid becomes a real
+  table that wraps, and a fenced block arrives syntax-highlighted in the same
+  theme tool output uses. It streams that way too, so a half-arrived answer
+  reads as prose rather than as markup.
 - **Keeps score.** Live token counts and a running cost estimate, per turn and
   per session.
 - **Answers to a dial.** A mode switch decides whether it merely investigates,
@@ -1247,6 +1254,7 @@ zimzilla/                     the package
   termbg.py                   asks the terminal for its own background
   termcolors.py               ...and for its foreground and 16 ANSI slots
   ui/                         the terminal interface
+    markdown.py               a model's answer, rendered as markdown not as source
 
 allow.yaml.example            declared targets
 out-of-scope.yaml.example     hosts that are never touched
@@ -1267,6 +1275,7 @@ python tests/test_hunt.py          # the campaign engine — wave loop, per-wave
 python tests/test_ad.py            # /ad — the gate, the interlock, the tool probe
 python tests/test_crack.py         # /crack — identification, the estimate, a real crack
 python tests/test_web.py           # the wave web — geometry and the tracker
+python tests/test_markdown.py      # the markdown renderer — prose, lists, tables, code
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_osint_tree.py    # the result tree — parser, real reports, /osint-tree
 python tests/test_update.py        # self-update — real git, throwaway repos

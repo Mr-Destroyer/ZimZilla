@@ -11,6 +11,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from ..theme import TOOL_ICONS, Palette
+from .markdown import markdown_line, markdown_text
 
 # ---------------------------------------------------------------------------
 # Language detection for syntax highlighting
@@ -435,15 +436,19 @@ def banner_renderable(palette: Palette, revealed: int | None = None) -> Text:
 
 
 def agent_text(text: str, palette: Palette) -> Text:
-    """Assistant prose, dim-green for body text with brighter code ticks."""
-    t = Text()
-    parts = re.split(r"(`[^`]*`)", text)
-    for part in parts:
-        if part.startswith("`") and part.endswith("`") and len(part) > 1:
-            t.append(part.strip("`"), style=f"bold {palette.accent}")
-        else:
-            t.append(part, style=palette.primary)
-    return t
+    """Assistant prose, markdown resolved.
+
+    This used to handle one construct — inline backticks — and hand everything
+    else through as its own source text, so a model's ``**Asset:**`` and
+    ``- item`` reached the operator with the markup still on. It now delegates
+    to ``markdown_text``, which parses with CommonMark rather than a regex.
+
+    The signature and the return type are unchanged on purpose: six call sites
+    hand this function a model's answer and expect a ``Text`` back, and the
+    streaming path calls it per delta. See ``ui/markdown.py`` for the two entry
+    points and why this one is the cheap one.
+    """
+    return markdown_text(text, palette)
 
 
 # ---- team workers ---------------------------------------------------------
@@ -465,11 +470,13 @@ def agent_line(name: str, text: str, color: str, palette: Palette,
                width: int = 14) -> Text:
     """A labelled block of worker prose, one per flush.
 
-    Body text goes through ``agent_text`` so backticked code reads the same as
-    it does anywhere else in the transcript.
+    Body text goes through ``markdown_line`` so backticked code reads the same
+    as it does anywhere else in the transcript — and, unlike ``agent_text``,
+    flattened onto one line. The ``[name]`` tag labels the line that follows
+    it, so a worker's markdown must not break that line in two.
     """
     t = agent_label(name, color, palette, width)
-    t.append_text(agent_text(text, palette))
+    t.append_text(markdown_line(text, palette))
     return t
 
 

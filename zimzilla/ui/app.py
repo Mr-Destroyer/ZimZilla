@@ -45,6 +45,7 @@ from ..scope import Scope
 from ..theme import (SYSTEM_THEME, THEME_NAMES, THINKING_VERBS, agent_color,
                      get_palette, set_current_theme)
 from . import renderers as R
+from .markdown import markdown_renderable
 from .boot import BootScreen
 from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
@@ -1642,7 +1643,11 @@ class ZimZillaApp(App):
     def _flush_stream(self, chat: ChatPane, palette) -> None:
         if self._stream_buf.strip():
             chat.clear_stream()
-            chat.write_block(R.agent_text(self._stream_buf, palette))
+            # The finished answer, so this is the expensive half: fenced code
+            # comes back highlighted and a table comes back as a real Table.
+            # The live line above uses the flat text form, which is cheap
+            # enough to run on every delta.
+            chat.write_block(markdown_renderable(self._stream_buf, palette))
             self._stream_buf = ""
 
     def _cost_line(self, ev) -> None:
