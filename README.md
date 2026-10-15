@@ -239,6 +239,7 @@ will restart the checkout under you on the next launch.
 --max-iterations N   ceiling on autonomous steps (default 40)
 --unsafe             disable the filesystem jail
 --panes              run under tmux; ctrl+b h/v open more ZimZilla panes
+--resume SESSION     restore a saved session at launch (used by /panes)
 --list-models
 --version
 ```
@@ -250,6 +251,14 @@ do not collide with your own tmux. `ctrl+b h` splits right and `ctrl+b v`
 splits down, each new pane running another ZimZilla that shares a mailbox with
 its siblings — so the panes' agents can message each other with `agent_send`.
 The status bar carries the reminder.
+
+**The prefix keys are tmux bindings, not ZimZilla bindings** — they only exist
+in a session tmux started. In an ordinary session `ctrl+b` is not a prefix at
+all, so `ctrl+b h` types an `h` into the prompt. If you are already in a
+session and want panes, type `/panes`: it saves the conversation, re-opens the
+same session under tmux, and replays the transcript there, so you carry on
+where you were. Panes opened afterwards are fresh agents — they can ask their
+peers what is going on rather than being handed a copy of your history.
 
 **If you launch it from inside an existing tmux session, the prefix needs
 pressing twice.** The outer server reads `ctrl+b` first and never forwards it,
@@ -525,6 +534,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/scope` | scope status and entries |
 | `/theme green\|amber\|cyan\|system` | switch palette — `system` adopts the terminal's own colours |
 | `/rain` | toggle the matrix rain |
+| `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
 | `/save [name]` | write the session to disk |
 | `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |

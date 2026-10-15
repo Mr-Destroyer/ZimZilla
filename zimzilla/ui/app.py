@@ -1103,6 +1103,12 @@ class ZimZillaApp(App):
             self.agent.scope.armed,
         )
         self._splash()
+        # A session relaunched by `/panes` arrives with its conversation already
+        # in `agent.messages` and an empty transcript pane — `/load` restores the
+        # history but nothing repaints it. Replaying it here is what makes
+        # "your session continues there" true rather than a claim the operator
+        # has to take on faith.
+        self._replay_transcript()
         # The split is a deliberate weakening on upgrade, so it is said out
         # loud in the transcript too — not just the boot checks, which scroll
         # away the moment the first prompt is typed.
@@ -1158,6 +1164,33 @@ class ZimZillaApp(App):
         elif text:
             inp.value = text
             inp.cursor_position = len(inp.value)
+
+    def _replay_transcript(self) -> None:
+        """Redraw a restored conversation in the transcript pane.
+
+        Only fires when the agent already holds history at boot — which is the
+        `/panes` relaunch, since a normal launch starts empty. The renderers are
+        the same ones a live turn uses, so a replayed answer looks like the
+        answer did.
+        """
+        from .. import panes as _panes
+
+        pairs = _panes.transcript_of(self.agent.messages)
+        if not pairs:
+            return
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        chat.write_block(
+            R.warning_block(
+                f"resumed — {len(pairs)} message(s) from before the relaunch",
+                p,
+            )
+        )
+        for role, text in pairs:
+            if role == "user":
+                chat.write_block(R.user_prompt_block(text, p))
+            else:
+                chat.write_block(markdown_renderable(text, p))
 
     def _submit_text(self, text: str) -> None:
         text = text.strip()
@@ -1794,6 +1827,7 @@ class ZimZillaApp(App):
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
             "report-bug-hunt": lambda a: self._cmd_report_bug_hunt(a),
+            "panes": lambda a: self._cmd_panes(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
@@ -1843,6 +1877,7 @@ class ZimZillaApp(App):
             ("/antseed-models", "AntSeed's free models, and the peer to pin"),
             ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-models", "fetch the live catalog; show what is up"),
+            ("/panes", "re-open this session under tmux — ctrl+b h/v split"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
@@ -3031,6 +3066,51 @@ class ZimZillaApp(App):
             self._sys_line(f"saved session → {path}", ok=True)
         except Exception as e:  # noqa: BLE001
             self._sys_line(f"save failed: {e}", warn=True)
+
+    def _cmd_panes(self, args=None) -> None:
+        """Re-open this session under tmux so ctrl+b h/v work.
+
+        The prefix keys are tmux bindings, not ZimZilla bindings, so they only
+        exist in a session tmux started — which is why pressing ctrl+b h in an
+        ordinary session just types an `h`. Nothing inside the running app can
+        fix that: tmux needs the terminal, and the app is holding it. So this
+        saves the conversation, asks to exit, and lets `__main__` relaunch once
+        the terminal is free.
+        """
+        from .. import panes as _panes
+
+        if _panes.current_session() is not None:
+            self._sys_line(
+                "already in a ZimZilla pane — ctrl+b h splits right, "
+                "ctrl+b v splits down",
+                ok=True,
+            )
+            return
+        if not _panes.tmux_available():
+            self._sys_line(
+                "tmux is not installed — `sudo apt install tmux` first", warn=True
+            )
+            return
+
+        # Keep the conversation across the relaunch. A save failure is not fatal
+        # — panes still work — so it is reported and the relaunch continues
+        # rather than the command dying on a read-only home.
+        resume = None
+        try:
+            resume = str(session_mod.save(self.cfg, self.agent, "panes"))
+            self._sys_line("saving the conversation…", ok=True)
+        except Exception as e:  # noqa: BLE001
+            self._sys_line(
+                f"could not save the conversation ({e}) — relaunching without it",
+                warn=True,
+            )
+
+        self._sys_line(
+            "relaunching under tmux — ctrl+b h splits right, ctrl+b v splits down",
+            ok=True,
+        )
+        # Handed back as the app's exit value; __main__ does the relaunch.
+        self.exit(_panes.Relaunch(resume=resume))
 
     def _cmd_load(self, args) -> None:
         p = self.palette
@@ -5262,6 +5342,7 @@ class ZimZillaApp(App):
             ("/models", "free models of an upstream — /models [source]", "models"),
             ("/logfare-models", "fetch the live catalog; show what is up",
              "logfare-models"),
+            ("/panes", "re-open this session under tmux", "panes"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),

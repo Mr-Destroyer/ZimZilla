@@ -40,11 +40,28 @@ import shlex
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 #: Environment variable naming the mailbox session. Set in tmux's global
 #: session environment by the generated config, so every pane inherits it.
 ENV_SESSION = "ZIMZILLA_PANE_SESSION"
+
+
+@dataclass(frozen=True)
+class Relaunch:
+    """A request from the running TUI to re-open this session under tmux.
+
+    ``/panes`` cannot start tmux from inside a running Textual app: tmux has to
+    own the terminal, and the app is holding it. So the command saves the
+    conversation, returns one of these as the app's exit value, and
+    ``__main__`` performs the relaunch once the terminal is free again.
+
+    ``resume`` is the session file the new process should pick the conversation
+    back up from, or None to start clean.
+    """
+
+    resume: str | None = None
 
 #: tmux server socket used by the pane launcher, so ZimZilla panes do not
 #: collide with the operator's own tmux.
@@ -253,6 +270,46 @@ def format_messages(messages: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Resuming a conversation in the relaunched process
+# ---------------------------------------------------------------------------
+
+def transcript_of(messages: list[dict]) -> list[tuple[str, str]]:
+    """Flatten a stored conversation into ``(role, text)`` pairs for replay.
+
+    ``agent.messages`` is the wire format — a mix of plain strings and lists of
+    content blocks — which is what the model needs but not what a transcript
+    pane shows. This walks it into the two things a reader recognises: what the
+    operator typed, and what the assistant answered. Tool traffic is dropped
+    rather than replayed: the tool panels are live progress, and a wall of them
+    for work already finished would bury the conversation.
+
+    Pure, so the suite can test the walk without an app or a session file.
+    """
+    out: list[tuple[str, str]] = []
+    for m in messages:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            text = content
+        else:
+            parts = []
+            for b in content or []:
+                if not isinstance(b, dict):
+                    continue
+                # Only prose. tool_use / tool_result blocks are deliberately
+                # skipped — see the docstring.
+                if b.get("type") == "text" and b.get("text"):
+                    parts.append(str(b["text"]))
+            text = "\n".join(parts)
+        text = text.strip()
+        if text:
+            out.append((role, text))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Spawning
 # ---------------------------------------------------------------------------
 
@@ -277,8 +334,15 @@ def apply_config(conf: Path, socket: str = TMUX_SOCKET) -> None:
     subprocess.call([*base, "source-file", str(conf)])
 
 
-def launch(conf: Path, zimzilla_cmd: str, workdir: Path) -> int:
+def launch(conf: Path, zimzilla_cmd: str, workdir: Path,
+           first_cmd: str | None = None) -> int:
     """Start (or attach to) the ZimZilla tmux session with the pane bindings.
+
+    ``first_cmd`` is what the *initial* pane runs, when that should differ from
+    what the ``ctrl+b h``/``v`` bindings run. ``/panes`` uses it to resume the
+    saved conversation in the first pane only: panes opened afterwards are new
+    agents, and cloning the same history into each of them would defeat the
+    point of them being separate agents that message each other.
 
     Runs tmux in the foreground. Returns its exit status.
     """
@@ -289,6 +353,6 @@ def launch(conf: Path, zimzilla_cmd: str, workdir: Path) -> int:
         "tmux", "-L", TMUX_SOCKET, "-f", str(conf),
         "new-session", "-A", "-s", TMUX_SESSION,
         "-c", str(workdir),
-        zimzilla_cmd,
+        first_cmd or zimzilla_cmd,
     ]
     return subprocess.call(argv)

@@ -13,11 +13,13 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from zimzilla import panes, tools  # noqa: E402
+from zimzilla import __main__ as main_mod  # noqa: E402
 from zimzilla.agent import Agent  # noqa: E402
 from zimzilla.config import Config  # noqa: E402
 
@@ -107,6 +109,108 @@ def main() -> int:
     cfg3 = Config.from_env(workdir=tmp, state_dir=tmp / "state")
     text = panes.format_messages(panes.drain(panes.mailbox_root(cfg3.state_dir, "zimzilla"), "2"))
     check("receiver sees message", "ping" in text and "from 7" in text, text)
+
+    # --- /panes: the relaunch request -------------------------------------
+    # `transcript_of` is what makes "your session continues there" true: it
+    # flattens the wire-format history into the (role, text) pairs the boot
+    # replay draws. Tool traffic is dropped — the panels are live progress, and
+    # a wall of them for finished work would bury the conversation.
+    check("Relaunch carries the resume path",
+          panes.Relaunch(resume="/x/y.json").resume == "/x/y.json")
+    check("Relaunch defaults to no resume", panes.Relaunch().resume is None)
+
+    msgs = [
+        {"role": "user", "content": "what port"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "4001"},
+            {"type": "tool_use", "name": "bash", "id": "t1", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "secret output"},
+        ]},
+        {"role": "assistant", "content": "done"},
+    ]
+    pairs = panes.transcript_of(msgs)
+    check("transcript_of keeps prose in order",
+          pairs == [("user", "what port"), ("assistant", "4001"), ("assistant", "done")],
+          str(pairs))
+    check("transcript_of drops tool traffic",
+          not any("secret output" in t for _, t in pairs), str(pairs))
+    check("transcript_of on empty history", panes.transcript_of([]) == [])
+    check("transcript_of skips blank turns",
+          panes.transcript_of([{"role": "user", "content": "   "}]) == [])
+    check("transcript_of tolerates junk blocks",
+          panes.transcript_of([{"role": "assistant", "content": [None, 7, {}]}]) == [])
+
+    # --- /panes: the pane command's argv ----------------------------------
+    # `--panes` would recurse and `--resume` belongs to the first pane only, so
+    # both are stripped from what the ctrl+b h/v bindings run. Everything else
+    # the operator typed must survive, or `--panes --theme amber` would open
+    # green panes.
+    check("argv: --panes stripped",
+          main_mod._pane_inner_argv(["--panes"]) == [])
+    check("argv: other flags survive",
+          main_mod._pane_inner_argv(["--panes", "--theme", "amber"]) == ["--theme", "amber"])
+    check("argv: --resume VALUE stripped",
+          main_mod._pane_inner_argv(["--panes", "--resume", "/s.json"]) == [])
+    check("argv: --resume=VALUE stripped",
+          main_mod._pane_inner_argv(["--panes", "--resume=/s.json", "-m", "x"]) == ["-m", "x"])
+    check("argv: unrelated value kept",
+          main_mod._pane_inner_argv(["--panes", "-m", "x"]) == ["-m", "x"])
+
+    # --- /panes: the command itself ---------------------------------------
+    # The app cannot start tmux while it holds the terminal, so the command
+    # exits with a Relaunch request and __main__ performs it. These drive the
+    # command with the app unmounted, stubbing the two things that need a
+    # mounted DOM.
+    from zimzilla.ui.app import ZimZillaApp  # noqa: E402
+    from zimzilla import session as session_mod  # noqa: E402
+
+    acfg = Config.from_env(workdir=tmp / "appwd", state_dir=tmp / "appstate")
+    app = ZimZillaApp(acfg)
+    said: list[str] = []
+    app._sys_line = lambda msg, **k: said.append(msg)
+    exited: dict = {}
+    app.exit = lambda result=None, **k: exited.update(result=result)
+
+    # Inside a pane already: nothing to do, and it must not exit.
+    os.environ[panes.ENV_SESSION] = "zimzilla"
+    os.environ["TMUX_PANE"] = "%1"
+    app._cmd_panes()
+    check("/panes inside a pane does not exit", "result" not in exited, str(exited))
+    check("/panes inside a pane says the keys",
+          any("ctrl+b h" in s for s in said), str(said))
+    os.environ.pop(panes.ENV_SESSION, None)
+    os.environ.pop("TMUX_PANE", None)
+
+    # Outside a pane with tmux present: save, then ask to relaunch.
+    said.clear(); exited.clear()
+    app._cmd_panes()
+    r = exited.get("result")
+    check("/panes outside a pane returns a Relaunch", isinstance(r, panes.Relaunch), str(exited))
+    check("/panes saves the conversation to resume from",
+          bool(r and r.resume and Path(r.resume).exists()), str(r))
+    check("/panes announces the relaunch",
+          any("relaunching under tmux" in s for s in said), str(said))
+
+    # No tmux: refuse, and do not exit — exiting would leave no session at all.
+    said.clear(); exited.clear()
+    with mock.patch.object(panes, "tmux_available", lambda: False):
+        app._cmd_panes()
+    check("/panes without tmux does not exit", "result" not in exited, str(exited))
+    check("/panes without tmux says how to fix it",
+          any("tmux is not installed" in s for s in said), str(said))
+
+    # A failed save must not cost the operator the relaunch — panes still work
+    # without history, so the command carries on with resume=None.
+    said.clear(); exited.clear()
+    with mock.patch.object(session_mod, "save", side_effect=OSError("read-only")):
+        app._cmd_panes()
+    r = exited.get("result")
+    check("/panes survives a failed save", isinstance(r, panes.Relaunch), str(exited))
+    check("/panes reports the failed save and drops resume",
+          r is not None and r.resume is None
+          and any("could not save" in s for s in said), f"{r} {said}")
 
     # --- tmux config ------------------------------------------------------
     conf = panes.tmux_conf("/usr/bin/zimzilla --workdir '/tmp/x y'")

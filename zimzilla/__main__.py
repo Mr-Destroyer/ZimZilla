@@ -13,6 +13,7 @@ from . import antseed as as_mod
 from . import logfare as lf_mod
 from . import openrouter as or_mod
 from . import sources as sources_mod
+from . import session as session_mod
 from . import tokenharbour as th_mod
 from . import update as update_mod
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL, find_agents_file
@@ -54,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--panes", action="store_true",
                         help="start in a tmux session where ctrl+b h / ctrl+b v open "
                              "another ZimZilla pane, and the panes' agents can message each other")
+    parser.add_argument("--resume", default=None, metavar="SESSION",
+                        help="restore a saved session at launch (used by /panes)")
     parser.add_argument("--version", action="version", version=f"zimzilla {__version__}")
     return parser
 
@@ -73,6 +76,38 @@ def _launcher_path() -> str | None:
     if launcher.is_file() and os.access(launcher, os.X_OK):
         return str(launcher)
     return None
+
+
+#: Flags the tmux *pane* command must not carry. `--panes` would recurse, and
+#: `--resume` belongs to the first pane alone — panes opened later are new
+#: agents, and giving each of them the same history would defeat the point of
+#: them being separate agents that message each other.
+_PANE_STRIP_FLAGS = ("--panes",)
+_PANE_STRIP_WITH_VALUE = ("--resume",)
+
+
+def _pane_inner_argv(argv: list[str]) -> list[str]:
+    """``argv`` minus the flags that belong to the launcher, not to a pane.
+
+    Handles both ``--resume X`` and ``--resume=X``; anything unrecognised is
+    passed through untouched, so an unrelated flag is never eaten.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in _PANE_STRIP_FLAGS:
+            i += 1
+            continue
+        if a in _PANE_STRIP_WITH_VALUE:
+            i += 2
+            continue
+        if any(a.startswith(f + "=") for f in _PANE_STRIP_WITH_VALUE):
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,13 +144,19 @@ def main(argv: list[str] | None = None) -> int:
             print("zimzilla: --panes needs tmux — install it (e.g. `sudo apt install tmux`)",
                   file=sys.stderr)
             return 2
-        inner = [a for a in raw_argv if a != "--panes"]
         launcher = _launcher_path()
         base = [launcher] if launcher else [sys.executable, "-m", "zimzilla"]
-        zim_cmd = " ".join(shlex.quote(p) for p in [*base, *inner])
+        # The pane command keeps everything the operator typed, minus the
+        # launcher's own flags — so `zimzilla --panes --theme amber` opens
+        # amber panes. The first pane additionally resumes, when asked.
+        zim_cmd = " ".join(shlex.quote(p) for p in [*base, *_pane_inner_argv(raw_argv)])
+        first_cmd = zim_cmd
+        if args.resume:
+            first_cmd = " ".join(shlex.quote(p) for p in [
+                *base, "--resume", args.resume, *_pane_inner_argv(raw_argv)])
         state = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
         conf = panes_mod.write_tmux_conf(state, zim_cmd)
-        return panes_mod.launch(conf, zim_cmd, workdir)
+        return panes_mod.launch(conf, zim_cmd, workdir, first_cmd=first_cmd)
 
     # Target scope: two files with one job each. allow.yaml arms the session
     # (its presence means the operator has declared their targets, so tools run
@@ -274,7 +315,23 @@ def main(argv: list[str] | None = None) -> int:
     colors = detect_colors()
     app = ZimZillaApp(cfg, term_bg=colors.dark_bg if colors else None,
                       term_colors=colors)
-    app.run()
+    # `--resume` (what `/panes` passes to the relaunched process) restores the
+    # conversation before the first frame, so the replayed transcript is drawn
+    # by the same boot path that draws a fresh one. A bad path is reported and
+    # the session starts clean rather than refusing to start at all.
+    if args.resume:
+        ok, msg = session_mod.load(cfg, app.agent, args.resume)
+        if not ok:
+            print(f"zimzilla: {msg} — starting a fresh session", file=sys.stderr)
+    result = app.run()
+    # `/panes` cannot start tmux itself — tmux has to own the terminal, and the
+    # app is holding it — so the command exits with this request and the
+    # relaunch happens here, once the terminal is free.
+    from . import panes as panes_mod
+    if isinstance(result, panes_mod.Relaunch):
+        relaunch_argv = _pane_inner_argv(raw_argv)
+        resume = ["--resume", result.resume] if result.resume else []
+        return main(["--panes", *resume, *relaunch_argv])
     return 0
 
 
