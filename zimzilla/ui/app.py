@@ -39,6 +39,7 @@ from .. import sources as sources_mod
 from .. import team as team_mod
 from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
+from .. import unorouter as uno_mod
 from ..agent import Agent, Deliverable
 from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
 from ..scope import Scope
@@ -1790,6 +1791,7 @@ class ZimZillaApp(App):
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
         "openrouter-api-setup", "zim-openrouter", "models",
+        "unorouter-api-setup", "unorouter-models", "zim-unorouter",
         "zim-antseed", "antseed-models",
         "logfare-models",
         # Reading an archived report back is a disk read and a write to the
@@ -1837,6 +1839,9 @@ class ZimZillaApp(App):
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
             "openrouter-api-setup": lambda a: self._cmd_gateway_key("openrouter", a),
+            "zim-unorouter": lambda a: self._cmd_zim_gateway("unorouter"),
+            "unorouter-api-setup": lambda a: self._cmd_gateway_key("unorouter", a),
+            "unorouter-models": lambda a: self._cmd_models(["unorouter"]),
             "antseed-models": lambda a: self._cmd_models(["antseed"]),
             "models": lambda a: self._cmd_models(a),
             "logfare-models": lambda a: self._cmd_logfare_models(a),
@@ -1869,11 +1874,14 @@ class ZimZillaApp(App):
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
+            ("/zim-unorouter", "switch upstream to UnoRouter    (hosted, free models)"),
             ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
             ("/zim-source", "show upstream sources and their status"),
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
             ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
+            ("/unorouter-api-setup [key]", "store your UnoRouter API key (optional)"),
+            ("/unorouter-models", "the live free catalog — what is free and usable"),
             ("/antseed-models", "AntSeed's free models, and the peer to pin"),
             ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-models", "fetch the live catalog; show what is up"),
@@ -2014,6 +2022,10 @@ class ZimZillaApp(App):
         # reason as the others — the fetch is the slow part and this is a render.
         as_catalog = (as_mod.cached_models()
                       if active == "antseed" else None)
+        # UnoRouter's is fetched as well, and is read once here for the same
+        # reason: the fetch is the slow part and this is a render.
+        uno_catalog = (uno_mod.cached_models()
+                       if active == "unorouter" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -2025,7 +2037,7 @@ class ZimZillaApp(App):
             if active:
                 src = sources_mod.discover().get(active)
                 hosted = {"tokenharbour": "TokenHarbour", "openrouter": "OpenRouter",
-                          "antseed": "AntSeed"}
+                          "unorouter": "UnoRouter", "antseed": "AntSeed"}
                 label = src.label if src else hosted.get(active, active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
@@ -2034,7 +2046,8 @@ class ZimZillaApp(App):
             # Free first, then the rest. A hosted gateway's list is long and
             # changes; the operator almost always wants the free ones, so they
             # lead — with the model in use never hidden, whatever it costs.
-            order = self._model_display_order(models, th_catalog or as_catalog)
+            order = self._model_display_order(
+                models, th_catalog or as_catalog or uno_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -2048,7 +2061,8 @@ class ZimZillaApp(App):
                             shown = _m.pin() or m
                             break
                 t.append(f"  {mark} {shown:<26}", style=style)
-                note = self._model_note(m, th_catalog, lf_catalog, as_catalog)
+                note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
+                                        uno_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -2072,6 +2086,12 @@ class ZimZillaApp(App):
                 t.append(
                     f"  catalog {_catalog_clause(lf_mod.catalog_age(), lf_mod.CACHE_TTL)}"
                     " — /logfare-models refetches it\n", style=p.dim)
+            elif active == "unorouter":
+                t.append(
+                    f"  catalog {_catalog_clause(uno_mod.catalog_age(), uno_mod.CACHE_TTL)}"
+                    " — /unorouter-models shows the free\nones; free models are "
+                    "listed first, and a paid one is priced by estimate\n",
+                    style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -2105,7 +2125,8 @@ class ZimZillaApp(App):
         #
         # It is also the source the operator is most likely to be on, so the
         # wrong answer was the common case rather than the corner.
-        if active in ("tokenharbour", "openrouter", "antseed", "logfare") and (
+        if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
+                      "logfare") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -2118,6 +2139,15 @@ class ZimZillaApp(App):
             elif active == "openrouter":
                 creds = or_mod.load_credentials()
                 fetched, _ = or_mod.fetch_models(creds[0] if creds else "")
+            elif active == "unorouter":
+                # Keyless like OpenRouter's: the catalog is public. Fetched
+                # rather than read from the cache when the cache is cold or
+                # expired, so a live model is not refused against a stale list.
+                if uno_catalog is None:
+                    creds = uno_mod.load_credentials()
+                    fetched, _ = uno_mod.fetch_models(creds[0] if creds else "")
+                else:
+                    fetched = list(uno_catalog)
             elif active == "antseed":
                 if as_catalog is None:
                     fetched, _ = as_mod.fetch_models()
@@ -2135,6 +2165,8 @@ class ZimZillaApp(App):
                     th_catalog = fetched
                 elif active == "antseed":
                     as_catalog = fetched
+                elif active == "unorouter":
+                    uno_catalog = fetched
                 elif active == "logfare":
                     lf_catalog = fetched
                 models = tuple(m.id for m in fetched)
@@ -2189,7 +2221,7 @@ class ZimZillaApp(App):
         return head + frees + rest
 
     def _model_note(self, name: str, catalog, lf_catalog=None,
-                    as_catalog=None) -> str:
+                    as_catalog=None, uno_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -2204,10 +2236,16 @@ class ZimZillaApp(App):
         AntSeed's catalog is read last and is the only one that answers for a
         *pinned* id as well as a bare one, since the name on screen is
         ``<peerId>@<model>`` for a free model.
+
+        UnoRouter's answers only for its free tier — its paid entries publish
+        credit ratios, not rates, so they fall through to the estimate table
+        rather than being converted into a dollar figure it never stated.
         """
         live = th_mod.price_for(name, catalog)
         if live is None:
             live = as_mod.price_for(name, as_catalog)
+        if live is None:
+            live = uno_mod.price_for(name, uno_catalog)
         if live is not None:
             pin, pout = live
             if pin == 0.0 and pout == 0.0:
@@ -2367,6 +2405,24 @@ class ZimZillaApp(App):
                 t.append("no key — /tokenharbour-api-setup\n", style=p.amber)
             else:
                 t.append(f"key from {th[2]}\n", style=p.accent)
+            # OpenRouter and UnoRouter are hosted too, and were missing from this
+            # list — it claims to show the upstreams and which is live, and a
+            # source you cannot see is one you cannot switch to. Both list from
+            # their credential, like TokenHarbour; UnoRouter additionally has a
+            # public catalog, so "no key" is not a dead end for it.
+            for _kind, _mod, _label, _setup in (
+                ("openrouter", or_mod, "OpenRouter", "/openrouter-api-setup"),
+                ("unorouter", uno_mod, "UnoRouter", "/unorouter-api-setup"),
+            ):
+                creds = _mod.load_credentials()
+                mark = "◉" if active == _kind else "○"
+                style = f"bold {p.accent}" if active == _kind else p.primary
+                t.append(f"  {mark} {_kind:<12}", style=style)
+                t.append(f"      hosted  {_label:<12} ", style=p.primary)
+                if creds is None:
+                    t.append(f"no key — {_setup}\n", style=p.amber)
+                else:
+                    t.append(f"key from {creds[2]}\n", style=p.accent)
             # AntSeed is local like the LiteLLM proxies but has no discover()
             # entry and no key, so it is listed from its port being reachable —
             # the only question that has an answer here.
@@ -2382,7 +2438,7 @@ class ZimZillaApp(App):
                 t.append("no buyer — `antseed buyer start`\n", style=p.amber)
             t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice,  "
                      "/zim-tokenharbour\n                 or  /zim-openrouter,  "
-                     "/zim-antseed\n", style=p.dim)
+                     "/zim-unorouter,  /zim-antseed\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
 
@@ -2690,12 +2746,17 @@ class ZimZillaApp(App):
         """
         if kind == "openrouter":
             return or_mod, "OpenRouter"
+        if kind == "unorouter":
+            return uno_mod, "UnoRouter"
         if kind == "antseed":
             return as_mod, "AntSeed"
         return None
 
     def _cmd_gateway_key(self, kind: str, args) -> None:
-        """/openrouter-api-setup [key] — store the key.
+        """/openrouter-api-setup and /unorouter-api-setup [key] — store the key.
+
+        Parameterised by *kind* so both hosted gateways share one
+        implementation rather than growing a near-copy each.
 
         Written to ~/.zimzilla/<kind>/source, mode 600, in the same
         ``export VAR="value"`` format every other profile uses — so it can be
@@ -2739,7 +2800,7 @@ class ZimZillaApp(App):
                 return
             t.append("  set it with  ", style=p.dim)
             t.append(f"/{kind}-api-setup <key>\n", style=f"bold {p.primary}")
-            if kind == "openrouter":
+            if kind in ("openrouter", "unorouter"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -2823,10 +2884,11 @@ class ZimZillaApp(App):
         upstream this session is not pointed at cannot be run at all.
 
         An explicit source is accepted for the one case the active-source rule
-        gets wrong: **OpenRouter's catalog is public**, so its free list is
-        worth seeing before a key exists — and before the session is pointed
-        there, since pointing at it needs a key. Without the argument that list
-        would be unreachable until after the very setup it is meant to inform.
+        gets wrong: **OpenRouter's and UnoRouter's catalogs are public**, so
+        their free lists are worth seeing before a key exists — and before the
+        session is pointed there, since pointing at either needs a key. Without
+        the argument those lists would be unreachable until after the very setup
+        they are meant to inform.
         """
         key = args[0].strip().lower() if args else ""
         if not key:
@@ -2837,7 +2899,8 @@ class ZimZillaApp(App):
                     "them, or name one: /models openrouter", warn=True)
                 return
 
-        known = {"logfare", "tokenjuice", "tokenharbour", "openrouter", "antseed"}
+        known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
+                 "unorouter", "antseed"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -2845,8 +2908,9 @@ class ZimZillaApp(App):
             return
 
         # A gateway whose catalog is gated needs its key before there is
-        # anything to show. OpenRouter is deliberately absent from this check:
-        # its catalog is public, which is the whole point of naming it here.
+        # anything to show. OpenRouter and UnoRouter are deliberately absent
+        # from this check: both catalogs are public, which is the whole point of
+        # being able to name them here before any key exists.
         #
         # TokenHarbour is asked directly rather than through `_gateway`, which
         # knows only the gateways whose commands it parameterises and returns
@@ -2888,6 +2952,11 @@ class ZimZillaApp(App):
             # the listing matches what this session would be charged.
             creds = or_mod.load_credentials()
             return or_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "unorouter":
+            # Keyless too, and for the same reason: /api/pricing answers 200
+            # with no credential at all. The key is only needed to send.
+            creds = uno_mod.load_credentials()
+            return uno_mod.usable_free_models(creds[0] if creds else "")
         if kind == "tokenharbour":
             creds = th_mod.load_credentials()
             if creds is None:
@@ -2915,14 +2984,14 @@ class ZimZillaApp(App):
         if models is None:
             self._sys_line(f"{kind}: {err}", warn=True)
             return
-        label = {"openrouter": "OPENROUTER",
+        label = {"openrouter": "OPENROUTER", "unorouter": "UNOROUTER",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
         t = Text()
         t.append(f"  {label} — FREE MODELS\n\n", style=f"bold {p.accent}")
         if not models:
             t.append("  nothing free is usable right now.\n", style=p.amber)
-            if kind == "openrouter":
+            if kind in ("openrouter", "unorouter"):
                 t.append(
                     "  (free models that cannot call tools are excluded — "
                     "they cannot drive this harness)\n", style=p.dim)
@@ -2962,6 +3031,12 @@ class ZimZillaApp(App):
         if kind == "openrouter":
             t.append("  free = :free suffix and a zero price · tools-capable only\n",
                      style=p.dim)
+        if kind == "unorouter":
+            t.append(
+                "  free = the catalog's own is_free · text output and "
+                "tools-capable only,\n  so image, embedding and speech models "
+                "are filtered out\n",
+                style=p.dim)
         if kind == "antseed":
             t.append(
                 "  free = a seller charging 0 in and 0 out · the id shown is "
@@ -5330,6 +5405,7 @@ class ZimZillaApp(App):
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
             ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
+            ("/zim-unorouter", "switch upstream to UnoRouter", "zim-unorouter"),
             ("/zim-antseed", "switch upstream to AntSeed", "zim-antseed"),
             ("/antseed-models", "AntSeed's free models, and the peer to pin",
              "antseed-models"),
@@ -5339,6 +5415,10 @@ class ZimZillaApp(App):
              "tokenharbour-models"),
             ("/openrouter-api-setup", "store your OpenRouter API key",
              "openrouter-api-setup"),
+            ("/unorouter-api-setup", "store your UnoRouter API key",
+             "unorouter-api-setup"),
+            ("/unorouter-models", "the live free catalog — what is free and usable",
+             "unorouter-models"),
             ("/models", "free models of an upstream — /models [source]", "models"),
             ("/logfare-models", "fetch the live catalog; show what is up",
              "logfare-models"),

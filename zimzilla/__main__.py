@@ -15,6 +15,7 @@ from . import openrouter as or_mod
 from . import sources as sources_mod
 from . import session as session_mod
 from . import tokenharbour as th_mod
+from . import unorouter as uno_mod
 from . import update as update_mod
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL, find_agents_file
 from .scope import find_legacy_scope
@@ -230,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     # exactly as they set it, so a stale selection file cannot hijack it.
     _remembered = sources_mod.current_key()
     for _key, _mod in (("tokenharbour", th_mod), ("openrouter", or_mod),
-                       ("antseed", as_mod)):
+                       ("unorouter", uno_mod), ("antseed", as_mod)):
         if _remembered == _key and _mod.applies_to_default_endpoint(cfg.base_url):
             _mod.apply_to(cfg)
             break

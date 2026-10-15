@@ -36,10 +36,13 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-source", "show upstream sources and status"),
     ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
     ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
+    ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
     ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
     ("/openrouter-api-setup", "store your OpenRouter API key"),
+    ("/unorouter-api-setup", "store your UnoRouter API key"),
+    ("/unorouter-models", "the live free catalog — what is free and usable"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
     ("/models", "free models of an upstream — /models [source]"),
     ("/save", "write the session to disk"),
@@ -177,13 +180,13 @@ class CompletionPopup(VerticalScroll):
                     # the popup that cannot be accepted without the domain it
                     # is a confirmation of.
                     "ad": ["tools"],
-                    # The argument exists for OpenRouter and AntSeed, whose
-                    # catalogs are public and worth seeing before a key is set
-                    # (AntSeed has no key at all). Offering all of them rather
-                    # than just those two keeps the popup honest about what
+                    # The argument exists for OpenRouter, UnoRouter and AntSeed,
+                    # whose catalogs are public and worth seeing before a key is
+                    # set (AntSeed has no key at all). Offering all of them rather
+                    # than just those three keeps the popup honest about what
                     # /models accepts.
                     "models": ["logfare", "tokenjuice", "tokenharbour",
-                               "openrouter", "antseed"],
+                               "openrouter", "unorouter", "antseed"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

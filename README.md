@@ -346,7 +346,7 @@ or a colour diff of the change, and three keys:
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, so it can run against a local LiteLLM proxy, a hosted gateway or a
-peer-to-peer marketplace without any code caring which. Five sources are wired
+peer-to-peer marketplace without any code caring which. Six sources are wired
 up:
 
 | Source | Endpoint | Key | How it starts |
@@ -355,11 +355,12 @@ up:
 | **Token Juice** | `:4000` | discovered | its own local proxy |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
 | **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
+| **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-tokenharbour`,
-`/zim-openrouter` or `/zim-antseed`; the choice is remembered, so the next
-launch comes back to the one that was working.
+`/zim-openrouter`, `/zim-unorouter` or `/zim-antseed`; the choice is remembered,
+so the next launch comes back to the one that was working.
 
 ### TokenHarbour
 
@@ -394,6 +395,87 @@ TokenHarbour's catalog is **live** — it changes, and some models are free:
 
 `/model` reads the fetched catalog, so free models sort to the top and the
 prices shown are the gateway's own rather than a local estimate.
+
+### UnoRouter
+
+UnoRouter fronts a couple of hundred models behind one key, and — like
+TokenHarbour — speaks the **Anthropic Messages protocol natively**, so nothing
+is translated on the way through. It is remote and needs a key of your own:
+
+```
+/unorouter-api-setup sk-yourkeyhere
+```
+
+That writes `~/.zimzilla/unorouter/source` (mode 600), the same profile format
+as every other source. Then:
+
+```
+/zim-unorouter             # switch, and fetch the live free list
+/unorouter-models          # the free catalog again, any time
+/models unorouter          # the same set, through the generic command
+/model gemini-3.6-flash:free
+```
+
+**The catalog is public**, so `/models unorouter` works *before* you have a key
+— the key is only needed to send a message. That is why the setup command says
+so rather than refusing to list anything.
+
+**Free here means free, text-output, and able to call tools** — all three. The
+gateway also fronts image generators, embedding models, Whisper transcription
+and TTS voices for free, and all of them are genuinely free and useless to this
+harness: they cannot answer a Messages turn. Filtering on the modality as well
+as the price is what keeps them out of the list. Measured on 2026-10-16: **230
+models in the catalog, 97 free, 46 free and usable here** — the filter drops 36
+for modality and 15 for missing tool support.
+
+Those counts move as the catalog changes, and they moved between two runs
+minutes apart while this was being written (232/99/48, then 230/97/46), so treat
+them as a dated snapshot rather than a specification. The `usable_free_models()`
+filter is the thing that holds; the numbers are what it returned on one
+afternoon.
+
+A note on prices: UnoRouter publishes *credit ratios*, not dollars per million
+tokens, so this integration does not invent a rate from them. Free models read
+`free` — which is exact — and a paid model falls through to ZimZilla's own
+estimate table, labelled as an estimate.
+
+**`/zim-unorouter` never lands you on a paid model.** With no preference saved it
+names a free model by default, so a fresh switch costs nothing. The default is a
+*measured* shortlist, ordered by whether the model actually returns a `tool_use`
+block rather than by the catalog's `supportsTools` flag. That flag is a good
+filter and not a guarantee: `nemotron-3-super-120b-a12b:free` advertises tool
+support and a 262k context, and answered a real tool-using request with a
+completed turn in prose. It was ranked highly here on the strength of one early
+sample and removed once re-measured — which is the whole reason the shortlist is
+short and each entry is one that was actually seen calling a tool.
+
+The measurement has to be done with the requests **spaced**. Hammering one model
+back to back measures the free tier's rate limiter, not the model.
+
+Even spaced, though, **a small sample cannot rank these models.** Two sweeps of
+the same five, three attempts each, disagreed on every one of them:
+
+| model | first sweep | confirmation |
+|---|---|---|
+| `gemini-3.6-flash:free` | 3/3 | 2/3 |
+| `qwen3.8-27b:free` | 3/3 | 2/3 |
+| `glm-5.3-flash:free` | 3/3 | 1/3 |
+| `deepseek-v4.1-flash:free` | 1/3 | 2/3 |
+| `gpt-oss-20b:free` | 1/3 | 2/3 |
+
+The run-to-run variance is larger than the difference between the models, so the
+honest reading is not "gemini is best" but **all five can call a tool and none
+does so dependably** — a property of the free tier rather than of any one model.
+The shortlist therefore records what was *verified* (each name returned a real
+`tool_use` at least once) and breaks the tie on **context**: the default is
+`gemini-3.6-flash:free`, whose 1M window beats `qwen3.8-27b:free`'s 64k for the
+tool loop this harness runs. Below those two the order is a preference, not a
+finding.
+
+Entries do disappear: `glm-5.3-flash:free` was gone from the catalog within the
+hour it was measured. The list falls through to the next name and then to the
+catalog's own order, so a vanished entry costs one lookup rather than a broken
+switch.
 
 ### AntSeed
 
@@ -549,9 +631,12 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
 | `/zim-openrouter` | switch upstream to OpenRouter (hosted) |
 | `/openrouter-api-setup <key>` | store your OpenRouter API key |
+| `/zim-unorouter` | switch upstream to UnoRouter — hosted, free models, native Messages |
+| `/unorouter-api-setup <key>` | store your UnoRouter API key |
+| `/unorouter-models` | the live free catalog — free, text-output and tools-capable |
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
-| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `antseed` |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/scope-validator` | paste a programme overview → scope files + ranked targets |
 | `/bug-hunt [--fresh] [--wave N] <target>` | recon (reused if already done), then **one** wave of 10 agents |
