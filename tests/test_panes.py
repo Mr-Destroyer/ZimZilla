@@ -6,6 +6,7 @@ Run:  python tests/test_panes.py   (from an activated venv)
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,19 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(("PASS " if cond else "FAIL ") + name + ("" if cond else f"  [{detail}]"))
     if not cond:
         FAILS.append(name)
+
+
+def has_bind(keys: str, key: str, command: str) -> bool:
+    """True if ``key`` is bound at top level in the prefix table to ``command``.
+
+    A plain substring test is not enough: tmux's stock prefix table carries one
+    enormous ``display-menu`` binding whose *arguments* contain ``h { split-window
+    -h }``, so searching for "h" and "split-window -h" matches a server that has
+    no ``h`` binding at all — which is precisely the state being tested for.
+    Anchoring on ``bind-key -T prefix <key>`` only matches a real binding.
+    """
+    pat = re.compile(rf"^\s*bind-key\s+-T prefix\s+{re.escape(key)}\s+{re.escape(command)}")
+    return any(pat.match(line) for line in keys.splitlines())
 
 
 def main() -> int:
@@ -99,6 +113,30 @@ def main() -> int:
     check("prefix is ctrl+b", "set -g prefix C-b" in conf)
     check("bind h is horizontal split", "bind h split-window -h" in conf)
     check("bind v is vertical split", "bind v split-window -v" in conf)
+    check("standalone hint needs one prefix", "ctrl+b ctrl+b" not in conf)
+
+    # Nested inside another tmux the outer server eats the prefix, so the
+    # binding needs it pressed twice — and the hint has to say so, or the
+    # feature looks broken. `send-prefix` is what makes the second one arrive.
+    nconf = panes.tmux_conf("/usr/bin/zimzilla", nested=True)
+    check("nested hint says ctrl+b twice", "ctrl+b ctrl+b h" in nconf, nconf)
+    check("send-prefix bound for forwarding", "bind C-b send-prefix" in nconf)
+    check("bindings still present when nested",
+          "bind h split-window -h" in nconf and "bind v split-window -v" in nconf)
+
+    old_tmux = os.environ.get("TMUX")
+    os.environ["TMUX"] = "/tmp/tmux-1000/outer,123,0"
+    check("nested_in_tmux sees an outer tmux", panes.nested_in_tmux())
+    os.environ.pop("TMUX", None)
+    check("nested_in_tmux false with no outer tmux", not panes.nested_in_tmux())
+    if old_tmux is not None:
+        os.environ["TMUX"] = old_tmux
+
+    # write_tmux_conf derives `nested` from the environment unless told otherwise
+    wconf = panes.write_tmux_conf(tmp / "nested-state", "/usr/bin/zimzilla", nested=True)
+    check("write_tmux_conf honours nested=True", "ctrl+b ctrl+b h" in wconf.read_text())
+    wconf2 = panes.write_tmux_conf(tmp / "plain-state", "/usr/bin/zimzilla", nested=False)
+    check("write_tmux_conf honours nested=False", "ctrl+b ctrl+b" not in wconf2.read_text())
 
     if shutil.which("tmux"):
         conf_path = tmp / "tmux.conf"
@@ -115,15 +153,40 @@ def main() -> int:
             check("tmux accepts the generated config", ok.returncode == 0, ok.stderr)
             keys = subprocess.run(["tmux", "-L", sock, "list-keys", "-T", "prefix"],
                                   env=env, capture_output=True, text=True).stdout
-            check("prefix h bound to split-window -h",
-                  any(" h " in l and "split-window -h" in l for l in keys.splitlines()), keys)
-            check("prefix v bound to split-window -v",
-                  any(" v " in l and "split-window -v" in l for l in keys.splitlines()), keys)
+            check("prefix h bound to split-window -h", has_bind(keys, "h", "split-window -h"), keys)
+            check("prefix v bound to split-window -v", has_bind(keys, "v", "split-window -v"), keys)
             ss = subprocess.run(["tmux", "-L", sock, "show-environment", "-g", panes.ENV_SESSION],
                                 env=env, capture_output=True, text=True).stdout
             check("global session env set", "ZIMZILLA_PANE_SESSION=zimzilla" in ss, ss)
         finally:
             subprocess.run(["tmux", "-L", sock, "kill-server"], env=env, capture_output=True)
+
+        # --- a pre-existing server must still get the bindings -------------
+        # `tmux -f` is read only when a server starts. If one is already up on
+        # our socket, `new-session -A` attaches and the config is never read —
+        # leaving tmux's stock prefix table, in which `ctrl+b h` does nothing
+        # at all. This is the exact bug that made the prefix keys "not work".
+        sock2 = f"zz-test-stale-{os.getpid()}"
+        env2 = dict(os.environ)
+        env2.pop("TMUX", None)
+        stale = ["tmux", "-L", sock2, "-f", "/dev/null"]
+        subprocess.run([*stale, "new-session", "-d", "-s", "t", "-x", "200", "-y", "50", "sleep 60"],
+                       env=env2, check=True)
+        try:
+            before = subprocess.run(["tmux", "-L", sock2, "list-keys", "-T", "prefix"],
+                                    env=env2, capture_output=True, text=True).stdout
+            check("stock server really lacks the bindings",
+                  not has_bind(before, "h", "split-window -h"), before)
+            # apply_config is what launch() calls before attaching.
+            panes.apply_config(conf_path, socket=sock2)
+            after = subprocess.run(["tmux", "-L", sock2, "list-keys", "-T", "prefix"],
+                                   env=env2, capture_output=True, text=True).stdout
+            check("apply_config binds h on a pre-existing server",
+                  has_bind(after, "h", "split-window -h"), after)
+            check("apply_config binds v on a pre-existing server",
+                  has_bind(after, "v", "split-window -v"), after)
+        finally:
+            subprocess.run(["tmux", "-L", sock2, "kill-server"], env=env2, capture_output=True)
     else:
         print("SKIP tmux not installed")
 

@@ -238,9 +238,29 @@ will restart the checkout under you on the next launch.
 --max-tokens N       max output tokens per reply
 --max-iterations N   ceiling on autonomous steps (default 40)
 --unsafe             disable the filesystem jail
+--panes              run under tmux; ctrl+b h/v open more ZimZilla panes
 --list-models
 --version
 ```
+
+### Panes
+
+`zimzilla --panes` hands the session to tmux on a private socket, so the panes
+do not collide with your own tmux. `ctrl+b h` splits right and `ctrl+b v`
+splits down, each new pane running another ZimZilla that shares a mailbox with
+its siblings — so the panes' agents can message each other with `agent_send`.
+The status bar carries the reminder.
+
+**If you launch it from inside an existing tmux session, the prefix needs
+pressing twice.** The outer server reads `ctrl+b` first and never forwards it,
+so a single `ctrl+b h` splits *your* session and the ZimZilla bindings look
+dead. `ctrl+b ctrl+b h` forwards one prefix inward and does what you meant; the
+status bar switches to saying so when it detects the nesting. Both forms are
+harmless standalone, so it is safe to just press it twice out of habit.
+
+A pre-existing server on the private socket would otherwise keep tmux's stock
+key table — `tmux -f` is read only when a server *starts* — so `--panes` sources
+its config into whatever server it finds before attaching.
 
 ---
 
