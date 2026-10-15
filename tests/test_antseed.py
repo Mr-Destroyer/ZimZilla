@@ -392,6 +392,51 @@ def test_free_model_ids_are_pinned() -> None:
           str(ids))
 
 
+def test_default_free_pin_never_names_a_paid_model() -> None:
+    """The 402 regression: a fresh switch must land on a free pin.
+
+    Measured before this existed: with no saved preference, ``apply_to`` left
+    ``cfg.model`` on the previous source's name — ``deepseek-v4.1-flash`` — and
+    the router, refusing to route a paid name to a free peer, answered
+    ``402 antseed_buyer_fault`` on a wallet holding 0.0 USDC. So the property
+    under test is not "a pin is returned" but "whatever is returned is free".
+    """
+    from zimzilla import antseed as a
+
+    a.clear_cache()
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        pin = a.default_free_pin(use_cache=False)
+    check("default pin: one is returned at all", bool(pin), repr(pin))
+    check("default pin: it is pinned, not a bare model name",
+          bool(pin) and "@" in pin, repr(pin))
+    model = (pin or "").split("@")[1]
+    check("default pin: it names a model the catalog calls free",
+          model in ("dual-free", "glm-4.5-flash", "ling-3.1-flash"), model)
+    check("default pin: never the paid model",
+          model != "claude-fable-5", model)
+    check("default pin: never the free-in-but-paid-out model",
+          model != "half-free", model)
+
+    # An empty network must yield None, not an invented name: `apply_to` reads
+    # that as "leave cfg.model alone", and a made-up id would be worse than the
+    # stale one it replaced.
+    a.clear_cache()
+    with mock.patch("urllib.request.urlopen", _stub_urlopen({"object": "list",
+                                                             "data": []})):
+        check("default pin: an empty network yields None, not a guess",
+              a.default_free_pin(use_cache=False) is None)
+
+    # A network with no free peer at all must also yield None.
+    a.clear_cache()
+    paid = {"object": "list", "data": [{
+        "id": "claude-fable-5", "type": "text",
+        "peers": [{"peerId": "eeee5555", "protocol": "openai-chat-completions",
+                   "inputUsdPerMillion": 3, "outputUsdPerMillion": 15}]}]}
+    with mock.patch("urllib.request.urlopen", _stub_urlopen(paid)):
+        check("default pin: an all-paid network yields None",
+              a.default_free_pin(use_cache=False) is None)
+
+
 def test_usable_free_models_is_the_pinnable_set() -> None:
     """`/models antseed` reads this, so a free-but-unpinnable model is out."""
     from zimzilla import antseed as a
@@ -675,7 +720,8 @@ def test_apply_and_guard(tmp) -> None:
 
     own = tmp / "apply" / "source"
     with mock.patch.object(a, "PROFILE", own), \
-         mock.patch.object(a, "reachable", lambda *x, **k: True):
+         mock.patch.object(a, "reachable", lambda *x, **k: True), \
+         mock.patch.object(a, "default_free_pin", lambda *x, **k: "cccc3333@free-model"):
         applied = a.apply_to(cfg)
         check("apply: points at the buyer", cfg.base_url == "http://localhost:8377")
         check("apply: sets a non-empty token so the harness will start",
@@ -691,6 +737,8 @@ def test_apply_and_guard(tmp) -> None:
               creds is not None and len(creds) == 3, str(creds))
         check("creds: origin says where it came from",
               creds is not None and creds[2] == "local buyer", str(creds))
+        check("creds: no pin yet, so it names the default free model",
+              creds is not None and creds[1] == "cccc3333@free-model", str(creds))
 
         # A remembered pin is composed into the model.
         a.save_pin("glm-4.5-flash", "bbbb2222")
@@ -773,6 +821,7 @@ def main() -> int:
     test_blurb_says_which_count_is_the_free_one()
     test_a_pin_bypasses_ranking_not_the_seller()
     test_free_model_ids_are_pinned()
+    test_default_free_pin_never_names_a_paid_model()
     test_usable_free_models_is_the_pinnable_set()
     test_catalog_needs_no_key()
     test_base_url_is_the_prefix_before_v1()

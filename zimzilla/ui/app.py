@@ -2117,6 +2117,18 @@ class ZimZillaApp(App):
         self.query_one(HeaderBar).set_model(name)
         self.query_one(StatusBar).model = name
         self.query_one(StatusBar).render_bar()
+        # Remember the choice when it is an AntSeed pin. Nothing else in the
+        # TUI persists a model, because every other source's model name is a
+        # plain string the catalog can hand back — but an AntSeed free model is
+        # reached only through `<peerId>@<model>`, and a pin is not in the
+        # catalog's id list. Without this the choice dies with the session and
+        # the next launch lands back on a paid name and 402s, which is the
+        # failure `/antseed-models` exists to avoid. Only saved when the peer
+        # is actually pinned; a bare model name is not a preference.
+        if active == "antseed" and "@" in name:
+            peer, _, model = name.partition("@")
+            if peer and model:
+                as_mod.save_pin(model, peer)
         self._sys_line(f"model switched to {name}", ok=True)
 
     def _model_display_order(self, models, catalog) -> list[str]:

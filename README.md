@@ -414,6 +414,16 @@ could not complete"`. So ZimZilla lists every free pin rather than promising
 one, and `/model` orders them by protocol support and trust. If one 429s, try
 the next.
 
+**`/zim-antseed` never lands you on a paid model.** With no preference saved it
+names a free pin by default, so a fresh switch costs nothing. That default is a
+*measured* shortlist — `nemotron-120b-free`, `nemotron-3-ultra-free`,
+`glm-4.5-flash`, `qwen2.5-coder-7b` — and it is ordered by whether the seller
+actually answers, not by reputation, because reputation does not predict it. Of
+the nine free pins measured on 2026-10-15, the **highest**-trust free seller
+returned `502` twice and the **lowest**-trust one returned `200` twice. Choosing
+a pin with `/model <peerId>@<model>` remembers it, so the next launch returns to
+the same seller.
+
 Two smaller things worth knowing:
 
 - Every seller on the network advertises the OpenAI protocol and none advertises

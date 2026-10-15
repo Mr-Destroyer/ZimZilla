@@ -307,6 +307,14 @@ class Model:
         is the branch that actually runs — and the proxy translates for most
         OpenAI-only sellers, which is why pinning a free model normally works
         from here. Returns ``None`` when no seller offers the model for free.
+
+        The trust ordering is the only signal the network publishes, and it is
+        a weak one: measured across the nine free pins on 2026-10-15, the
+        highest-reputation free peer answered 502 twice while the lowest
+        answered 200 twice. So this picks a *pinnable* peer, not a *reliable*
+        one — :func:`default_free_pin` carries the measured shortlist for the
+        case where nobody has chosen yet, and a 429/502 here means "pick
+        another seller", which the picker's blurb is what tells the operator.
         """
         free = self.free_peers
         if not free:
@@ -561,6 +569,65 @@ def free_model_ids(base_url: str = "", **kw) -> tuple[list[str] | None, str]:
     return out, ""
 
 
+#: Free models measured to answer, in the order a fresh switch should try them.
+#: This ranks *reliability*, not quality, because the network's own reputation
+#: score does not predict it — it inverts. Measured 2026-10-15 over the nine
+#: free pins, two attempts each: the four below returned 200 both times, while
+#: the highest-reputation free peer (``jev-latest``, trust 68.9) returned 502
+#: twice and the lowest (``qwen2.5-coder-7b``, trust 28.6) returned 200 twice.
+#: A name here that has since gone away simply falls through to the ranking in
+#: :func:`default_free_pin`, so a stale entry costs one dictionary lookup.
+PREFERRED_FREE_MODELS = (
+    "nemotron-120b-free",
+    "nemotron-3-ultra-free",
+    "glm-4.5-flash",
+    "qwen2.5-coder-7b",
+)
+
+
+def default_free_pin(base_url: str = "", **kw) -> str | None:
+    """A pinned free model to use when the operator has chosen none.
+
+    Exists because the alternative was measured to fail: with no saved
+    preference, :func:`apply_to` left ``cfg.model`` on whatever the previous
+    source had named, and switching to AntSeed then sent a *paid* model name to
+    the router — which picked a paid peer and answered
+
+        402 antseed_buyer_fault: You are out of AntSeed credits for this request
+
+    on a wallet holding 0.0 USDC. Naming a free pin instead means a fresh switch
+    spends nothing, which is the whole reason AntSeed is a source here.
+
+    Returns ``None`` when nothing free is on offer, leaving the caller's model
+    untouched — an empty network is not a reason to invent a name.
+    """
+    # Bounded, because this runs inside :func:`apply_to`, which runs at startup
+    # and on every source switch. The default 20s fetch timeout is right for an
+    # explicit catalog command and wrong here: a buyer that is up but slow must
+    # not hold the launch for twenty seconds to name a model the operator can
+    # change in one command. :func:`reachable` has already proven the port
+    # answers, so a healthy buyer returns well inside this.
+    kw.setdefault("timeout", 5.0)
+    models, _ = usable_free_models(base_url, **kw)
+    if not models:
+        return None
+    by_id = {m.id: m for m in models}
+    for model_id in PREFERRED_FREE_MODELS:
+        m = by_id.get(model_id)
+        pin = m.pin() if m is not None else None
+        if pin:
+            return pin
+    # None of the measured ones is on offer: take the alphabetically first of
+    # whatever is. Ordering by name rather than by :meth:`Model.pin`'s trust
+    # ranking is deliberate — that ranking prefers the *least* reliable peers,
+    # so it would reintroduce the 502s this function exists to avoid.
+    for m in sorted(models, key=lambda m: m.id):
+        pin = m.pin()
+        if pin:
+            return pin
+    return None
+
+
 def model_ids(base_url: str = "", **kw) -> tuple[list[str] | None, str]:
     models, err = fetch_models(base_url, **kw)
     if models is None:
@@ -680,6 +747,12 @@ def load_credentials() -> tuple[str, str, str] | None:
     ``origin`` is ``"local buyer"`` so the confirmation line reads
     ``key from local buyer``, which is what is actually true — there is no
     profile and no environment variable behind it.
+
+    The model falls back to :func:`default_free_pin`, not to ``""``. ``""``
+    reads to the caller as "nothing chosen yet, go and fetch a free list",
+    which is a round trip that ends with the *previous* source's model still
+    in place — the stale paid name behind the 402. Reporting a free pin here
+    makes the switch land on something that costs nothing without the fetch.
     """
     if not reachable():
         return None
@@ -691,7 +764,7 @@ def load_credentials() -> tuple[str, str, str] | None:
             model = f"{peer}@{chosen}"
         elif chosen:
             model = chosen
-    return NO_KEY_PLACEHOLDER, model, "local buyer"
+    return NO_KEY_PLACEHOLDER, model or (default_free_pin() or ""), "local buyer"
 
 
 def apply_to(cfg) -> tuple[str, str] | None:
@@ -705,6 +778,10 @@ def apply_to(cfg) -> tuple[str, str] | None:
 
     A remembered pin is composed into the model, so the session routes to the
     seller the operator chose rather than to whatever the router ranks first.
+    With no remembered pin, a *measured* free model is named instead — see
+    :func:`default_free_pin` for why leaving ``cfg.model`` alone is the one
+    thing that must not happen here.
+
     Returns ``None`` when no buyer is reachable, leaving *cfg* alone — a switch
     to a proxy that is not running would look like success and then fail on the
     first turn.
@@ -721,6 +798,13 @@ def apply_to(cfg) -> tuple[str, str] | None:
             cfg.model = f"{peer}@{model}"
         elif model:
             cfg.model = model
+    else:
+        # No preference saved. Leaving cfg.model untouched is what produced the
+        # 402 this function now exists to prevent: the name left over from the
+        # previous source is usually a paid one, the router then refuses to
+        # route it to a free peer, and the buyer answers "out of credits" on a
+        # wallet that never had any. A free pin costs nothing and works.
+        cfg.model = default_free_pin() or cfg.model
     return ("antseed", cfg.model)
 
 
