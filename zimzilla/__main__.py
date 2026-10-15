@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to AGENTS.md used by zim mode (default: workdir, "
                              "its parent, ~/.zimzilla, then ~)")
     parser.add_argument("--max-tokens", type=int, default=None, help="max output tokens per reply")
+    parser.add_argument("--no-auto-compact", action="store_true",
+                        help="never compact history automatically; /compact still works")
     parser.add_argument("--no-update", action="store_true",
                         help="skip the launch-time check for new commits on the upstream")
     parser.add_argument("--list-models", action="store_true", help="list known models and exit")
@@ -213,6 +215,10 @@ def main(argv: list[str] | None = None) -> int:
         unsafe=args.unsafe or None,
         theme=theme,
         max_tokens=args.max_tokens,
+        # `from_env` applies only non-None overrides, so False is passed
+        # explicitly rather than `or None` — otherwise the flag could never turn
+        # the feature off, which is its entire job.
+        auto_compact=False if args.no_auto_compact else None,
         mode=args.mode,
         agents_path=agents_path,
         rain=True if args.rain else None,

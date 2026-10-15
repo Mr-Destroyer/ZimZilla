@@ -16,6 +16,10 @@ Events yielded
 ``usage``        token counts for the completed request
 ``truncated``    the reply hit ``max_tokens`` and was cut off
 ``deliverable``  a declared file was or was not written by the end of the turn
+``continuing``   the soft round cap was passed because the turn is progressing
+``iteration_cap`` the turn stopped at a round cap — soft (stuck) or hard (runaway)
+``compacting``   history is being summarised to free context, automatically
+``compacted``    that summarisation finished (``ok`` says whether it worked)
 ``error``        fatal error for this turn
 ``turn_end``     the turn finished
 """
@@ -264,6 +268,12 @@ class Agent:
         self.session_cost = 0.0
         self.turn_count = 0
         self.last_turn_cost = 0.0
+        #: The real ``input_tokens`` the endpoint reported for the most recent
+        #: call — i.e. the actual size of the prompt, measured rather than
+        #: estimated. This is what the auto-compact threshold reads, and why it
+        #: can be a fraction of a known window rather than a guess. Zero means
+        #: "nothing measured yet", which never trips the threshold.
+        self._last_input_tokens = 0
 
         # scope is attached to cfg so tools can re-check defensively
         self.scope: Scope = Scope.load(cfg.allow_path, cfg.deny_path)
@@ -504,8 +514,85 @@ class Agent:
 
         self.messages.append({"role": "user", "content": user_text})
 
-        for iteration in range(self.cfg.max_iterations):
-            yield {"type": "thinking", "iteration": iteration}
+        #: API calls made in this turn, auto-continues included.
+        rounds = 0
+        #: Whether the previous round advanced the work. Drives the soft cap: a
+        #: turn that is still getting successful tool results is not stuck, so
+        #: stopping it at an arbitrary count is the wrong call — that is exactly
+        #: how a long task used to end. A round where every tool failed is the
+        #: shape that *is* stuck, and that is what stops.
+        progressed = False
+        #: How many times the soft cap has been passed through rather than
+        #: obeyed, for the transcript and for the hard-cap arithmetic.
+        continued = 0
+        #: One overflow retry per turn. A second overflow after a successful
+        #: compaction means compaction is not shrinking the prompt — retrying
+        #: would just spend another request to fail the same way.
+        overflow_retried = False
+        #: The window the auto-compact threshold is measured against, resolved
+        #: once per turn: the live catalog's figure for this model when it has
+        #: one, else the configured fallback.
+        window = self.context_window()
+
+        while rounds < self.cfg.max_rounds:
+            # ---- the soft cap ------------------------------------------
+            # Reached a multiple of max_iterations. Continue if the last round
+            # did real work; otherwise stop and SAY SO. The silent version of
+            # this branch — falling out of a `for range()` and yielding an
+            # ordinary turn_end — is what made a capped turn indistinguishable
+            # from a finished one, and painted the rail IDLE while the task was
+            # in fact unfinished.
+            if rounds and rounds % self.cfg.max_iterations == 0:
+                if not progressed:
+                    yield {
+                        "type": "iteration_cap",
+                        "rounds": rounds,
+                        "limit": self.cfg.max_iterations,
+                        "hard": False,
+                    }
+                    break
+                continued += 1
+                yield {
+                    "type": "continuing",
+                    "rounds": rounds,
+                    "limit": self.cfg.max_iterations,
+                    "continued": continued,
+                }
+            rounds += 1
+            # Reset AFTER the soft-cap check above, which reads the previous
+            # round's verdict. Recomputing it per round is what keeps a stale
+            # success from carrying a stuck loop past the cap: the round that
+            # only produced failures sets this False, and the next soft-cap
+            # check then stops the turn.
+            progressed = False
+            yield {"type": "thinking", "iteration": rounds - 1}
+
+            # ---- auto-compact ------------------------------------------
+            # Measured, not estimated: `_last_input_tokens` is the real
+            # `input_tokens` the endpoint reported for the previous call in this
+            # session, which is the actual size of the prompt about to be resent
+            # (plus whatever this round added to it). Checked BEFORE the request
+            # so the compaction happens instead of the overflow, not after it.
+            if self._should_compact(window):
+                yield {
+                    "type": "compacting",
+                    "used": self._last_input_tokens,
+                    "window": window,
+                    "trigger": "threshold",
+                }
+                ok, note = await self.compact()
+                yield {
+                    "type": "compacted",
+                    "ok": ok,
+                    "note": note,
+                    "used": self._last_input_tokens,
+                    "window": window,
+                }
+                if ok:
+                    # Reset so the next request re-measures. Without this the
+                    # threshold would still read as exceeded and every remaining
+                    # round would compact again.
+                    self._last_input_tokens = 0
 
             try:
                 final = None
@@ -515,6 +602,38 @@ class Agent:
                     if final_msg is not None:
                         final = final_msg
             except Exception as e:  # noqa: BLE001
+                # A context overflow is the one API error this loop can fix by
+                # itself: the prompt is too long, so shorten it and try the same
+                # round again. Checked before the generic branch because
+                # otherwise the operator gets "bad request: <dict>" for a
+                # condition the harness can actually resolve.
+                if (
+                    self.cfg.auto_compact
+                    and not overflow_retried
+                    and self._is_context_overflow(e)
+                ):
+                    overflow_retried = True
+                    yield {
+                        "type": "compacting",
+                        "used": self._last_input_tokens,
+                        "window": window,
+                        "trigger": "overflow",
+                    }
+                    ok, note = await self.compact()
+                    yield {
+                        "type": "compacted",
+                        "ok": ok,
+                        "note": note,
+                        "used": self._last_input_tokens,
+                        "window": window,
+                    }
+                    if ok:
+                        self._last_input_tokens = 0
+                        # `compact()` rebuilt the history from a summary, so the
+                        # dangling-user problem the pop below guards against does
+                        # not exist here — retry the round with the shorter
+                        # prompt.
+                        continue
                 yield {"type": "error", "message": self._friendly_error(e)}
                 await self._pop_last_user_if_dangling()
                 break
@@ -533,6 +652,10 @@ class Agent:
                 turn_in += tin
                 turn_out += tout
                 turn_cost += cost
+                # The prompt size this call actually sent. Stored so the next
+                # round can decide whether to compact before sending a bigger
+                # one, and so the UI can draw the gauge against a real number.
+                self._last_input_tokens = tin
                 yield {
                     "type": "usage",
                     "input": tin,
@@ -758,7 +881,27 @@ class Agent:
                     }
                 )
 
+                # What counts as progress for the soft cap. A tool that ran and
+                # succeeded is the model advancing; a denial or an error is not,
+                # and a round of nothing but those is the loop spinning — which
+                # is the case the cap exists to stop.
+                if not result.is_error and not meta.get("denied"):
+                    progressed = True
+
             self.messages.append({"role": "user", "content": tool_results})
+
+        else:
+            # The `while` ran out at ``max_rounds``. Distinct from the soft-cap
+            # break above: this is the runaway backstop, and it is the only exit
+            # that means "stopped for being pathological" rather than "stopped
+            # for being stuck". Reported so a turn can never end at a limit
+            # without saying which one.
+            yield {
+                "type": "iteration_cap",
+                "rounds": rounds,
+                "limit": self.cfg.max_rounds,
+                "hard": True,
+            }
 
         # ---- finalise turn accounting
         self.session_input_tokens += turn_in
@@ -943,6 +1086,19 @@ class Agent:
                 "and will refuse any other client."
             )
         if isinstance(e, anthropic.BadRequestError):
+            # Checked before the model-name test below, because an overflow
+            # message can mention the model ("... for model claude-x") and the
+            # model-name branch would then send the operator to re-check a name
+            # that is perfectly fine. This is the branch that used to be missing
+            # entirely: an overflow fell through to `bad request: {dict}`, which
+            # says nothing about the prompt being too long or what to do.
+            if Agent._is_context_overflow(e):
+                return (
+                    "the prompt is too long for this model's context window. "
+                    "History was compacted automatically and the request "
+                    "retried; if this is showing, that did not help — run "
+                    "/compact, or switch to a longer-context model with /model."
+                )
             msg = str(e)
             if "model" in msg.lower():
                 return (
@@ -991,6 +1147,73 @@ class Agent:
         return {"type": "text", "text": str(block)}
 
     # ---- compaction -------------------------------------------------------
+    def context_window(self) -> int:
+        """The active model's real context window, or the configured fallback.
+
+        Asks the live catalog first (``sources.context_window_for``), because the
+        configured value is one number for every model and the models in this
+        harness differ by an order of magnitude — a 1M-window free model and a
+        64k one cannot share a compaction threshold without the small one
+        overflowing before it ever trips, or the large one compacting away
+        history it had room to keep. Measured live on UnoRouter's free tier: a
+        spread of 65,536 to 1,048,576, a 16x range.
+
+        Never raises: a cold cache, an unknown source and a malformed catalog all
+        return ``None``, and the fallback is the right answer in every one of
+        those cases.
+
+        Public because the UI needs it too — the telemetry gauge draws its
+        percentage against this window, and it must be the same window the
+        compaction threshold uses or the two would disagree on screen.
+        """
+        try:
+            from . import sources as sources_mod
+            found = sources_mod.context_window_for(self.cfg.base_url, self.cfg.model)
+        except Exception:  # noqa: BLE001 - a lookup must not break a turn
+            found = None
+        return found or self.cfg.context_window
+
+    def _should_compact(self, window: int) -> bool:
+        """Whether the prompt is close enough to the window to compact first."""
+        if not self.cfg.auto_compact:
+            return False
+        if self._last_input_tokens <= 0:
+            return False
+        # Too little history to summarise — `compact()` would refuse anyway, and
+        # emitting the event pair for a no-op would put a "compacted" line in the
+        # transcript that did not happen.
+        if len(self.messages) < 4:
+            return False
+        return self._last_input_tokens >= window * self.cfg.compact_at
+
+    @staticmethod
+    def _is_context_overflow(e: Exception) -> bool:
+        """Whether *e* is the endpoint rejecting the prompt for being too long.
+
+        Matched on the message rather than the status alone, because 400 is the
+        generic bad-request code and a model-name typo is also a 400 — compacting
+        the history in response to a bad model name would throw away the session
+        for nothing. The phrasings are the ones actually seen: Anthropic's
+        ``prompt is too long``, and the LiteLLM/openai-style
+        ``context length``/``maximum context``/``too many tokens`` that the local
+        proxies pass through.
+        """
+        import anthropic
+        if not isinstance(e, anthropic.BadRequestError):
+            return False
+        msg = str(e).lower()
+        return any(
+            needle in msg
+            for needle in (
+                "prompt is too long",
+                "context length",
+                "context_length",
+                "maximum context",
+                "too many tokens",
+                "exceeds the maximum",
+            )
+        )
+
     async def compact(self) -> tuple[bool, str]:
         """Summarise the conversation so far into a single recap message."""
         if len(self.messages) < 4:

@@ -236,7 +236,7 @@ will restart the checkout under you on the next launch.
 --rain               start with matrix rain on
 --no-rain            no rain anywhere
 --max-tokens N       max output tokens per reply
---max-iterations N   ceiling on autonomous steps (default 40)
+--no-auto-compact    never compact history automatically (/compact still works)
 --unsafe             disable the filesystem jail
 --panes              run under tmux; ctrl+b h/v open more ZimZilla panes
 --resume SESSION     restore a saved session at launch (used by /panes)
@@ -270,6 +270,60 @@ harmless standalone, so it is safe to just press it twice out of habit.
 A pre-existing server on the private socket would otherwise keep tmux's stock
 key table — `tmux -f` is read only when a server *starts* — so `--panes` sources
 its config into whatever server it finds before attaching.
+
+---
+
+## Limits
+
+`/limits` prints all of these for the running session, and says where each
+figure came from. Four limits matter, and they are independent — a turn that
+stops is almost always one of the last two, not the first.
+
+| Limit | Default | What happens at it |
+|---|---|---|
+| **Context window** | the model's own, from the live catalog (1M fallback) | History is compacted automatically at 80% — see below |
+| **Output ceiling** | 32768 tokens | The reply is cut off; reported as `truncated`, never silently |
+| **Rounds before pause** | 40 | The turn **continues** if the last round did real work; otherwise it stops and says so |
+| **Hard round limit** | 400 | The turn stops and says so — this is the runaway guard |
+
+### Why a long turn used to just stop
+
+This was a real bug, reported as *"sometimes in long tasks my models just go to
+idle loop."* It was not the context limit and it was not idleness. The loop ran
+`for iteration in range(40)`, and on the 41st round it fell out of the `for` and
+emitted an ordinary `turn_end` — the same event a *finished* turn emits. The UI
+turns that into `IDLE`, so a turn that had run out of rounds was rendered
+exactly like one that was done, and nothing picked the work back up.
+
+Now the two are distinguishable:
+
+- A turn still making progress past the round cap **keeps going**, up to the
+  hard limit, printing `N rounds and still progressing — continuing`.
+- A turn that stops — because a round achieved nothing, or because it hit the
+  hard limit — prints why, and the loop rail reads `CAPPED` rather than `IDLE`
+  until the next turn starts.
+
+"Progress" means a tool ran and succeeded. A round of nothing but denials and
+errors is the loop spinning, and that is what the cap is for.
+
+### Auto-compact
+
+History is summarised automatically when the **measured** prompt size — the
+`input_tokens` the endpoint reported for the previous call — reaches 80% of the
+model's window. The trigger is a real measurement, not an estimate, and it is
+checked *before* each request rather than after one fails.
+
+The window is per-model: it comes from the active source's live catalog
+(UnoRouter's `contextWindow`, OpenRouter's and TokenHarbour's `context_length`,
+AntSeed's caps), falling back to `context_window` when the catalog does not
+publish one. That matters because the models here differ by an order of
+magnitude — a 1M-window free model and a 64k one cannot share a threshold
+without the small one overflowing before it trips.
+
+If a request is *still* rejected for being too long, that is recognised as a
+context overflow (rather than the generic `bad request` it used to print),
+history is compacted, and the round is retried once. `/compact` still works by
+hand; `--no-auto-compact` turns the automatic path off entirely.
 
 ---
 
@@ -620,6 +674,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/save [name]` | write the session to disk |
 | `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |
+| `/limits` | context window, round caps and timeouts — and where each figure comes from |
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/osint-tree [kind\|path]` | re-show a finished recon as a result tree |
@@ -1406,7 +1461,18 @@ python tests/test_osint_tree.py    # the result tree — parser, real reports, /
 python tests/test_update.py        # self-update — real git, throwaway repos
 python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv
+python tests/test_deliverable.py   # the deliverable check — nudge, truncation, honesty
+python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, overflow
 ```
+
+`test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so
+it needs no network. It pins the four behaviours that used to be one: that a
+capped turn emits `iteration_cap` instead of being swallowed into a plain
+`turn_end`, that a turn still progressing continues past the soft cap, that a
+stale success cannot carry a now-stuck loop past it, and that auto-compact
+fires above the threshold and not below. The overflow cases assert the two
+things a naive match gets wrong — a bad model name is also a 400 and must
+**not** trigger a compaction, and a second overflow must not retry forever.
 
 `test_hunt.py` builds campaigns in a throwaway state directory and runs them
 through the real loop with a stubbed model, including the boot migration — a

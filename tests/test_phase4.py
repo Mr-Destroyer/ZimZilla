@@ -708,8 +708,15 @@ async def test_ui_rails(wd: Path) -> None:
         gauge = tele.query_one(ContextGauge)
         check("rails: gauge tracks the last call's prompt size", gauge.used == 52_500,
               f"{gauge.used}")
+        # Asserted against the gauge's own total rather than a literal window:
+        # the window is per-model now (the live catalog's figure, else the
+        # configured fallback), so a hardcoded denominator pins this to whatever
+        # the default happened to be and breaks the moment it changes. What is
+        # being tested is that the ratio is the prompt's *share of the window*,
+        # which this states without naming a number.
         check("rails: gauge ratio is the prompt share of the window",
-              abs(gauge.ratio - 52_500 / 128_000) < 1e-6, f"{gauge.ratio:.3f}")
+              abs(gauge.ratio - 52_500 / gauge.total) < 1e-6,
+              f"{gauge.ratio:.3f} of {gauge.total}")
 
         calls = tele.query_one(CallStrip)
         check("rails: every tool call is logged", len(calls.calls) == 2, str(list(calls.calls)))
@@ -728,10 +735,13 @@ async def test_ui_rails(wd: Path) -> None:
         check("rails: the live card is flushed after the turn", not chat.card_active)
 
         # ---- the gauge escalates at its thresholds -----------------------
-        gauge.set(128_000)
-        check("rails: gauge saturates at 100%", gauge.ratio == 1.0)
-        gauge.set(200_000)
-        check("rails: gauge never exceeds 100%", gauge.ratio == 1.0)
+        # Set *at* and *past* the gauge's own total rather than at a literal:
+        # saturation is a property of the ratio clamp, not of the window size,
+        # and this stays true for any window.
+        gauge.set(gauge.total)
+        check("rails: gauge saturates at 100%", gauge.ratio == 1.0, f"{gauge.ratio:.3f}")
+        gauge.set(gauge.total * 2)
+        check("rails: gauge never exceeds 100%", gauge.ratio == 1.0, f"{gauge.ratio:.3f}")
         gauge.set(0)
 
         # ---- the live card lifecycle -------------------------------------

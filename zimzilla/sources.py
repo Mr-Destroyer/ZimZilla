@@ -135,6 +135,62 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
     return MODELS_BY_KEY.get(key) or None
 
 
+def catalog_models(key: str) -> list | None:
+    """The cached catalog of *key*, as that source module's own ``Model`` list.
+
+    ``None`` for a source with no catalog (Logfare's is health-only and carries
+    no window) or a cold cache. Kept as a small dispatch rather than a dict of
+    importers so the modules stay lazily imported — ``sources`` is imported by
+    their callers, and a module-level import would make them import each other.
+    """
+    if key == "tokenharbour":
+        from . import tokenharbour as th_mod
+        return th_mod.cached_models()
+    if key == "openrouter":
+        from . import openrouter as or_mod
+        return or_mod.cached_models()
+    if key == "unorouter":
+        from . import unorouter as uno_mod
+        return uno_mod.cached_models()
+    if key == "antseed":
+        from . import antseed as as_mod
+        return as_mod.cached_models()
+    return None
+
+
+def context_window_for(base_url: str, model: str) -> int | None:
+    """The active model's real context window, from its source's live catalog.
+
+    ``None`` when nothing knows — an unknown source, a cold cache, or a catalog
+    that simply does not publish a window (Logfare's status API has no such
+    field). The caller falls back to ``Config.context_window``, so a ``None``
+    here is not a failure: it means "use the default".
+
+    Read from the cache and never fetched, for the same reason ``catalog_for``
+    never fetches: this is called on the turn path, and a blocking network read
+    there would stall the very loop it is measuring.
+
+    The field is spelled ``context_length`` in every module that has one, but it
+    is read by name off whatever the module's own ``Model`` exposes rather than
+    by importing four dataclasses to unify them — that keeps each source's
+    parsing where it already lives.
+    """
+    key = active_key(base_url)
+    if key is None:
+        return None
+    cached = catalog_models(key)
+    if not cached:
+        return None
+    for entry in cached:
+        if getattr(entry, "id", None) != model:
+            continue
+        window = getattr(entry, "context_length", None)
+        if isinstance(window, int) and window > 0:
+            return window
+        return None
+    return None
+
+
 def _first(paths: list[Path]) -> Path | None:
     for p in paths:
         if p and p.is_file():

@@ -158,6 +158,12 @@ class LoopRail(RailResizeMixin, Static):
         self.hunt: dict | None = None
         #: Last few stages, newest last — a short breadcrumb of the cycle.
         self.trail: deque[str] = deque(maxlen=6)
+        #: Set when the turn stopped at a round cap rather than finishing. A
+        #: capped turn and a finished one both end with the stage at ``idle``,
+        #: so without this they render identically — which is how a long task
+        #: that ran out of rounds looked exactly like one that was done. Held
+        #: as a dict so the rail can say which cap and how far it got.
+        self.cap: dict | None = None
         self._init_resize()
 
     def set_stage(self, stage: str) -> None:
@@ -167,6 +173,22 @@ class LoopRail(RailResizeMixin, Static):
             self.trail.append(stage)
         self.stage = stage
         self.render_rail()
+
+    def set_capped(self, rounds: int, limit: int, hard: bool = False) -> None:
+        """Record that the turn stopped at a round cap, and repaint.
+
+        Deliberately *not* cleared by ``set_stage("idle")``: the whole point is
+        to outlive the idle transition, so the rail still says the turn was cut
+        short after it has gone quiet. Cleared at the start of the next turn.
+        """
+        self.cap = {"rounds": rounds, "limit": limit, "hard": hard}
+        self.render_rail()
+
+    def clear_cap(self) -> None:
+        """Forget a previous turn's cap — called when a new turn starts."""
+        if self.cap is not None:
+            self.cap = None
+            self.render_rail()
 
     def set_counters(self, turn: int, iteration: int) -> None:
         self.turn = turn
@@ -210,16 +232,24 @@ class LoopRail(RailResizeMixin, Static):
         for i, stage in enumerate(STAGES):
             active = stage == self.stage
             last = i == len(STAGES) - 1
-            # The lit node alternates between two marks so it reads as alive
-            # without needing a colour Textual would blend off-palette.
-            if active:
+            # A capped turn is sitting at `idle` but is NOT finished, so the
+            # idle node must not read as the resting state. Rendered amber with
+            # its own label rather than the dim IDLE, because the two are
+            # otherwise indistinguishable — the failure this exists to fix.
+            capped_idle = stage == "idle" and self.cap is not None
+            if capped_idle:
+                mark = "◼"
+                style = f"bold {p.amber}"
+            elif active:
+                # The lit node alternates between two marks so it reads as alive
+                # without needing a colour Textual would blend off-palette.
                 mark = "◉" if self.pulse else "◎"
                 style = f"bold {p.accent}"
             else:
                 mark = "○"
                 style = p.dim
             t.append(f" {mark} ", style=style)
-            t.append(STAGE_LABEL[stage], style=style)
+            t.append("CAPPED" if capped_idle else STAGE_LABEL[stage], style=style)
             t.append("\n")
             if not last:
                 # Connector: bright only up to the active node.
@@ -230,8 +260,18 @@ class LoopRail(RailResizeMixin, Static):
         if self.hunt is None:
             t.append("turn ", style=p.dim)
             t.append(f"{self.turn}\n", style=p.primary)
-            t.append("iter ", style=p.dim)
-            t.append(f"{self.iteration}\n", style=p.primary)
+            if self.cap is not None:
+                # The round count replaces the iteration readout: after a cap
+                # the iteration number is the same thing, and what matters is
+                # that it hit a limit. `/continue` is named because that is the
+                # command that picks the work back up.
+                t.append("rounds ", style=p.dim)
+                t.append(f"{self.cap['rounds']}\n", style=f"bold {p.amber}")
+                t.append("cap ", style=p.dim)
+                t.append(f"{self.cap['limit']}\n", style=f"bold {p.amber}")
+            else:
+                t.append("iter ", style=p.dim)
+                t.append(f"{self.iteration}\n", style=p.primary)
         else:
             # A campaign has no turn or iteration to report, so showing the
             # main agent's would be a lie about what is running. Wave and agent
@@ -617,8 +657,21 @@ class TelemetryRail(RailResizeMixin, Static):
     def push_wave(self, sample: float) -> None:
         self.query_one("#tel-wave", Waveform).push(sample)
 
-    def set_context(self, used: int) -> None:
-        self.query_one("#tel-gauge", ContextGauge).set(used, self.total_context)
+    def set_context(self, used: int, total: int | None = None) -> None:
+        """Set the gauge's reading, and the window it is a share of.
+
+        ``total`` is passed when the active model's real window is known (the
+        live catalog's figure, resolved in ``agent.context_window``) so the
+        percentage is a share of *that* model's window rather than of the
+        configured fallback. Omitted, the gauge keeps the total it was built
+        with — which is what the boot and resize paths want, since they have no
+        model reading to offer.
+        """
+        gauge = self.query_one("#tel-gauge", ContextGauge)
+        gauge.set(used, total)
+        # Keep the rail's own copy in step, so a later `set_context(used)` with
+        # no total does not snap the gauge back to the boot-time value.
+        self.total_context = gauge.total
 
     def touch_file(self, path: str) -> None:
         if path:

@@ -1437,6 +1437,9 @@ class ZimZillaApp(App):
 
         loop = self._loop_rail()
         if loop is not None:
+            # A previous turn's cap must not carry into this one, or the rail
+            # would say CAPPED while the new turn is running fine.
+            loop.clear_cap()
             loop.set_stage("thinking")
             loop.set_counters(self.agent.turn_count + 1, 0)
 
@@ -1544,7 +1547,11 @@ class ZimZillaApp(App):
             # a live context reading available.
             self._last_call_input = ev["input"]
             if tele is not None:
-                tele.set_context(self._last_call_input)
+                # The window is passed alongside so the gauge's percentage is a
+                # share of *this model's* window, not of the configured
+                # fallback — resolved the same way the auto-compact threshold
+                # resolves it, so the two can never disagree.
+                tele.set_context(self._last_call_input, self.agent.context_window())
 
         elif etype == "tool_call":
             self._flush_stream(chat, p)
@@ -1591,6 +1598,69 @@ class ZimZillaApp(App):
             self._flush_stream(chat, p)
             chat.card_finish()
             chat.write_block(R.error_block(ev["message"], p))
+
+        elif etype == "continuing":
+            # The soft round cap was passed because the turn is still getting
+            # work done. Said out loud so a long turn is legible rather than
+            # looking stuck — and so the count is visible when it does stop.
+            self._flush_stream(chat, p)
+            self._sys_line(
+                f"{ev['rounds']} rounds and still progressing — continuing "
+                f"({ev['continued']} past the {ev['limit']}-round cap)",
+                ok=True,
+            )
+
+        elif etype == "iteration_cap":
+            # The turn stopped at a round cap. This is the event whose absence
+            # was the bug: the loop used to fall out of `for range()` and yield
+            # a plain turn_end, so a capped turn and a finished one looked
+            # identical and the rail went IDLE with the task unfinished.
+            self._flush_stream(chat, p)
+            chat.card_finish()
+            if ev.get("hard"):
+                self._sys_line(
+                    f"stopped at the hard limit of {ev['limit']} rounds — this "
+                    "is a runaway guard, so the turn was probably looping "
+                    "without progressing. Send another message to carry on.",
+                    warn=True,
+                )
+            else:
+                self._sys_line(
+                    f"stopped at {ev['limit']} rounds with no progress in the "
+                    "last one — the task may be unfinished. Send another "
+                    "message to carry on from here.",
+                    warn=True,
+                )
+            if loop is not None:
+                loop.set_capped(ev["rounds"], ev["limit"], bool(ev.get("hard")))
+
+        elif etype == "compacting":
+            self._flush_stream(chat, p)
+            chat.card_finish()
+            where = "the prompt overflowed" if ev.get("trigger") == "overflow" \
+                else "context is nearly full"
+            self._sys_line(
+                f"{where} — compacting history automatically "
+                f"({ev['used']:,} / {ev['window']:,} tokens)",
+                warn=True,
+            )
+            bar.set_activity("compacting", busy=True)
+
+        elif etype == "compacted":
+            if ev["ok"]:
+                self._sys_line(
+                    "history compacted — carrying on with a summary of it",
+                    ok=True,
+                )
+                # The prompt is now a summary, so the live gauge reading is
+                # stale by design; drop it to zero rather than leave the old,
+                # much larger number on screen as though nothing happened.
+                self._last_call_input = 0
+                if tele is not None:
+                    tele.set_context(0)
+            else:
+                self._sys_line(f"auto-compact failed: {ev['note']}", warn=True)
+            bar.set_activity("thinking", busy=True)
 
         elif etype == "truncated":
             # The reply hit the output ceiling and was cut off. Said out loud
@@ -1799,6 +1869,11 @@ class ZimZillaApp(App):
         # Useful mid-run too — while a *new* recon is cooking, the previous
         # one's tree is exactly what you want to compare against.
         "osint-tree",
+        # Reading the session's own limits is a pure read of state that is
+        # already in memory, and it is most useful *during* a long turn — "is
+        # this about to hit a cap" is exactly the question a running turn
+        # raises. It starts no turn and touches nothing the live one owns.
+        "limits",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1817,6 +1892,7 @@ class ZimZillaApp(App):
             "save": self._cmd_save,
             "load": self._cmd_load,
             "compact": lambda a: self._cmd_compact(),
+            "limits": lambda a: self._cmd_limits(),
             "team": lambda a: self._cmd_team(a),
             "osint": lambda a: self._cmd_osint(a),
             "osint-tree": lambda a: self._cmd_osint_tree(a),
@@ -1889,6 +1965,7 @@ class ZimZillaApp(App):
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
+            ("/limits", "context window, round caps, timeouts — and where each comes from"),
             ("/team <task>", "fan the task out across parallel agents"),
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
             ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
@@ -2276,6 +2353,49 @@ class ZimZillaApp(App):
             t.append(value + "\n", style=p.primary)
         t.append(f"  {'session total':<18}", style=p.dim)
         t.append(f"${a.session_cost:.4f}\n", style=f"bold {p.accent}")
+        self.query_one(ChatPane).write_block(t)
+
+    def _cmd_limits(self, args=None) -> None:
+        """/limits — what this session will stop at, and where each number comes from.
+
+        Every limit here has bitten at least once, and the reason they are worth
+        a command is that they are otherwise invisible: a turn that ran out of
+        rounds looked exactly like one that finished, and the context window was
+        drawn on a gauge but never enforced. Naming the source of each figure
+        matters as much as the figure — the window is per-model from the live
+        catalog when the catalog knows, and the fallback when it does not.
+        """
+        p = self.palette
+        a = self.agent
+        window = a.context_window()
+        from_catalog = window != self.cfg.context_window
+        used = a._last_input_tokens
+        t = Text()
+        t.append("  SESSION LIMITS\n\n", style=f"bold {p.accent}")
+        rows = [
+            ("context window", f"{window:,}",
+             "from this model's catalog entry" if from_catalog
+             else f"fallback (catalog has no figure for {self.cfg.model})"),
+            ("last prompt", f"{used:,}" if used else "not measured yet",
+             f"{used / window * 100:.1f}% of the window" if used else ""),
+            ("auto-compact", "on" if self.cfg.auto_compact else "off",
+             f"compacts at {self.cfg.compact_at:.0%} of the window"
+             if self.cfg.auto_compact else "/compact still works by hand"),
+            ("output ceiling", f"{self.cfg.max_tokens:,}",
+             "per reply; a reply cut off here is reported as truncated"),
+            ("rounds before pause", f"{self.cfg.max_iterations}",
+             "continues automatically while the turn is progressing"),
+            ("hard round limit", f"{self.cfg.max_rounds}",
+             "runaway guard; the turn stops and says so"),
+            ("request timeout", f"{self.cfg.request_timeout:g}s",
+             "bounds the gap between streamed chunks"),
+        ]
+        for label, value, note in rows:
+            t.append(f"  {label:<20}", style=p.dim)
+            t.append(f"{value:<14}", style=p.primary)
+            if note:
+                t.append(note, style=p.dim)
+            t.append("\n")
         self.query_one(ChatPane).write_block(t)
 
     def _cmd_scope(self, args=None) -> None:
@@ -5426,6 +5546,7 @@ class ZimZillaApp(App):
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),
+            ("/limits", "context window, round caps and timeouts", "limits"),
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
             ("/osint-tree", "re-show a finished recon as a result tree", "osint"),

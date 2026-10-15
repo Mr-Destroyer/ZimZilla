@@ -222,12 +222,42 @@ class Config:
     # per-read timeout, so it bounds the gap between streamed chunks, not the
     # length of a healthy reply.
     request_timeout: float = 120.0
-    # Context window of the active model, in tokens. Used only to draw the
-    # telemetry gauge — it is never sent to the endpoint and never enforced:
-    # the harness does not truncate history on its own (that is /compact's
-    # job). A wrong value therefore costs nothing but a misleading gauge.
-    context_window: int = 128_000
+    # Context window of the active model, in tokens. This is the FALLBACK used
+    # when the live catalog does not say — `sources.context_window_for` asks the
+    # active source's own catalog first, and every remote source parses a real
+    # per-model figure (UnoRouter's ``metadata.contextWindow``, OpenRouter's and
+    # TokenHarbour's ``context_length``, AntSeed's caps). The fallback is 1M
+    # because the models this harness actually lands on are the long-context
+    # ones: a free tier that offers 1M and a harness that assumed 128k would
+    # compact away history it did not need to lose.
+    #
+    # It IS enforced now — see ``compact_at`` below. It used to be gauge-only,
+    # which is why "raise the limit to 1M" did nothing on its own.
+    context_window: int = 1_000_000
+    #: Fraction of ``context_window`` at which history is compacted automatically.
+    #: Checked before each request against the *previous* call's real
+    #: ``input_tokens``, so the trigger is a measured prompt size rather than an
+    #: estimate. 0.8 leaves a fifth of the window for the reply, the tool results
+    #: it will ask for, and the growth between the check and the next call.
+    #:
+    #: Not 1.0: the failure mode at 1.0 is the one this exists to prevent — the
+    #: request that finally overflows is the one that was already too big, and it
+    #: fails after spending the tokens.
+    compact_at: float = 0.8
+    #: Whether to compact automatically at ``compact_at``. On by default: the
+    #: whole point is that a long task should not need the operator to notice.
+    auto_compact: bool = True
+    #: Tool rounds in one turn before the loop pauses to reconsider. This is the
+    #: cap that ended long turns silently, so it is deliberately high: it exists
+    #: to stop a runaway loop, not to bound honest work. A turn that keeps making
+    #: progress past it CONTINUES automatically (see ``max_rounds``); only a turn
+    #: that stops making progress ends there, and it now says so.
     max_iterations: int = 40
+    #: Hard ceiling on tool rounds in a single turn, auto-continues included.
+    #: The backstop for a genuinely runaway loop — a model that keeps calling a
+    #: tool forever without advancing. 400 rounds is far past any honest task and
+    #: still finite, so a pathological turn ends in minutes rather than never.
+    max_rounds: int = 400
     bash_timeout: int = 120
     max_output_chars: int = 20_000
     theme: str = "green"
