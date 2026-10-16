@@ -226,7 +226,15 @@ def looks_like_key(value: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _headers(token: str, *, json_body: bool = False) -> dict[str, str]:
-    h = {"Authorization": f"Bearer {token}"}
+    """Bearer auth, omitted entirely when there is no token.
+
+    The six catalogs are public and answer fine with no Authorization
+    header at all, so an empty token must mean *absent*, not
+    ``Bearer `` — a literal empty bearer is a different request.
+    """
+    h: dict[str, str] = {}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
     if json_body:
         h["Content-Type"] = "application/json"
     return h
@@ -312,15 +320,21 @@ def _parse_entries(payload) -> list[Entry]:
 
 def fetch_catalog(service: str, token: str = "", *, timeout: float = 20.0,
                   use_cache: bool = True) -> tuple[list[Entry] | None, str]:
-    """``(entries, error)`` — live fetch of one service's catalog."""
+    """``(entries, error)`` — live fetch of one service's catalog.
+
+    Keyless is a first-class case, not an error: the six catalogs are
+    public and unauthenticated, so browsing them is useful *before*
+    ``/ldxhub-api-setup`` has run. A key is only needed to run a job.
+    """
     kind = SERVICES.get(service)
     if kind is None:
         return None, f"unknown service {service!r}"
     if not token:
         creds = load_credentials()
-        if not creds:
-            return None, "no LDXHub key — run /ldxhub-api-setup"
-        token = creds[0]
+        if creds:
+            token = creds[0]
+        # No credential is fine here — the request simply goes out
+        # unauthenticated.
     if use_cache:
         hit = _CACHE.get((token, service))
         if hit and time.monotonic() - hit[1] < CACHE_TTL:
@@ -336,11 +350,15 @@ def fetch_catalog(service: str, token: str = "", *, timeout: float = 20.0,
 def cached_catalog(service: str) -> list[Entry] | None:
     """Non-blocking UI read. TTL checked on *read* — an expired entry
     reads as None so the next UI action re-fetches instead of serving
-    stale models forever."""
+    stale models forever.
+
+    Keyed on the token, and a keyless session keys on ``""`` — the
+    catalogs are public, so browsing before ``/ldxhub-api-setup`` is a
+    supported state rather than a miss.
+    """
     creds = load_credentials()
-    if not creds:
-        return None
-    hit = _CACHE.get((creds[0], service))
+    token = creds[0] if creds else ""
+    hit = _CACHE.get((token, service))
     if not hit:
         return None
     if time.monotonic() - hit[1] >= CACHE_TTL:
@@ -354,9 +372,8 @@ def clear_cache() -> None:
 
 def catalog_age(service: str) -> float | None:
     creds = load_credentials()
-    if not creds:
-        return None
-    hit = _CACHE.get((creds[0], service))
+    token = creds[0] if creds else ""
+    hit = _CACHE.get((token, service))
     return time.monotonic() - hit[1] if hit else None
 
 

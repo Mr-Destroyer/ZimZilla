@@ -103,6 +103,10 @@ TOOL_NAMES = (
     "ldxhub_convert", "ldxhub_refine", "ldxhub_list",
 )
 
+#: The five that run a paid job, and so need a key. ``ldxhub_list`` is not
+#: one of them — the catalogs are public.
+JOB_TOOLS = TOOL_NAMES[:5]
+
 
 class _Resp(io.BytesIO):
     """A urlopen() result: a context manager that also reports a status."""
@@ -313,14 +317,59 @@ def test_no_key_is_echoed(tmp: Path) -> None:
         check("creds: save_default refuses without a key",
               ldx.save_default("structflow", "sf-alpha") is None)
 
-        entries, err = ldx.fetch_catalog("structflow")
-        check("creds: a keyless catalog fetch explains itself",
-              entries is None and "/ldxhub-api-setup" in err, err)
-
         # A token that was never given back is never printed either.
         src = (ROOT / "zimzilla" / "ldxhub.py").read_text(encoding="utf-8")
         check("creds: the module prints no token",
               "print(" not in src and "logging" not in src)
+
+
+def test_keyless_catalog_browsing(tmp: Path) -> None:
+    """The catalogs are public: browsing works before any key exists.
+
+    This is the state a new user is in, and the one the docs promise. The
+    request must go out with NO Authorization header at all — a literal
+    ``Bearer `` with an empty token is a different request, and the gateway
+    answers the two differently.
+    """
+    from zimzilla import ldxhub as ldx
+
+    ldx.clear_cache()
+    with _clean_env(), mock.patch.object(ldx, "PROFILE", tmp / "absent" / "source"):
+        seen, opener = _capture()
+        with mock.patch("urllib.request.urlopen", opener):
+            entries, err = ldx.fetch_catalog("structflow")
+        check("keyless: a catalog fetch succeeds with no key",
+              err == "" and entries is not None and len(entries) == 3,
+              f"err={err!r}")
+        check("keyless: no Authorization header is sent",
+              "authorization" not in seen["headers"], str(seen["headers"]))
+        check("keyless: the request still carries no data",
+              seen["data"] is None)
+
+        # Every service, not just the first — the whole point is browsing.
+        for svc in ldx.SERVICES:
+            e, err = ldx.fetch_catalog(svc, use_cache=False)
+            check(f"keyless: {svc} lists without a key",
+                  err == "" and e is not None, err)
+
+        # And the non-blocking read agrees, keyed on the empty token.
+        check("keyless: cached_catalog reads the anonymous entry",
+              ldx.cached_catalog("structflow") is not None)
+        check("keyless: catalog_age is a number",
+              isinstance(ldx.catalog_age("structflow"), float))
+
+        # A key, once stored, is used — the anonymous path is a fallback,
+        # not a replacement.
+        ldx.save_key("zpka_" + "z" * 30)
+        ldx.clear_cache()
+        seen, opener = _capture()
+        with mock.patch("urllib.request.urlopen", opener):
+            ldx.fetch_catalog("structflow")
+        check("keyless: a stored key switches the header back on",
+              seen["headers"].get("authorization") == "Bearer zpka_" + "z" * 30)
+        check("keyless: the cache is keyed separately from anonymous",
+              ("zpka_" + "z" * 30, "structflow") in ldx._CACHE)
+    ldx.clear_cache()
 
 
 def test_json_is_total() -> None:
@@ -496,6 +545,9 @@ def test_cache_is_keyed_and_expires() -> None:
         os.environ["LDXHUB_API_KEY"] = "tok-a"
         check("cache: cached_catalog reads by the credential token",
               ldx.cached_catalog("structflow") is not None)
+        check("cache: a different token reads nothing",
+              ("tok-c", "structflow") not in ldx._CACHE
+              and ldx._CACHE.get(("tok-b", "structflow")) is not None)
         check("cache: catalog_age is a small positive number",
               isinstance(ldx.catalog_age("structflow"), float))
 
@@ -510,12 +562,20 @@ def test_cache_is_keyed_and_expires() -> None:
 
         ldx.clear_cache()
         check("cache: clear_cache empties it", ldx._CACHE == {})
-        check("cache: no credentials means no cached read",
-              ldx.cached_catalog("structflow") is None)
 
+    # Keyless, the cache keys on "" — the public catalogs are browsable
+    # before any key exists, so a cold keyless read is a miss, not an error.
     with _clean_env(), mock.patch.object(ldx, "PROFILE", Path("/nonexistent/x")):
-        check("cache: catalog_age is None without a key",
+        check("cache: a cold keyless read is None",
+              ldx.cached_catalog("structflow") is None)
+        check("cache: a cold keyless age is None",
               ldx.catalog_age("structflow") is None)
+        with mock.patch("urllib.request.urlopen", _stub()):
+            ldx.fetch_catalog("structflow")
+        check("cache: a keyless fetch populates the anonymous slot",
+              ("", "structflow") in ldx._CACHE)
+        check("cache: and is then readable without a key",
+              ldx.cached_catalog("structflow") is not None)
     ldx.clear_cache()
 
 
@@ -746,8 +806,10 @@ def test_tool_gating(tmp: Path) -> None:
     from zimzilla import ldxhub as ldx
     from zimzilla import tools as t
 
-    check("tools: LDXHUB_TOOLS is exactly the six",
-          t.LDXHUB_TOOLS == set(TOOL_NAMES), str(sorted(t.LDXHUB_TOOLS)))
+    check("tools: LDXHUB_TOOLS is exactly the five job tools",
+          t.LDXHUB_TOOLS == set(JOB_TOOLS), str(sorted(t.LDXHUB_TOOLS)))
+    check("tools: ldxhub_list is NOT key-gated — the catalogs are public",
+          "ldxhub_list" not in t.LDXHUB_TOOLS)
 
     schema_names = {s["name"] for s in t.TOOL_SCHEMAS}
     for name in TOOL_NAMES:
@@ -765,12 +827,16 @@ def test_tool_gating(tmp: Path) -> None:
     with _clean_env(), mock.patch.object(ldx, "PROFILE", tmp / "none" / "source"):
         a = agent_mod.Agent(cfg)
         advertised = {s["name"] for s in a.tool_schemas()}
-        check("gate: no key means no ldxhub schemas",
-              not (advertised & set(TOOL_NAMES)),
-              str(sorted(advertised & set(TOOL_NAMES))))
-        reason = a._denied("ldxhub_list")
-        check("gate: the refusal names the setup command",
+        check("gate: no key withholds the five job tools",
+              not (advertised & set(JOB_TOOLS)),
+              str(sorted(advertised & set(JOB_TOOLS))))
+        check("gate: no key still advertises ldxhub_list",
+              "ldxhub_list" in advertised)
+        reason = a._denied("ldxhub_structflow")
+        check("gate: the job-tool refusal names the setup command",
               reason is not None and "/ldxhub-api-setup" in reason, str(reason))
+        check("gate: ldxhub_list is never denied for want of a key",
+              a._denied("ldxhub_list") is None, str(a._denied("ldxhub_list")))
 
     with _clean_env():
         os.environ["LDXHUB_API_KEY"] = "zpka_" + "k" * 30
@@ -779,8 +845,8 @@ def test_tool_gating(tmp: Path) -> None:
         check("gate: a key advertises all six",
               advertised >= set(TOOL_NAMES),
               str(sorted(set(TOOL_NAMES) - advertised)))
-        check("gate: with a key the tools are not denied",
-              a._denied("ldxhub_list") is None)
+        check("gate: with a key nothing is denied",
+              all(a._denied(n) is None for n in TOOL_NAMES))
 
     # A mode that denies a normal tool must not accidentally deny these, and
     # the six must survive the mode policy untouched.
@@ -1031,11 +1097,27 @@ def test_list_handler(tmp: Path) -> None:
         check("list: a catalog error is reported, not raised",
               not out.is_error and "boom" in out.output, out.output)
 
-    # No key at all: the handler refuses before any fetch.
+    # The catalogs are public, so listing must work before a key exists —
+    # only the *tools that run jobs* need one.
     with _clean_env(), mock.patch.object(ldx, "PROFILE", tmp / "none" / "source"):
-        out = _run("ldxhub_list", {}, cfg)
-        check("list: without a key the tool refuses and names the fix",
+        ldx.clear_cache()
+        seen, opener = _capture()
+        with mock.patch("urllib.request.urlopen", opener):
+            out = _run("ldxhub_list", {"service": "structflow"}, cfg)
+        check("list: a keyless list succeeds against the public catalog",
+              not out.is_error and "sf-alpha" in out.output, out.output)
+        check("list: the keyless request sends no Authorization header",
+              "authorization" not in seen["headers"], str(seen["headers"]))
+
+        check("list: the keyless legend says a key is only for jobs",
+              "/ldxhub-api-setup" in out.output and "browse" in out.output,
+              out.output)
+
+        # The job-running tools do need the key, and say so.
+        out = _run("ldxhub_structflow", {"prompt": "x"}, cfg)
+        check("list: a job tool without a key names the fix",
               out.is_error and "/ldxhub-api-setup" in out.output, out.output)
+    ldx.clear_cache()
 
 
 def test_deliver(tmp: Path) -> None:
@@ -1213,8 +1295,9 @@ def test_tui_surfaces() -> None:
           '("/ldxhub-api-setup [key]"' in app)
     check("tui: /help lists the models command",
           '("/ldxhub-models [service]"' in app)
-    check("tui: the status pane shows the keyless hint",
-          "no key — /ldxhub-api-setup (document jobs)" in app)
+    check("tui: the status pane shows the keyless hint, and says browsing is free",
+          "no key — /ldxhub-api-setup (jobs; /ldxhub-models " in app
+          and "browses free)" in app)
     check("tui: the fetch runs off the UI thread",
           "@work(exclusive=True, thread=True)" in app
           and "def _fetch_ldxhub_models(self, service: str) -> None:" in app)
@@ -1247,6 +1330,7 @@ def main() -> int:
         test_read_exports_is_total(tmp)
         test_credential_precedence(tmp)
         test_no_key_is_echoed(tmp)
+        test_keyless_catalog_browsing(tmp)
         test_json_is_total()
         test_json_sends_a_bearer_and_a_body()
         test_parse_entries()

@@ -2714,8 +2714,8 @@ class ZimZillaApp(App):
             t.append("      tools   ", style=p.primary)
             t.append(f"{'LDXHub':<12} ", style=p.primary)
             if creds is None:
-                t.append("no key — /ldxhub-api-setup (document jobs)\n",
-                         style=p.amber)
+                t.append("no key — /ldxhub-api-setup (jobs; /ldxhub-models "
+                         "browses free)\n", style=p.amber)
             else:
                 t.append(f"key from {creds[2]} (document tools, not a source)\n",
                          style=p.accent)

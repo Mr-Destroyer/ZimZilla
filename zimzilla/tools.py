@@ -478,13 +478,18 @@ MAIN_ONLY_TOOLS = {"hunt_findings"}
 #: and hunt agents, which are deliberately isolated from one another.
 PEER_TOOLS = {"agent_peers", "agent_send", "agent_inbox"}
 
-#: The LDXHub document tools. Withheld until ``ldxhub.has_key()`` — see
-#: ``Agent.tool_schemas``. They are jobs against a remote gateway, not a chat
-#: source; see ``ldxhub.py`` for why they are not in sources.py.
+#: The LDXHub tools that run a paid job. Withheld until ``ldxhub.has_key()``
+#: — see ``Agent.tool_schemas``. They are jobs against a remote gateway, not a
+#: chat source; see ``ldxhub.py`` for why they are not in sources.py.
 LDXHUB_TOOLS = {
     "ldxhub_structflow", "ldxhub_analyze", "ldxhub_extract",
-    "ldxhub_convert", "ldxhub_refine", "ldxhub_list",
+    "ldxhub_convert", "ldxhub_refine",
 }
+
+#: ``ldxhub_list`` is deliberately *not* in the gated set. The catalogs are
+#: public and unauthenticated, so listing them works before a key exists —
+#: which is exactly when knowing what is on offer is most useful. Gating it
+#: would also make ``_denied`` claim it needs a key, which would be untrue.
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
               ".pytest_cache", ".ruff_cache", "dist", "build", ".idea", ".tox"}
@@ -1458,14 +1463,18 @@ def _tool_ldxhub_refine(args: dict, cfg) -> ToolResult:
 
 
 def _tool_ldxhub_list(args: dict, cfg) -> ToolResult:
+    """List the live catalogs. Keyless is fine — they are public."""
     from . import ldxhub
 
-    token = _ldx_token()
     service = _text(args.get("service", "")).strip()
     if service and service not in ldxhub.SERVICES:
         raise ToolError(f"unknown service {service!r} — choose one of {', '.join(ldxhub.SERVICES)}")
     names = [service] if service else list(ldxhub.SERVICES)
+    # No _ldx_token() here: browsing must work before /ldxhub-api-setup,
+    # which is exactly when a catalog is most useful. Only the job tools
+    # require a key.
     creds = ldxhub.load_credentials()
+    token = creds[0] if creds else ""
     defaults = creds[1] if creds else {}
     parts: list[str] = []
     for name in names:
@@ -1481,6 +1490,9 @@ def _tool_ldxhub_list(args: dict, cfg) -> ToolResult:
             parts.append(f"  {e.summary}{star}")
     if not service:
         parts.append("\n'*' is the default for that service — change it with /ldxhub-models.")
+    if not creds:
+        parts.append("A key is needed to run a job, not to browse — "
+                     "/ldxhub-api-setup.")
     return ToolResult("\n".join(parts))
 
 
