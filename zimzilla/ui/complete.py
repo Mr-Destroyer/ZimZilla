@@ -30,6 +30,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/cost", "session token and cost breakdown"),
     ("/scope", "show scope guard status"),
     ("/rain", "toggle the matrix-rain background"),
+    ("/think", "toggle showing the model's own reasoning"),
     ("/theme", "switch palette: green | amber | cyan | system"),
     ("/zim-logfare", "switch upstream to Logfare (:4001)"),
     ("/zim-tokenjuice", "switch upstream to Token Juice (:4000)"),

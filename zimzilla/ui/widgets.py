@@ -221,6 +221,15 @@ class ChatPane(Vertical):
     ChatPane #stream.hidden {
         display: none;
     }
+    ChatPane #thought {
+        height: auto;
+        max-height: 40%;
+        padding: 0 1;
+        background: transparent;
+    }
+    ChatPane #thought.hidden {
+        display: none;
+    }
     ChatPane #card {
         height: auto;
         padding: 0 1;
@@ -249,6 +258,13 @@ class ChatPane(Vertical):
         yield RainRichLog(self.palette, rain_on=self.rain_on, id="transcript",
                           markup=False, wrap=True, highlight=False, auto_scroll=True,
                           min_width=1)
+        # The reasoning slot sits ABOVE the answer, because that is the order
+        # the two arrive in: the model thinks, then it speaks. Once the answer
+        # starts, the thinking is committed to the transcript and this empties,
+        # so the two are rarely on screen at once — but when they are, the
+        # reading order matches the arrival order rather than reversing it.
+        thought = Static(id="thought", classes="hidden")
+        yield thought
         stream = Static(id="stream", classes="hidden")
         yield stream
         card = Static(id="card", classes="hidden")
@@ -280,6 +296,7 @@ class ChatPane(Vertical):
     def clear(self) -> None:
         self.query_one("#transcript", RainRichLog).clear()
         self.clear_stream()
+        self.clear_reasoning()
         self.card_finish()
 
     # ---- live tool card ---------------------------------------------------
@@ -364,6 +381,37 @@ class ChatPane(Vertical):
 
     def clear_stream(self) -> None:
         w = self._stream_widget()
+        if w is None:
+            return
+        w.update("")
+        w.add_class("hidden")
+
+    # ---- live reasoning line ---------------------------------------------
+    def _thought_widget(self) -> Static | None:
+        try:
+            return self.query_one("#thought", Static)
+        except Exception:
+            return None
+
+    def set_reasoning(self, text: str) -> None:
+        """Show in-flight reasoning in the live slot.
+
+        Separate from ``set_stream`` rather than sharing it: the two can be on
+        screen at once (a model may think again mid-turn, after a tool result),
+        and a shared slot would have one overwrite the other. Styled dim and
+        italic by ``reasoning_live`` so it never reads as the answer.
+        """
+        from .renderers import reasoning_live
+
+        w = self._thought_widget()
+        if w is None:
+            return
+        w.remove_class("hidden")
+        cursor = "▊" if self._cursor_on else " "
+        w.update(reasoning_live(text, self.palette, cursor))
+
+    def clear_reasoning(self) -> None:
+        w = self._thought_widget()
         if w is None:
             return
         w.update("")

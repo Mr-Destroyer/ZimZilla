@@ -8,6 +8,9 @@ emitted as an event so the UI can render it live.
 Events yielded
 --------------
 ``text_delta``   streaming assistant text chunk
+``reasoning_delta`` a chunk of the model's own thinking, when the endpoint
+                 forwards it as a ``thinking`` block. NOT the spinner below —
+                 that one means "a turn is in flight"; this one is content.
 ``thinking``     a turn is in flight (spinner on)
 ``tool_call``    a tool was requested (with a preview for the gate)
 ``tool_result``  a tool finished (output, exit status, error flag)
@@ -1048,8 +1051,25 @@ class Agent:
                         etype = getattr(event, "type", "")
                         if etype == "content_block_delta":
                             delta = getattr(event, "delta", None)
-                            if delta is not None and getattr(delta, "type", "") == "text_delta":
+                            dtype = getattr(delta, "type", "") if delta is not None else ""
+                            if dtype == "text_delta":
                                 yield ({"type": "text_delta", "text": delta.text}, None)
+                            elif dtype == "thinking_delta":
+                                # The model's own reasoning, streamed as a
+                                # `thinking` block. Read off `delta.thinking`,
+                                # not `delta.text` — the two deltas are separate
+                                # classes and only `text_delta` carries `.text`.
+                                #
+                                # Only some endpoints send this at all: an
+                                # Anthropic-native one (OpenRouter, measured
+                                # 2026-10-16) emits a `content_block_start` of
+                                # type `thinking` then 100+ of these, while
+                                # LiteLLM's Anthropic bridge drops reasoning
+                                # entirely and never starts the block. Yielding
+                                # it unconditionally costs nothing when it never
+                                # arrives, and is the whole point when it does.
+                                yield ({"type": "reasoning_delta",
+                                        "text": getattr(delta, "thinking", "") or ""}, None)
                     final = await stream.get_final_message()
                     yield (None, final)
                     return

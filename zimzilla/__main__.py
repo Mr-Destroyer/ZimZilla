@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="start with matrix rain on in the shell (off by default for readability)")
     parser.add_argument("--no-rain", action="store_true",
                         help="disable matrix rain entirely, including the boot screen")
+    parser.add_argument("--no-think", action="store_true",
+                        help="do not show the model's own reasoning when the "
+                             "endpoint forwards it (on by default; /think toggles)")
     parser.add_argument("--mode", default=None,
                         choices=["auto", "edits", "plan", "zim", "danger", "uncensored"],
                         help="agent mode: auto | edits | plan | zim | danger | uncensored (default: auto)")
@@ -223,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         agents_path=agents_path,
         rain=True if args.rain else None,
         boot_rain=False if args.no_rain else None,
+        show_thinking=False if args.no_think else None,
     )
 
     # A remembered hosted-gateway choice has to be re-applied here, not in the

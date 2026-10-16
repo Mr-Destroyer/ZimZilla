@@ -267,6 +267,13 @@ class Config:
     # everywhere, including the boot screen.
     rain: bool = False
     boot_rain: bool = True
+    # Show the model's own reasoning when the endpoint forwards it, which only
+    # some do — an Anthropic-native endpoint sends `thinking` blocks, while
+    # LiteLLM's Anthropic bridge drops reasoning entirely. On by default
+    # because it costs nothing where it is absent, and where it is present it
+    # is the difference between watching the model work and watching a blank
+    # line. `/think` toggles it; `--no-think` turns it off at launch.
+    show_thinking: bool = True
     mode: str = DEFAULT_MODE
     # Optional path to a doctrine file; only consulted in zim mode. Resolved at
     # launch by config.find_agents_file, and re-resolved on /mode zim so a

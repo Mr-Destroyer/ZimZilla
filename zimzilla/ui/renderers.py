@@ -435,6 +435,75 @@ def banner_renderable(palette: Palette, revealed: int | None = None) -> Text:
     return t
 
 
+# ---- model reasoning ------------------------------------------------------
+# What the model is thinking, when the endpoint forwards it. Kept deliberately
+# quieter than the answer: dim and italic, so a transcript where the model
+# reasoned at length still reads as one answer with commentary, not as two
+# competing replies. Nothing here is a finding or a tool result — it is the
+# model talking to itself, and the styling says so.
+#
+# `THINK_LIVE_LINES` is the live slot's window. The live view shows the *tail*
+# of the reasoning rather than the head, because the interesting part is what it
+# is thinking *now* — the same reason a log tail is more useful than a log head.
+# The committed block below keeps every line, so nothing is lost by the window.
+
+#: Lines of reasoning the live (still-streaming) slot shows.
+THINK_LIVE_LINES = 14
+
+
+def reasoning_live(text: str, palette: Palette, cursor: str = "") -> Text:
+    """The cheap, per-delta form of in-flight reasoning: the last few lines.
+
+    Called once per ``reasoning_delta``, so it does no markdown parse — a
+    reasoning stream is prose full of stray symbols (``**``, ``\\(``, ``->``)
+    that would only be misread as markup, and the cost of parsing it several
+    times a second buys nothing.
+    """
+    lines = (text or "").splitlines() or [""]
+    tail = lines[-THINK_LIVE_LINES:]
+    elided = len(lines) - len(tail)
+    t = Text()
+    t.append("✻ ", style=f"bold {palette.accent}")
+    t.append("thinking", style=f"bold {palette.accent}")
+    if elided > 0:
+        t.append(f"  (+{elided} earlier)", style=palette.dim)
+    t.append("\n")
+    for i, line in enumerate(tail):
+        if i:
+            t.append("\n")
+        t.append(line, style=f"italic {palette.dim}")
+    if cursor:
+        t.append(cursor, style=f"bold {palette.accent}")
+    return t
+
+
+def reasoning_panel(text: str, palette: Palette) -> Panel:
+    """The committed form: the model's reasoning, whole, in the transcript.
+
+    Every line is kept. The live slot above shows only a window so it cannot
+    push the answer off screen mid-stream; this is where the rest of it lives,
+    and the transcript scrolls, so the operator can read what was elided.
+    """
+    t = Text()
+    for i, line in enumerate((text or "").splitlines()):
+        if i:
+            t.append("\n")
+        t.append(line, style=f"italic {palette.dim}")
+    title = Text()
+    title.append("[ ✻ THINKING ]", style=f"bold {palette.accent}")
+    subtitle = Text()
+    subtitle.append(f"{len((text or '').splitlines())} lines", style=palette.dim)
+    return Panel(
+        t,
+        title=title,
+        title_align="left",
+        subtitle=subtitle,
+        subtitle_align="right",
+        border_style=palette.dim,
+        padding=(0, 1),
+    )
+
+
 def agent_text(text: str, palette: Palette) -> Text:
     """Assistant prose, markdown resolved.
 

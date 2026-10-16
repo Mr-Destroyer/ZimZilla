@@ -955,7 +955,11 @@ class ZimZillaApp(App):
         self.busy = False
         self._cancelled = False
         self._stream_buf = ""
-        # Tokens-per-second is derived from the delta in session output tokens
+        # The model's in-flight reasoning, when the endpoint forwards it. Held
+        # separately from `_stream_buf` because the two can both be non-empty
+        # (a model reasons, answers, then reasons again after a tool result),
+        # and because they commit to the transcript at different moments.
+        self._reason_buf = ""
         # across successive 1s ticks — no separate timer, and no rate to report
         # while nothing is streaming.
         self._last_output_tokens = 0
@@ -1364,6 +1368,8 @@ class ZimZillaApp(App):
         chat.flash_cursor()
         if self._stream_buf:
             chat.set_stream(self._stream_buf)
+        if self._reason_buf:
+            chat.set_reasoning(self._reason_buf)
 
     async def _verb_spinner(self) -> None:
         bar = self._status_bar()
@@ -1456,6 +1462,7 @@ class ZimZillaApp(App):
         self.busy = True
         self._cancelled = False
         self._stream_buf = ""
+        self._reason_buf = ""
         self._set_rain(False)  # keep the transcript readable during a turn
 
         loop = self._loop_rail()
@@ -1489,6 +1496,12 @@ class ZimZillaApp(App):
             self.busy = False
             spinner.cancel()
             chat.clear_stream()
+            # Before card_finish and the buffer reset: a turn can end on
+            # reasoning that never got an answer after it — an interrupted
+            # turn, or a model that thought and then stopped. Committing here
+            # is what keeps that thinking rather than dropping it silently
+            # when the slot is torn down.
+            self._flush_reasoning(chat, p)
             chat.card_finish()
             self._stream_buf = ""
             bar.set_activity("idle", busy=False)
@@ -1542,7 +1555,22 @@ class ZimZillaApp(App):
                 loop.set_stage("thinking")
                 loop.set_counters(self.agent.turn_count, bar.iterations)
 
+        elif etype == "reasoning_delta":
+            # The model's own thinking, streamed before it answers. Only some
+            # endpoints send this — see `_stream_once` in agent.py for which,
+            # and why an endpoint that drops it changes nothing here.
+            self._reason_buf += ev["text"]
+            if self.cfg.show_thinking:
+                chat.set_reasoning(self._reason_buf)
+
         elif etype == "text_delta":
+            # The first character of the answer means the thinking that
+            # produced it is finished, so commit it now. Doing it here rather
+            # than at turn_end is what keeps the transcript in the order the
+            # two actually arrived in, and stops the live slot being cleared
+            # out from under a half-read block when the answer takes over.
+            if not self._stream_buf and self._reason_buf:
+                self._flush_reasoning(chat, p)
             self._stream_buf += ev["text"]
             chat.set_stream(self._stream_buf)
 
@@ -1805,6 +1833,18 @@ class ZimZillaApp(App):
             chat.write_block(markdown_renderable(self._stream_buf, palette))
             self._stream_buf = ""
 
+    def _flush_reasoning(self, chat: ChatPane, palette) -> None:
+        """Commit in-flight reasoning to the transcript, then empty the slot.
+
+        A no-op when the buffer is empty, which is the common case: most
+        endpoints never send reasoning at all, so this is called on every turn
+        and does nothing on nearly all of them.
+        """
+        if self._reason_buf.strip():
+            chat.clear_reasoning()
+            chat.write_block(R.reasoning_panel(self._reason_buf, palette))
+        self._reason_buf = ""
+
     def _cost_line(self, ev) -> None:
         p = self.palette
         t = Text()
@@ -1925,6 +1965,10 @@ class ZimZillaApp(App):
         # this about to hit a cap" is exactly the question a running turn
         # raises. It starts no turn and touches nothing the live one owns.
         "limits",
+        # Same reasoning as /rain: a display toggle reads and writes only
+        # harness state, starts no turn, and is most wanted while a turn is
+        # running — which is exactly when the reasoning is on screen.
+        "think",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -1939,6 +1983,7 @@ class ZimZillaApp(App):
             "cost": self._cmd_cost,
             "scope": self._cmd_scope,
             "rain": self._cmd_rain,
+            "think": self._cmd_think,
             "theme": self._cmd_theme,
             "save": self._cmd_save,
             "load": self._cmd_load,
@@ -1996,6 +2041,7 @@ class ZimZillaApp(App):
             ("/cost", "session token and cost breakdown"),
             ("/scope", "show allow.yaml / out-of-scope.yaml status"),
             ("/rain", "toggle the matrix-rain background"),
+            ("/think", "toggle showing the model's own reasoning"),
             ("/theme green|amber|cyan|system", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
             ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
@@ -2536,6 +2582,26 @@ class ZimZillaApp(App):
         self.rain_on = not self.rain_on
         self._set_rain(self.rain_on and not self.busy)
         self._sys_line(f"matrix rain {'ON' if self.rain_on else 'OFF'}", ok=True)
+
+    def _cmd_think(self, args=None) -> None:
+        """Toggle the model's reasoning display.
+
+        Says which endpoint is in play, because "OFF" and "the endpoint sends
+        no reasoning" look identical on screen — and the second one is not
+        something the toggle can fix.
+        """
+        self.cfg.show_thinking = not self.cfg.show_thinking
+        if not self.cfg.show_thinking:
+            self.query_one(ChatPane).clear_reasoning()
+        self._sys_line(
+            f"model thinking {'ON' if self.cfg.show_thinking else 'OFF'}",
+            ok=True,
+        )
+        if self.cfg.show_thinking:
+            self._sys_line(
+                "shown only when the endpoint forwards it — an Anthropic-native "
+                "one does; a LiteLLM proxy's /v1/messages bridge drops it"
+            )
 
     def _cmd_theme(self, args) -> None:
         if not args:
@@ -5622,6 +5688,7 @@ class ZimZillaApp(App):
             ("/cost", "session token and cost breakdown", "cost"),
             ("/scope", "scope guard status", "scope"),
             ("/rain", "toggle the matrix rain", "rain"),
+            ("/think", "show the model's reasoning", "think"),
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),

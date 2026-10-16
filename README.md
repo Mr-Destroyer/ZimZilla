@@ -235,6 +235,7 @@ will restart the checkout under you on the next launch.
 --theme {green,amber,cyan,system}
 --rain               start with matrix rain on
 --no-rain            no rain anywhere
+--no-think           never show the model's own reasoning
 --max-tokens N       max output tokens per reply
 --no-auto-compact    never compact history automatically (/compact still works)
 --unsafe             disable the filesystem jail
@@ -323,6 +324,44 @@ retried, and still is not. If the doubled ceiling is spent the same way, the
 turn stops and says so rather than doubling again. The empty assistant turn is
 dropped from the history either way, so the next request does not carry a blank
 reply.
+
+### Watching the model think
+
+Some models reason before they answer, and some endpoints forward that reasoning.
+When one does, ZimZilla shows it: dim and italic, above the answer, streaming as
+it arrives — the same thing DeepSeek's own client and OpenCode display.
+
+```
+  ✻ thinking  (+26 earlier)
+  the operator asked for the upstream count beside the model, so the
+  field is enable_groups, not a health flag — there is no health field
+  anywhere in the payload...
+```
+
+The live block shows the **last 14 lines** and counts what it elided, so a model
+that reasons for a page cannot push its own answer off the screen while it
+streams. When the answer starts, the whole reasoning is committed to the
+transcript as a `[ ✻ THINKING ]` panel — every line, not the window — so the
+elided part is readable in the scrollback rather than lost. `/think` toggles the
+whole thing; `--no-think` turns it off at launch.
+
+**Whether you see anything is up to the endpoint, not the model.** Measured
+2026-10-16, same prompt, same model family, two endpoints:
+
+| Endpoint | Protocol | Reasoning forwarded? |
+|---|---|---|
+| OpenRouter | Anthropic-native | **Yes** — `thinking` block, 107 `thinking_delta` events, `thinking_tokens: 490` in usage |
+| Token Juice (`:4000`) | LiteLLM → OpenAI adapter | **No** — reasoning exists (`reasoning_content`, 1948 reasoning tokens) but LiteLLM's `/v1/messages` bridge drops it |
+
+So on OpenRouter you watch it think. On Token Juice's `deepseek-v4.1-flash` you
+will not, and that is not something the harness can fix: the thinking is real and
+is *billed* — it just never crosses the proxy's Anthropic bridge. This is the
+same proxy gap that causes the empty-reply truncation above, seen from the other
+side. `LiteLLM` 1.100.1 was tested with `merge_reasoning_content_in_choices`,
+with the `deepseek/` provider in place of `openai/`, and with every
+`thinking`-parameter variant (`budget_tokens` 1024–6000, `reasoning_effort`) —
+all accepted, none forwarded. ZimZilla's own code is endpoint-agnostic: where the
+block arrives it is shown, and where it does not, nothing changes.
 
 ### Why a long turn used to just stop
 
@@ -763,6 +802,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/scope` | scope status and entries |
 | `/theme green\|amber\|cyan\|system` | switch palette — `system` adopts the terminal's own colours |
 | `/rain` | toggle the matrix rain |
+| `/think` | show the model's own reasoning — where the endpoint forwards it |
 | `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
 | `/save [name]` | write the session to disk |
 | `/load [name]` | restore a session |
@@ -1556,6 +1596,7 @@ python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv
 python tests/test_deliverable.py   # the deliverable check — nudge, truncation, reasoning exhaustion
 python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, overflow
+python tests/test_reasoning.py     # the reasoning display — forwarding, ordering, renderables
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so
