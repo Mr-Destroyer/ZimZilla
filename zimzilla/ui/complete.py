@@ -45,6 +45,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/unorouter-api-setup", "store your UnoRouter API key"),
     ("/unorouter-models", "the live free catalog — what is free and usable"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
+    ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
+    ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
     ("/models", "free models of an upstream — /models [source]"),
     ("/save", "write the session to disk"),
     ("/load", "restore a saved session"),

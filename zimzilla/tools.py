@@ -9,16 +9,20 @@ out-of-scope host is refused no matter which mode is armed.
 Two more are advertised conditionally, and the two conditions are opposites:
 ``report_finding`` only inside a hunt (``Agent.can_report``), and
 ``hunt_findings`` only outside one (``Agent.can_hunt_read``). See
-``HUNT_ONLY_TOOLS`` and ``MAIN_ONLY_TOOLS``.
+``HUNT_ONLY_TOOLS`` and ``MAIN_ONLY_TOOLS``. The six ``ldxhub_*`` tools are
+conditional the same way: withheld until an LDXHub key exists
+(``LDXHUB_TOOLS``).
 """
 
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -270,6 +274,150 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    # LDXHub document jobs (see ldxhub.py). LDXHub has no Messages endpoint, so
+    # its six services are tools rather than a chat source, and the whole block
+    # is withheld until a key exists — Agent.tool_schemas unions LDXHUB_TOOLS
+    # into the deny set when has_key() is false.
+    {
+        "name": "ldxhub_structflow",
+        "description": (
+            "Generate or rewrite a document with LDXHub StructFlow (remote, "
+            "paid per job). Give a prompt for free-form generation, or a "
+            "file_path to transform an existing document — exactly one of the "
+            "two. The result comes back as JSON; pass dest to also save any "
+            "file output."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string",
+                           "description": "What to generate, when not transforming a file."},
+                "file_path": {"type": "string",
+                              "description": "Existing document to transform, when not generating."},
+                "model": {"type": "string",
+                          "description": "StructFlow model id. Omit for the profile default."},
+                "system_prompt": {"type": "string",
+                                  "description": "Instructions for the model. Optional."},
+                "example_output": {"type": "object",
+                                   "description": "JSON object shaped like the desired result. Optional."},
+                "dest": {"type": "string",
+                         "description": "Local path to also save any file output. Optional."},
+            },
+        },
+    },
+    {
+        "name": "ldxhub_analyze",
+        "description": (
+            "Structured analysis of a document or image via LDXHub AnalyzeDoc "
+            "(remote, paid per job). The JSON shape is driven by prompt and "
+            "example_output. Always returns JSON inline."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string",
+                              "description": "Document or image to analyze."},
+                "prompt": {"type": "string",
+                           "description": "What to extract or how to structure the analysis."},
+                "model": {"type": "string",
+                          "description": "AnalyzeDoc model id. Omit for the profile default."},
+                "example_output": {"type": "object",
+                                   "description": "JSON object shaped like the desired result. Optional."},
+                "output_format": {"type": "string",
+                                  "description": "Output encoding. Optional; defaults to json."},
+            },
+            "required": ["file_path", "prompt"],
+        },
+    },
+    {
+        "name": "ldxhub_extract",
+        "description": (
+            "Extract raw text from a document via LDXHub ExtractDoc (remote, "
+            "paid per job). Returns the extracted text inline; pass dest to "
+            "also save it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string",
+                              "description": "Document to extract text from."},
+                "output_format": {"type": "string",
+                                  "enum": ["text", "jsonl"],
+                                  "description": "Extraction encoding. Defaults to text."},
+                "engine": {"type": "string",
+                           "description": "ExtractDoc engine id. Omit for the profile default."},
+                "dest": {"type": "string",
+                         "description": "Local path to also save the output. Optional."},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "ldxhub_convert",
+        "description": (
+            "Convert a document to another format via LDXHub (remote, paid per "
+            "job). mode='renderocr' OCRs scans and images; mode='castdoc' "
+            "converts PDFs. The converted file is written to dest."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string",
+                              "description": "Source document."},
+                "mode": {"type": "string",
+                         "enum": ["renderocr", "castdoc"],
+                         "description": "OCR (renderocr) or PDF conversion (castdoc)."},
+                "dest": {"type": "string",
+                         "description": "Local path to write the converted file."},
+                "output_format": {"type": "string",
+                                  "enum": ["docx", "xlsx", "pptx"],
+                                  "description": "Target format. Defaults to docx."},
+                "languages": {"type": "array",
+                              "items": {"type": "string"},
+                              "description": "OCR language codes (renderocr only). Defaults to ['en']."},
+                "engine": {"type": "string",
+                           "description": "Engine id. Omit for the profile default."},
+            },
+            "required": ["file_path", "mode", "dest"],
+        },
+    },
+    {
+        "name": "ldxhub_refine",
+        "description": (
+            "Revise an XLIFF translation file via LDXHub RefineLoop (remote, "
+            "paid per job). file_path must be an existing XLIFF file. Result "
+            "comes back inline unless dest is given."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string",
+                              "description": "XLIFF file to refine."},
+                "model": {"type": "string",
+                          "description": "RefineLoop model id. Omit for the profile default."},
+                "dest": {"type": "string",
+                         "description": "Local path to save the refined file. Optional."},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "ldxhub_list",
+        "description": (
+            "List LDXHub models and engines, live from the gateway. Pass "
+            "service to show only one; omit to show all six. '*' marks the "
+            "profile default for that service."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {"type": "string",
+                            "enum": ["structflow", "analyzedoc", "refineloop",
+                                     "renderocr", "castdoc", "extractdoc"],
+                            "description": "Which service to list. Omit for all."},
+            },
+        },
+    },
 ]
 
 #: Pane messaging. Advertised only to a pane-session agent (``Agent.can_peer``),
@@ -329,6 +477,14 @@ MAIN_ONLY_TOOLS = {"hunt_findings"}
 #: Tools that exist only for a pane-session agent. Withheld from /team workers
 #: and hunt agents, which are deliberately isolated from one another.
 PEER_TOOLS = {"agent_peers", "agent_send", "agent_inbox"}
+
+#: The LDXHub document tools. Withheld until ``ldxhub.has_key()`` — see
+#: ``Agent.tool_schemas``. They are jobs against a remote gateway, not a chat
+#: source; see ``ldxhub.py`` for why they are not in sources.py.
+LDXHUB_TOOLS = {
+    "ldxhub_structflow", "ldxhub_analyze", "ldxhub_extract",
+    "ldxhub_convert", "ldxhub_refine", "ldxhub_list",
+}
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
               ".pytest_cache", ".ruff_cache", "dist", "build", ".idea", ".tox"}
@@ -1104,6 +1260,230 @@ def _tool_hunt_findings(args: dict, cfg) -> ToolResult:
     return ToolResult("\n".join(parts))
 
 
+# ---- LDXHub document jobs ---------------------------------------------------
+#
+# Six services from https://gw.ldxhub.io, each a job: create, poll, fetch.
+# LDXHub has no Messages endpoint (see ldxhub.py), so this is the integration
+# surface — not a chat source. All of it is withheld until a key exists
+# (LDXHUB_TOOLS / Agent.tool_schemas).
+
+def _ldx_token() -> str:
+    from . import ldxhub
+
+    creds = ldxhub.load_credentials()
+    if not creds:
+        raise ToolError("no LDXHub key — run /ldxhub-api-setup")
+    return creds[0]
+
+
+def _ldx_entry(service: str, explicit: str = ""):
+    from . import ldxhub
+
+    token = _ldx_token()
+    entry, err = ldxhub.resolve_entry(service, explicit, token=token)
+    if entry is None:
+        raise ToolError(err or f"no {service} model/engine available")
+    return entry, token
+
+
+def _ldx_object(value, name: str = "example_output") -> dict:
+    """``example_output`` must arrive as a native JSON object. A string —
+    even a JSON-encoded object — is rejected by the API with malformed_json,
+    so coerce defensively and refuse anything that is not a dict."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            obj = json.loads(value)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            return obj
+    raise ToolError(f"{name} must be a JSON object")
+
+
+def _ldx_upload(path: str, cfg, token: str) -> str:
+    from . import ldxhub
+
+    src = resolve_in_jail(cfg.workdir, _text(path), cfg.unsafe, must_exist=True)
+    file_id, err = ldxhub.upload_file(src, token)
+    if err:
+        raise ToolError(f"upload failed: {err}")
+    return file_id
+
+
+def _ldx_text(file_id: str, token: str, limit: int = 60000) -> str:
+    from . import ldxhub
+
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        tmp = Path(tf.name)
+    try:
+        err = ldxhub.download_file(file_id, token, tmp)
+        if err:
+            raise ToolError(f"download failed: {err}")
+        data = tmp.read_bytes()
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    text = data.decode("utf-8", errors="replace")
+    if len(text) > limit:
+        text = text[:limit] + f"\n... [truncated — {len(data)} bytes total]"
+    return text
+
+
+def _ldx_deliver(inline: str | None, file_id: str | None, token: str, cfg,
+                 dest: str = "", *, as_text: bool = False) -> ToolResult:
+    from . import ldxhub
+
+    parts: list[str] = []
+    if inline:
+        parts.append(inline)
+    if not file_id:
+        if not parts:
+            raise ToolError("job finished with no output")
+        return ToolResult("\n".join(parts))
+    if dest:
+        out = resolve_in_jail(cfg.workdir, _text(dest), cfg.unsafe)
+        err = ldxhub.download_file(file_id, token, out)
+        if err:
+            raise ToolError(f"download failed: {err}")
+        parts.append(f"wrote {display_path(cfg.workdir, out)}")
+        return ToolResult("\n".join(parts))
+    if as_text:
+        parts.append(_ldx_text(file_id, token))
+        return ToolResult("\n".join(parts))
+    parts.append(f"output file id: {file_id} — pass dest to save it")
+    return ToolResult("\n".join(parts))
+
+
+def _ldx_job(service: str, payload: dict, token: str, cfg,
+             dest: str = "", *, as_text: bool = False) -> ToolResult:
+    from . import ldxhub
+
+    job, err = ldxhub.run_job(service, payload, token)
+    if job is None:
+        raise ToolError(err or f"{service} job failed")
+    inline, file_id, err = ldxhub.job_output(job)
+    if err:
+        raise ToolError(err)
+    return _ldx_deliver(inline, file_id, token, cfg, dest, as_text=as_text)
+
+
+def _tool_ldxhub_structflow(args: dict, cfg) -> ToolResult:
+    prompt = _text(args.get("prompt", "")).strip()
+    file_path = _text(args.get("file_path", "")).strip()
+    if bool(prompt) == bool(file_path):
+        raise ToolError("give exactly one of prompt or file_path")
+    entry, token = _ldx_entry("structflow", _text(args.get("model", "")))
+    payload: dict = {
+        "model": entry.id,
+        "system_prompt": _text(args.get("system_prompt", "")).strip()
+            or "Produce the requested document exactly as specified.",
+        "example_output": _ldx_object(args.get("example_output", {"result": ""})),
+    }
+    # inputs and file_id are mutually exclusive — the gateway 400s if both
+    # are present, and requires exactly one.
+    if file_path:
+        payload["file_id"] = _ldx_upload(file_path, cfg, token)
+    else:
+        payload["inputs"] = [{"role": "user", "content": prompt}]
+    return _ldx_job("structflow", payload, token, cfg, _text(args.get("dest", "")))
+
+
+def _tool_ldxhub_analyze(args: dict, cfg) -> ToolResult:
+    file_path = _text(args.get("file_path", "")).strip()
+    prompt = _text(args.get("prompt", "")).strip()
+    if not file_path or not prompt:
+        raise ToolError("file_path and prompt are both required")
+    entry, token = _ldx_entry("analyzedoc", _text(args.get("model", "")))
+    payload = {
+        "model": entry.id,
+        "system_prompt": prompt,
+        "example_output": _ldx_object(args.get("example_output", {"result": ""})),
+        "file_id": _ldx_upload(file_path, cfg, token),
+        "output_format": _text(args.get("output_format", "")) or "json",
+    }
+    return _ldx_job("analyzedoc", payload, token, cfg)
+
+
+def _tool_ldxhub_extract(args: dict, cfg) -> ToolResult:
+    file_path = _text(args.get("file_path", "")).strip()
+    if not file_path:
+        raise ToolError("file_path is required")
+    entry, token = _ldx_entry("extractdoc", _text(args.get("engine", "")))
+    payload = {
+        "engine": entry.id,
+        "file_id": _ldx_upload(file_path, cfg, token),
+        "output_format": _text(args.get("output_format", "")) or "text",
+    }
+    return _ldx_job("extractdoc", payload, token, cfg, _text(args.get("dest", "")), as_text=True)
+
+
+def _tool_ldxhub_convert(args: dict, cfg) -> ToolResult:
+    file_path = _text(args.get("file_path", "")).strip()
+    dest = _text(args.get("dest", "")).strip()
+    mode = _text(args.get("mode", "")).strip()
+    if not file_path or not dest:
+        raise ToolError("file_path and dest are both required")
+    if mode not in ("renderocr", "castdoc"):
+        raise ToolError("mode must be 'renderocr' (OCR) or 'castdoc' (PDF)")
+    entry, token = _ldx_entry(mode, _text(args.get("engine", "")))
+    payload = {
+        "engine": entry.id,
+        "file_id": _ldx_upload(file_path, cfg, token),
+        "output_format": _text(args.get("output_format", "")) or "docx",
+    }
+    if mode == "renderocr":
+        langs = args.get("languages")
+        if isinstance(langs, str) and langs.strip():
+            langs = [p.strip() for p in langs.split(",") if p.strip()]
+        if not isinstance(langs, list) or not langs:
+            langs = ["en"]
+        payload["languages"] = [str(x) for x in langs]
+    return _ldx_job(mode, payload, token, cfg, dest)
+
+
+def _tool_ldxhub_refine(args: dict, cfg) -> ToolResult:
+    file_path = _text(args.get("file_path", "")).strip()
+    if not file_path:
+        raise ToolError("file_path is required")
+    entry, token = _ldx_entry("refineloop", _text(args.get("model", "")))
+    payload = {
+        "model": entry.id,
+        "file_id": _ldx_upload(file_path, cfg, token),
+    }
+    return _ldx_job("refineloop", payload, token, cfg, _text(args.get("dest", "")), as_text=True)
+
+
+def _tool_ldxhub_list(args: dict, cfg) -> ToolResult:
+    from . import ldxhub
+
+    token = _ldx_token()
+    service = _text(args.get("service", "")).strip()
+    if service and service not in ldxhub.SERVICES:
+        raise ToolError(f"unknown service {service!r} — choose one of {', '.join(ldxhub.SERVICES)}")
+    names = [service] if service else list(ldxhub.SERVICES)
+    creds = ldxhub.load_credentials()
+    defaults = creds[1] if creds else {}
+    parts: list[str] = []
+    for name in names:
+        entries, err = ldxhub.fetch_catalog(name, token)
+        if entries is None:
+            parts.append(f"{name}: {err}")
+            continue
+        kind = ldxhub.SERVICES[name]
+        mark = defaults.get(name, "")
+        parts.append(f"{name} ({len(entries)} {kind}):")
+        for e in entries:
+            star = " *" if e.id == mark else ""
+            parts.append(f"  {e.summary}{star}")
+    if not service:
+        parts.append("\n'*' is the default for that service — change it with /ldxhub-models.")
+    return ToolResult("\n".join(parts))
+
+
 # ---- pane messaging ---------------------------------------------------------
 
 def _peer_root(cfg):
@@ -1159,6 +1539,12 @@ _DISPATCH = {
     "agent_peers": _tool_agent_peers,
     "agent_send": _tool_agent_send,
     "agent_inbox": _tool_agent_inbox,
+    "ldxhub_structflow": _tool_ldxhub_structflow,
+    "ldxhub_analyze": _tool_ldxhub_analyze,
+    "ldxhub_extract": _tool_ldxhub_extract,
+    "ldxhub_convert": _tool_ldxhub_convert,
+    "ldxhub_refine": _tool_ldxhub_refine,
+    "ldxhub_list": _tool_ldxhub_list,
 }
 
 
@@ -1183,5 +1569,11 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
         sev = str(args.get("severity", "info")).upper()
         title = str(args.get("title", ""))
         label = f"[{sev}] {title}"
+        return label if len(label) <= max_len else label[: max_len - 1] + "…"
+    if name.startswith("ldxhub_"):
+        svc = name[len("ldxhub_"):]
+        what = args.get("file_path") or args.get("service") or args.get("prompt") or ""
+        what = str(what)
+        label = f"ldxhub {svc} {what}".strip()
         return label if len(label) <= max_len else label[: max_len - 1] + "…"
     return shlex.quote(str(args))[:max_len]

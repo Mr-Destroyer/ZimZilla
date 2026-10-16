@@ -29,6 +29,7 @@ from .. import ad as ad_mod
 from .. import crack as crack_mod
 from .. import antseed as as_mod
 from .. import hunt as hunt_mod
+from .. import ldxhub as ldx_mod
 from .. import logfare as lf_mod
 from .. import osint as osint_mod
 from .. import openrouter as or_mod
@@ -1955,6 +1956,9 @@ class ZimZillaApp(App):
         "unorouter-api-setup", "unorouter-models", "zim-unorouter",
         "zim-antseed", "antseed-models",
         "logfare-models",
+        # Same again for LDXHub: the key and the catalogs are local reads and
+        # a mode-600 write, and /ldxhub-models only fetches public catalogs.
+        "ldxhub-api-setup", "ldxhub-models",
         # Reading an archived report back is a disk read and a write to the
         # transcript; it starts no turn and touches nothing the live one owns.
         # Useful mid-run too — while a *new* recon is cooking, the previous
@@ -2017,6 +2021,8 @@ class ZimZillaApp(App):
             "antseed-models": lambda a: self._cmd_models(["antseed"]),
             "models": lambda a: self._cmd_models(a),
             "logfare-models": lambda a: self._cmd_logfare_models(a),
+            "ldxhub-api-setup": lambda a: self._cmd_ldxhub_key(a),
+            "ldxhub-models": lambda a: self._cmd_ldxhub_models(a),
             "exit": lambda a: self.exit(),
             "quit": lambda a: self.exit(),
         }
@@ -2058,6 +2064,8 @@ class ZimZillaApp(App):
             ("/antseed-models", "AntSeed's free models, and the peer to pin"),
             ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-models", "fetch the live catalog; show what is up"),
+            ("/ldxhub-api-setup [key]", "store your LDXHub API key (document jobs)"),
+            ("/ldxhub-models [service]", "LDXHub models/engines — pick the default per service"),
             ("/panes", "re-open this session under tmux — ctrl+b h/v split"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
@@ -2697,6 +2705,20 @@ class ZimZillaApp(App):
                 t.append("buyer up (free peers, no key)\n", style=p.accent)
             else:
                 t.append("no buyer — `antseed buyer start`\n", style=p.amber)
+            # LDXHub is not a chat source — there is no Messages endpoint on
+            # gw.ldxhub.io — so it is listed after the switchable ones and
+            # never carries the active mark. The tools need a key; the
+            # catalogs are public.
+            creds = ldx_mod.load_credentials()
+            t.append(f"  {'○':<1} {'ldxhub':<12}", style=p.primary)
+            t.append("      tools   ", style=p.primary)
+            t.append(f"{'LDXHub':<12} ", style=p.primary)
+            if creds is None:
+                t.append("no key — /ldxhub-api-setup (document jobs)\n",
+                         style=p.amber)
+            else:
+                t.append(f"key from {creds[2]} (document tools, not a source)\n",
+                         style=p.accent)
             t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice,  "
                      "/zim-tokenharbour\n                 or  /zim-openrouter,  "
                      "/zim-unorouter,  /zim-antseed\n", style=p.dim)
@@ -3089,6 +3111,145 @@ class ZimZillaApp(App):
         mod.clear_cache()             # a new key invalidates the old catalog
         self._sys_line(f"{label} key saved (…{key[-4:]}) to {path}", ok=True)
         self._sys_line(f"switch to it with /zim-{kind}")
+
+    def _cmd_ldxhub_key(self, args) -> None:
+        """/ldxhub-api-setup [key] — store the LDXHub key for document jobs.
+
+        Unlike every other *-api-setup command there is nothing to switch to
+        afterwards: LDXHub has no Messages endpoint, so it can never become
+        this session's upstream. The key unlocks the six document tools and
+        their job endpoints; the model/engine catalogs are public and already
+        listable via /ldxhub-models.
+
+        Written to ~/.zimzilla/ldxhub/source, mode 600, same
+        ``export VAR="value"`` format as every other profile. The key is
+        never echoed — the confirmation names the file and the last four
+        characters, enough to tell one key from another, not enough to be one.
+        """
+        p = self.palette
+
+        if not args:
+            creds = ldx_mod.load_credentials()
+            t = Text()
+            t.append("  LDXHUB API KEY\n\n", style=f"bold {p.accent}")
+            if creds is None:
+                t.append("  no key set.\n\n", style=p.amber)
+            else:
+                _, _, origin = creds
+                t.append("  source: ", style=p.dim)
+                t.append(origin + "\n\n", style=p.primary)
+            t.append("  set it with  ", style=p.dim)
+            t.append("/ldxhub-api-setup <key>\n", style=f"bold {p.primary}")
+            t.append("  note:        ", style=p.dim)
+            t.append(
+                "the model/engine catalogs are public — /ldxhub-models works "
+                "without a key.\n"
+                "               A key is needed to run a document job "
+                "(the ldxhub_* tools).\n", style=p.dim)
+            t.append(f"  stored in     {ldx_mod.PROFILE}\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        key = args[0].strip()
+        if not ldx_mod.looks_like_key(key):
+            self._sys_line(
+                "that does not look like an API key — paste just the key, "
+                "not the whole `export` line", warn=True)
+            return
+        path = ldx_mod.save_key(key)
+        ldx_mod.clear_cache()           # a new key invalidates the old catalog
+        self._sys_line(f"LDXHub key saved (...{key[-4:]}) to {path}", ok=True)
+        self._sys_line(
+            "the ldxhub_* tools are available now — /ldxhub-models "
+            "to pin a per-service default")
+
+    def _cmd_ldxhub_models(self, args) -> None:
+        """/ldxhub-models [service [entry]] — LDXHub's per-service catalogs.
+
+        Unlike every other *-models command this one is not a chat model
+        list: LDXHub has no Messages endpoint, so there is nothing here to
+        put in /model. The catalogs are still worth browsing and pinning —
+        the six agent tools each take a model or engine from the matching
+        service, and the pin is what a tool omits when the operator does
+        not name one.
+
+        Catalogs are public, so a missing key does not block listing; only
+        *pinning* a default needs the key profile to write into.
+        """
+        service = (args[0].strip().lower() if args else "")
+        if service and service not in ldx_mod.SERVICES:
+            self._sys_line(
+                f"unknown LDXHub service: {service} — try one of "
+                f"{', '.join(ldx_mod.SERVICES)}", warn=True)
+            return
+        if len(args) >= 2:
+            entry_id = args[1].strip()
+            path = ldx_mod.save_default(service, entry_id)
+            if path is None:
+                self._sys_line(
+                    "no LDXHub key profile to write the default into — "
+                    "set a key with /ldxhub-api-setup", warn=True)
+                return
+            self._sys_line(f"{service} default set to {entry_id}", ok=True)
+        self._sys_line(
+            f"fetching the LDXHub {service or 'service'} catalog...")
+        self._fetch_ldxhub_models(service)
+
+    @work(exclusive=True, thread=True)
+    def _fetch_ldxhub_models(self, service: str) -> None:
+        """Fetch catalogs off the UI thread, then hand back to it.
+
+        Six sequential fetches worst-case; each is public and cached for
+        five minutes, so a second listing in the same session is instant.
+        """
+        creds = ldx_mod.load_credentials()
+        token = creds[0] if creds else ""
+        defaults = dict(creds[1]) if creds else {}
+        wanted = [service] if service else list(ldx_mod.SERVICES)
+        rows: list[tuple[str, list | None]] = []
+        err: str | None = None
+        for svc in wanted:
+            entries, e = ldx_mod.fetch_catalog(svc, token)
+            if entries is None:
+                err = err or f"{svc}: {e}"
+                rows.append((svc, None))
+            else:
+                rows.append((svc, entries))
+        self.call_from_thread(
+            self._show_ldxhub_models, rows, err, defaults)
+
+    def _show_ldxhub_models(
+            self,
+            rows: list[tuple[str, list | None]],
+            err: str | None,
+            defaults: dict[str, str]) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  LDXHUB CATALOGS\n\n", style=f"bold {p.accent}")
+        for svc, entries in rows:
+            kind = ldx_mod.SERVICES[svc]
+            t.append(f"  {svc} ", style=f"bold {p.primary}")
+            t.append(f"({kind})\n", style=p.dim)
+            if entries is None:
+                t.append("    unavailable\n", style=p.amber)
+                continue
+            if not entries:
+                t.append("    (empty)\n", style=p.dim)
+                continue
+            pin = (defaults.get(svc) or "").strip()
+            for e in entries:
+                mark = "*" if pin and e.id == pin else " "
+                t.append(f"    {mark} {e.id:<28}", style=p.primary)
+                t.append(e.summary + "\n", style=p.dim)
+        t.append("\n  pin a default:  ", style=p.dim)
+        t.append("/ldxhub-models <service> <id>\n", style=f"bold {p.primary}")
+        t.append("  * marks the profile default the tools fall back to.\n",
+                 style=p.dim)
+        t.append("  a key is only needed to run a job, not to browse — "
+                 "/ldxhub-api-setup\n", style=p.dim)
+        if err:
+            t.append(f"  note: {err}\n", style=p.amber)
+        self.query_one(ChatPane).write_block(t)
 
     def _cmd_zim_gateway(self, kind: str) -> None:
         """/zim-openrouter — repoint the session at the gateway.
@@ -5710,6 +5871,10 @@ class ZimZillaApp(App):
             ("/models", "free models of an upstream — /models [source]", "models"),
             ("/logfare-models", "fetch the live catalog; show what is up",
              "logfare-models"),
+            ("/ldxhub-api-setup", "store your LDXHub API key",
+             "ldxhub-api-setup"),
+            ("/ldxhub-models", "LDXHub models/engines — pick the default per service",
+             "ldxhub-models"),
             ("/panes", "re-open this session under tmux", "panes"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),

@@ -379,6 +379,12 @@ class Agent:
             deny = deny | tools_mod.MAIN_ONLY_TOOLS
         if not self.can_peer:
             deny = deny | tools_mod.PEER_TOOLS
+        # LDXHub document jobs need a key. The schemas are withheld entirely
+        # rather than advertised-and-erroring: a tool the model can see but
+        # never successfully call wastes a turn on every attempt.
+        from . import ldxhub as ldx_mod
+        if not ldx_mod.has_key():
+            deny = deny | tools_mod.LDXHUB_TOOLS
         schemas = tools_mod.TOOL_SCHEMAS + tools_mod.PEER_SCHEMAS
         return [t for t in schemas if t["name"] not in deny]
 
@@ -402,6 +408,10 @@ class Agent:
         if name in tools_mod.MAIN_ONLY_TOOLS and not self.can_hunt_read:
             return (f"the {name} tool is not available inside a hunt — your "
                     "brief is deliberately independent of the other agents")
+        if name in tools_mod.LDXHUB_TOOLS:
+            from . import ldxhub as ldx_mod
+            if not ldx_mod.has_key():
+                return "the LDXHub tools need an API key — run /ldxhub-api-setup"
         return None
 
     # ---- history ----------------------------------------------------------
