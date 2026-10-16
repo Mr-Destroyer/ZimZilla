@@ -1597,6 +1597,7 @@ python tests/test_requirements.py  # guard: litellm stays out of the harness ven
 python tests/test_deliverable.py   # the deliverable check — nudge, truncation, reasoning exhaustion
 python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, overflow
 python tests/test_reasoning.py     # the reasoning display — forwarding, ordering, renderables
+python tests/test_boot.py          # the boot screen — the logo spin, frame geometry
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

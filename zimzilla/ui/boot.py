@@ -12,12 +12,25 @@ from textual.screen import Screen
 from textual.widgets import Static
 
 from ..theme import Palette
-from .banner import FONT_HEIGHT, banner_lines, banner_width
+from .banner import (
+    EMBLEM,
+    FONT_HEIGHT,
+    SPIN_FRAMES,
+    SPIN_SECONDS,
+    banner_lines,
+    banner_width,
+    spin_frame,
+)
 from .rain import MatrixRain
 
 GLITCH = "!<>-_\\/[]{}—=+*^?#@$%&01"
 
 SPINNER_STEPS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+#: How many 0.045s ticks each spin frame is held. Derived from SPIN_SECONDS so
+#: the two cannot drift apart; at the current values it is exactly 2, giving a
+#: full revolution in 1.08s — a deliberate turn rather than a flicker.
+TICKS_PER_FRAME = max(1, round(SPIN_SECONDS / 0.045 / SPIN_FRAMES))
 
 
 class BootScreen(Screen):
@@ -29,6 +42,7 @@ class BootScreen(Screen):
     BootScreen { layers: rain main; }
     BootScreen MatrixRain { layer: rain; }
     BootScreen Middle { layer: main; }
+    BootScreen #boot-emblem { height: auto; width: auto; }
     BootScreen #boot-banner { height: auto; width: auto; }
     BootScreen #boot-checks { height: auto; width: auto; margin-top: 1; }
     """
@@ -62,16 +76,53 @@ class BootScreen(Screen):
             yield MatrixRain(self.palette, ascii_only=True)
         with Middle():
             with Center():
+                yield Static(id="boot-emblem")
+            with Center():
                 yield Static(id="boot-banner")
             with Center():
                 yield Static(id="boot-checks")
 
     def on_mount(self) -> None:
         self.set_interval(0.045, self._tick)
+        self._render_emblem()
         self._render_banner()
         self._render_checks()
 
     # ---- rendering --------------------------------------------------------
+    def _spin_index(self) -> int:
+        """Which spin frame the current tick is showing.
+
+        Driven off the existing tick counter — no second timer, and no clock
+        read. TICKS_PER_FRAME is derived from the two constants rather than
+        hardcoded so changing either one keeps them in step.
+        """
+        return (self._ticks // TICKS_PER_FRAME) % SPIN_FRAMES
+
+    def _render_emblem(self) -> None:
+        """Draw the mark at its current angle, or the static one once settled.
+
+        The spin belongs to the "logo is arriving" moment. Leaving it turning
+        through the system check would be a distraction next to text the
+        operator is meant to read, so once the wordmark is fully revealed it
+        settles on ``EMBLEM`` and stays there.
+        """
+        rows = EMBLEM if self._phase != "banner" else spin_frame(self._spin_index())
+        # Style the frame as a unit, taken from its own fill glyph, so it tracks
+        # SPIN_SHADES rather than inventing a second brightness curve. Testing
+        # row by row instead lit the caps and dimmed the fill on an edge-on
+        # frame, which reads as a mistake rather than as a turn.
+        lit = rows[1].strip()[:1] == "█"
+        style = f"bold {self.palette.accent}" if lit else self.palette.dim
+        t = Text(justify="center")
+        for i, row in enumerate(rows):
+            t.append(row, style=style)
+            if i < len(rows) - 1:
+                t.append("\n")
+        try:
+            self.query_one("#boot-emblem", Static).update(t)
+        except Exception:
+            pass
+
     def _render_banner(self) -> None:
         lines = banner_lines()
         t = Text()
@@ -152,6 +203,7 @@ class BootScreen(Screen):
             if self._revealed > self._width + 6:
                 self._revealed = self._width + 6
                 self._phase = "checks"
+            self._render_emblem()
             self._render_banner()
             self._render_checks()
             return
@@ -164,6 +216,7 @@ class BootScreen(Screen):
                 self._check_index = len(self.checks)
                 self._phase = "fade"
                 self._ticks = 0
+            self._render_emblem()
             self._render_banner()
             self._render_checks()
             return
