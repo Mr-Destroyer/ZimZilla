@@ -38,12 +38,15 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
     ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
     ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
+    ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
     ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
     ("/openrouter-api-setup", "store your OpenRouter API key"),
     ("/unorouter-api-setup", "store your UnoRouter API key"),
     ("/unorouter-models", "the live free catalog — what is free and usable"),
+    ("/aihubmix-api-setup", "store your AIHubMix API key"),
+    ("/aihubmix-models", "the live free catalog — what is free and usable"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
     ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
     ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
@@ -190,7 +193,7 @@ class CompletionPopup(VerticalScroll):
                     # than just those three keeps the popup honest about what
                     # /models accepts.
                     "models": ["logfare", "tokenjuice", "tokenharbour",
-                               "openrouter", "unorouter", "antseed"],
+                               "openrouter", "unorouter", "antseed", "aihubmix"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so
