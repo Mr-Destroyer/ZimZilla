@@ -73,17 +73,31 @@ CATALOG = {
         {"model_name": "deepseek-v4.1-flash:free",
          "description": "DeepSeek V4.1 Flash (free)",
          "is_free": True, "online": True,
+         "enable_groups": ["a1-deepseek-v4.1-flash-free"],
          "metadata": _meta(supportsTools=True, outputModalities=["text"],
                            contextWindow=262144, maxOutputTokens=65536,
                            isReasoning=False)},
         {"model_name": "gemini-3.6-flash:free",
          "description": "Gemini 3.6 Flash (free)",
          "is_free": True, "online": True,
+         "enable_groups": ["a1-gemini-3.6-flash-free", "a2-gemini-3.6-flash-free",
+                           "a3-gemini-3.6-flash-free", "a4-gemini-3.6-flash-free",
+                           "a5-gemini-3.6-flash-free", "a6-gemini-3.6-flash-free",
+                           "a7-gemini-3.6-flash-free", "a8-gemini-3.6-flash-free",
+                           "a9-gemini-3.6-flash-free", "b1-gemini-3.6-flash-free",
+                           "b2-gemini-3.6-flash-free", "b3-gemini-3.6-flash-free"],
          "metadata": _meta(supportsTools=True, outputModalities=["text"],
                            contextWindow=1048576, isReasoning=True)},
         {"model_name": "gpt-oss-20b:free",
          "description": "GPT-OSS 20B (free)",
          "is_free": True, "online": True,
+         "enable_groups": ["c1-gpt-oss-20b-free", "c2-gpt-oss-20b-free",
+                           "c3-gpt-oss-20b-free", "c4-gpt-oss-20b-free",
+                           "c5-gpt-oss-20b-free", "c6-gpt-oss-20b-free",
+                           "c7-gpt-oss-20b-free", "c8-gpt-oss-20b-free",
+                           "c9-gpt-oss-20b-free", "d1-gpt-oss-20b-free",
+                           "d2-gpt-oss-20b-free", "d3-gpt-oss-20b-free",
+                           "d4-gpt-oss-20b-free", "d5-gpt-oss-20b-free"],
          "metadata": _meta(supportsTools=True, outputModalities=["text"],
                            contextWindow=131072)},
         {"model_name": "wai-nsfw-illustrious-sdxl:free",
@@ -106,6 +120,8 @@ CATALOG = {
         {"model_name": "qwen3.8-27b:free",
          "description": "Qwen 3.8 27B — zeroed out without a rename",
          "is_free": False, "online": True,
+         "enable_groups": ["e1-qwen3.8-27b-free", "e2-qwen3.8-27b-free",
+                           "e3-qwen3.8-27b-free"],
          "metadata": _meta(supportsTools=True, outputModalities=["text"],
                            contextWindow=262144)},
         {"model_name": "claude-opus-5",
@@ -121,14 +137,26 @@ CATALOG = {
         {"model_name": "claude-haiku-5-5:free",
          "description": "Claude Haiku 5.5 (free)",
          "is_free": True, "online": True,
+         # Deliberately NO ``enable_groups``: the "unknown" tier has to be
+         # reachable in the fixture, or the test that distinguishes a missing
+         # channel list from a single channel would pass by never seeing one.
          "metadata": _meta(supportsTools=True, outputModalities=["text"],
                            contextWindow=1000000, isReasoning=True)},
     ],
 }
 
 #: The ids that survive `usable_free_models` — free AND text AND tool-capable.
-USABLE_FREE = ["deepseek-v4.1-flash:free", "gemini-3.6-flash:free",
-               "gpt-oss-20b:free", "qwen3.8-27b:free", "claude-haiku-5-5:free"]
+#:
+#: **In the order that function now returns them: most upstreams first.** It
+#: sorts by redundancy, so this list is the assertion that the sort happened, not
+#: merely that the filter did. The counts are set in ``CATALOG`` to be distinct
+#: and descending (gpt-oss 14, gemini 12, qwen3.8 3, deepseek 1, haiku unknown),
+#: which is what makes the order a real test rather than a stable-sort
+#: coincidence — with every count equal, the input order would survive and this
+#: would pass while asserting nothing.
+USABLE_FREE = ["gpt-oss-20b:free", "gemini-3.6-flash:free",
+               "qwen3.8-27b:free", "deepseek-v4.1-flash:free",
+               "claude-haiku-5-5:free"]
 
 #: The ids that survive `model_ids` — every text-output model, free or not.
 TEXT_IDS = ["deepseek-v4.1-flash:free", "gemini-3.6-flash:free",
@@ -334,6 +362,114 @@ def test_the_free_usable_filter() -> None:
         usable, err = u.usable_free_models(use_cache=False)
     check("filter: a failed fetch is None, not an empty list",
           usable is None and err != "", repr((usable, err)))
+
+
+def test_upstream_redundancy() -> None:
+    """The channel count, and the sort that makes it useful.
+
+    The operator's complaint was that models rate limit and the picker gave no
+    way to tell which ones would. The catalog does not publish per-channel
+    health — checked field by field, there is no such field — but it does publish
+    ``enable_groups``, the list of channels that can serve the model, and its
+    length is the redundancy that decides whether a rate limit on one channel is
+    survivable. This pins the parse, the tiering, and the ordering.
+
+    The tier names are asserted rather than the colours: colour is the UI's
+    business and lives in ``app.py``, while what matters here is that a count of
+    one is never confused with a count the catalog did not give.
+    """
+    from zimzilla import unorouter as u
+
+    u.clear_cache()
+    with mock.patch("urllib.request.urlopen", _stub_urlopen()):
+        usable, _ = u.usable_free_models(use_cache=False)
+    by_id = {m.id: m for m in (usable or [])}
+
+    check("upstreams: the count is the length of enable_groups",
+          by_id["gpt-oss-20b:free"].upstreams == 14,
+          str(by_id["gpt-oss-20b:free"].upstreams))
+    check("upstreams: a one-channel model counts 1, not 0",
+          by_id["deepseek-v4.1-flash:free"].upstreams == 1,
+          str(by_id["deepseek-v4.1-flash:free"].upstreams))
+
+    # A missing channel list is "unknown", NOT "single". The distinction is the
+    # whole reason the tier exists: absence of the field is not evidence of one
+    # channel, and reporting it as one would invent a warning.
+    haiku = by_id["claude-haiku-5-5:free"]
+    check("upstreams: a missing enable_groups is 0, not a guess",
+          haiku.upstreams == 0, str(haiku.upstreams))
+    check("upstreams: and it reads as 'unknown', not 'single'",
+          haiku.redundancy == "unknown", haiku.redundancy)
+    check("upstreams: a real single channel reads as 'single'",
+          by_id["deepseek-v4.1-flash:free"].redundancy == "single")
+
+    # The tiers, at their boundaries. UPSTREAM_THIN is ours, so its edge is
+    # worth pinning: 4 is thin, 5 is good, and that line is a judgement the
+    # constant states rather than one buried in a comparison.
+    tiers = u._parse_models({"data": [
+        {"model_name": f"m{n}", "is_free": True,
+         "enable_groups": [f"g{i}" for i in range(n)],
+         "metadata": _meta(supportsTools=True, outputModalities=["text"])}
+        for n in (1, 2, 4, 5, 8)
+    ]})
+    got = {m.upstreams: m.redundancy for m in tiers}
+    check("upstreams: 1 is single", got[1] == "single", str(got))
+    check("upstreams: 2 is thin", got[2] == "thin", str(got))
+    check("upstreams: just below the threshold is thin", got[4] == "thin",
+          str(got))
+    check("upstreams: at the threshold is good", got[5] == "good", str(got))
+    check("upstreams: well above is good", got[8] == "good", str(got))
+
+    # A malformed channel list must not be counted as channels. `len()` of a
+    # string would count characters, which would report a model with 9
+    # "upstreams" because its group name is nine letters long.
+    junk = u._parse_models({"data": [
+        {"model_name": "str-groups", "is_free": True, "enable_groups": "abc",
+         "metadata": _meta(supportsTools=True, outputModalities=["text"])},
+        {"model_name": "int-groups", "is_free": True, "enable_groups": 7,
+         "metadata": _meta(supportsTools=True, outputModalities=["text"])},
+    ]})
+    check("upstreams: a string enable_groups is not counted as characters",
+          junk[0].upstreams == 0, str(junk[0].upstreams))
+    check("upstreams: a numeric enable_groups is not counted either",
+          junk[1].upstreams == 0, str(junk[1].upstreams))
+
+    # The note the UI prints, and its pluralisation — "1 upstreams" in the
+    # column the operator scans is exactly the kind of detail that makes a
+    # careful number look careless.
+    check("upstreams: the note pluralises a single channel correctly",
+          by_id["deepseek-v4.1-flash:free"].upstream_note == "1 upstream",
+          by_id["deepseek-v4.1-flash:free"].upstream_note)
+    check("upstreams: and pluralises many correctly",
+          by_id["gpt-oss-20b:free"].upstream_note == "14 upstreams",
+          by_id["gpt-oss-20b:free"].upstream_note)
+    check("upstreams: an unknown count says nothing at all",
+          haiku.upstream_note == "", repr(haiku.upstream_note))
+
+    # The count must not have leaked into `blurb`, which is rendered in one dim
+    # style — a coloured segment needs its own boundary, so the count is a
+    # separate property by design.
+    check("upstreams: the blurb does not carry the count",
+          "upstream" not in by_id["gpt-oss-20b:free"].blurb,
+          by_id["gpt-oss-20b:free"].blurb)
+
+    # The ordering, which is the point of the feature: the operator asked which
+    # model is most likely to answer, and the answer is the most redundant one.
+    counts = [m.upstreams for m in (usable or [])]
+    check("upstreams: the free list is sorted most-redundant first",
+          counts == sorted(counts, reverse=True), str(counts))
+    check("upstreams: so the most redundant model leads the list",
+          (usable or [None])[0].id == "gpt-oss-20b:free",
+          str((usable or [None])[0].id if usable else None))
+    check("upstreams: and a single-channel model sinks below a redundant one",
+          [m.id for m in (usable or [])].index("gpt-oss-20b:free")
+          < [m.id for m in (usable or [])].index("deepseek-v4.1-flash:free"))
+
+    # A paid model carries the count too — `_model_note` shows it in `/model`,
+    # which lists paid models as well as free ones.
+    paid = [m for m in u._parse_models(CATALOG) if m.id == "qwen3.8-27b:free"]
+    check("upstreams: a paid model still reports its channel count",
+          paid and paid[0].upstreams == 3, str(paid[0].upstreams if paid else None))
 
 
 def test_model_ids_keep_paid_text_models() -> None:
@@ -995,6 +1131,7 @@ def main() -> int:
     test_selection_file_is_shared()
     test_no_key_is_echoed(tmp)
     test_the_composed_message_url_is_right()
+    test_upstream_redundancy()
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print()

@@ -123,6 +123,13 @@ FREE_SUFFIX = ":free"
 #: The output modality a model must offer to be usable by this harness.
 TEXT_MODALITY = "text"
 
+#: Upstream channels at or above which redundancy counts as ``good``.
+#: **Our threshold, not UnoRouter's** — the gateway publishes no status, only the
+#: channel list, so this line is a judgement about where "one channel failing is
+#: absorbed" begins. Five is where the measured free tier separates: the models
+#: sitting at 5-8 behaved, and the ones at 1-3 were the ones that rate limited.
+UPSTREAM_THIN = 5
+
 
 @dataclass(frozen=True)
 class Model:
@@ -144,6 +151,23 @@ class Model:
     #: offers; an image or embedding model offers something else, and is dropped
     #: by :func:`usable_free_models` however free it is.
     modalities: tuple[str, ...] = ()
+    #: How many upstream channels the catalog lists for this model — the length
+    #: of its ``enable_groups``. This is *redundancy*, and redundancy is what
+    #: decides whether a rate limit is a hiccup or a wall: a model with one
+    #: channel has nowhere to fail over to, so a 429 from that channel is the
+    #: end of the request, while the same 429 against a model with a hundred
+    #: channels is retried elsewhere and the operator never sees it. Measured
+    #: 2026-10-16 on the free tier: ``minimax-m2.7:free`` at 101 channels down to
+    #: 1, with the single-channel models holding at **38-42% of the usable free
+    #: list** across three consecutive reads. That share is the finding and it
+    #: held; the absolute totals did not (47 -> 45 -> 42 usable models over the
+    #: same three reads), which is why the ratio is what is recorded here.
+    #:
+    #: It is NOT a health signal, and must never be labelled as one. The catalog
+    #: publishes no per-channel status (see the module docstring), so a model
+    #: with 20 channels could still have all 20 degraded. What this counts is
+    #: how many places the router *could* go, not how many are answering today.
+    upstreams: int = 0
 
     @property
     def chat(self) -> bool:
@@ -151,8 +175,60 @@ class Model:
         return TEXT_MODALITY in self.modalities
 
     @property
+    def redundancy(self) -> str:
+        """``"good"``, ``"thin"``, ``"single"`` or ``"unknown"`` — a tier, not a measurement.
+
+        The count is measured; **these thresholds are ours**, chosen to separate
+        the shapes that behave differently rather than read off anything
+        UnoRouter publishes. Stated as a tier so the UI can colour it while the
+        number itself stays on screen beside it — a colour alone would read as a
+        status dot the gateway never issued.
+
+        * ``single`` — one channel, no failover at all. The measured shape of a
+          model that rate limits.
+        * ``thin`` — a handful; a retry may or may not find another channel.
+        * ``good`` — enough redundancy that one channel failing is absorbed.
+        * ``unknown`` — the catalog said nothing (``0``), so no claim is made.
+          Distinct from ``single`` on purpose: absence of the field is not
+          evidence of a single channel.
+        """
+        if self.upstreams <= 0:
+            return "unknown"
+        if self.upstreams == 1:
+            return "single"
+        if self.upstreams < UPSTREAM_THIN:
+            return "thin"
+        return "good"
+
+    @property
+    def upstream_note(self) -> str:
+        """``"101 upstreams"`` / ``"1 upstream"`` / ``""`` when the catalog was silent.
+
+        Kept apart from :attr:`blurb` so the UI can colour it on its own — the
+        count is the one figure in the row that predicts whether the next request
+        succeeds, and a colour needs a segment boundary. Pluralised by hand
+        rather than with an ``s`` suffix, because ``1 upstreams`` in the column
+        the operator scans is the kind of detail that makes a careful number look
+        careless.
+
+        Empty for ``0``: an unread channel list says nothing, and ``0 upstreams``
+        would read as "no upstreams at all" — a worse claim than the truth, which
+        is that this catalog did not say.
+        """
+        if self.upstreams <= 0:
+            return ""
+        return f"{self.upstreams} upstream" if self.upstreams == 1 \
+            else f"{self.upstreams} upstreams"
+
+    @property
     def blurb(self) -> str:
-        """A one-line description for the picker."""
+        """A one-line description for the picker.
+
+        The upstream count is deliberately **not** here — see
+        :attr:`upstream_note`, which the UI renders separately so it can carry a
+        colour. Everything in this string is a capability, which is what makes it
+        safe to print in one dim style.
+        """
         bits = []
         if self.free:
             bits.append("free")
@@ -419,6 +495,15 @@ def _parse_models(payload: dict) -> list[Model]:
         # `is_free` is the catalog's own answer and was measured to agree with
         # the `:free` suffix exactly; both are checked so a model zeroed out
         # without renaming is still caught.
+        #
+        # `enable_groups` is the upstream channel list, and its length is the
+        # redundancy figure. Counted only when it is genuinely a list: a payload
+        # that spells it as a string or a number leaves the count at 0, which
+        # `redundancy` reports as "unknown" rather than "single" — a missing
+        # field is not evidence of one channel, and guessing there would invent
+        # exactly the warning this number exists to make trustworthy.
+        groups = entry.get("enable_groups")
+        upstreams = len(groups) if isinstance(groups, list) else 0
         out.append(Model(
             id=mid,
             label=str(entry.get("description") or "")[:120],
@@ -430,6 +515,7 @@ def _parse_models(payload: dict) -> list[Model]:
             reasoning=bool(meta.get("isReasoning")),
             online=bool(entry.get("online", True)),
             modalities=modalities,
+            upstreams=upstreams,
         ))
     return out
 
@@ -487,7 +573,7 @@ def free_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
 
 
 def usable_free_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
-    """The free models this harness can actually drive.
+    """The free models this harness can actually drive, most redundant first.
 
     Free **and** tool-calling **and** text-output. Both extra tests earn their
     place:
@@ -500,11 +586,23 @@ def usable_free_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
       Measured 2026-10-16: 97 free entries, 46 usable here — the filter drops 36
       for modality and 15 for missing tool support. Those counts shift between
       runs; see the module docstring.
+
+    **Sorted by upstream channel count, descending.** The order is the point of
+    the command as much as the filter is: the operator asked which model is most
+    likely to answer, and the answer is the one with the most channels behind it.
+    Measured 2026-10-16, the top of this list is ``minimax-m2.7:free`` at 101
+    upstreams and the bottom is a band of single-channel models — around two in
+    five of everything usable, a share that held across three consecutive reads
+    while the totals moved. Those are the ones that rate limit. Catalog order is
+    the tiebreak, via a stable sort, so two models with the same redundancy stay
+    in the order the gateway returned them.
     """
     models, err = free_models(token, **kw)
     if models is None:
         return None, err
-    return [m for m in models if m.tools and m.chat], ""
+    usable = [m for m in models if m.tools and m.chat]
+    usable.sort(key=lambda m: m.upstreams, reverse=True)
+    return usable, ""
 
 
 def model_ids(token: str = "", **kw) -> tuple[list[str] | None, str]:
@@ -551,16 +649,44 @@ def model_ids(token: str = "", **kw) -> tuple[list[str] | None, str]:
 #: tool loop this harness runs. Below those two the order is a preference, not a
 #: finding.
 #:
+#: **Reordered 2026-10-16 on a second measured axis: upstream redundancy.** The
+#: tool-calling sweeps above could not separate these models, but the catalog's
+#: channel counts do separate them — with one correction that had to be measured
+#: rather than assumed. Five consecutive reads of each candidate:
+#:
+#:   gemini-3.6-flash:free       13, 13, 13, 13, 13   (13 upstreams, 1M ctx)
+#:   gpt-oss-20b:free            13, 13, 13, 13, 13   (13 upstreams, 128k ctx)
+#:   glm-5.3-flash:free           1,  1,  1,  1,  1   (1 upstream, 1M ctx)
+#:   qwen3.8-27b:free             1,  2,  1,  2,  2   (1-2 upstreams, 65k ctx)
+#:   deepseek-v4.1-flash:free     gone from the catalog
+#:
+#: A single read put ``gpt-oss-20b:free`` at 14 against ``gemini``'s 12, which
+#: looked like a reason to promote it. Re-measuring showed both at 13 on every
+#: one of five reads: **the 14/12 gap was drift, not signal**, and promoting on it
+#: would have been reading noise into a ±2 wobble. So the two are tied, and the
+#: existing context tiebreak decides between them — ``gemini`` leads on its 1M
+#: window over ``gpt-oss``'s 128k, exactly as it did before this axis was added.
+#:
+#: What the counts *do* settle is the thing that mattered: ``glm-5.3-flash:free``
+#: and ``qwen3.8-27b:free`` have one channel each, and a single channel is the
+#: measured shape of a model that rate limits. Two of the five original entries
+#: were therefore fragile, so the default this harness picked for a fresh switch
+#: was, a third of the time, one of the models that stalls — the operator's
+#: complaint arriving one step earlier, as "the harness chose badly on my behalf"
+#: rather than "the list is misleading". They stay in the tuple only as a last
+#: resort: present so a catalog that has lost everything else still resolves,
+#: ranked below the redundant models rather than above them.
+#:
 #: A name that has since gone away falls through to the next, then to the
 #: catalog's own order — load-bearing rather than theoretical, since
-#: ``glm-5.3-flash:free`` was gone from the catalog within the hour it was
-#: measured.
+#: ``deepseek-v4.1-flash:free`` is already gone and ``glm-5.3-flash:free`` was
+#: gone within the hour it was first measured.
 PREFERRED_FREE_MODELS = (
     "gemini-3.6-flash:free",
+    "gpt-oss-20b:free",
     "glm-5.3-flash:free",
     "qwen3.8-27b:free",
     "deepseek-v4.1-flash:free",
-    "gpt-oss-20b:free",
 )
 
 

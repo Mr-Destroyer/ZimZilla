@@ -119,6 +119,29 @@ CRACK_DEFAULT_BUDGET = 1800.0
 _MODEL_COL = 34
 
 
+def _upstream_style(palette, tier: str) -> str:
+    """The colour for a UnoRouter upstream-redundancy tier.
+
+    **This is ZimZilla's tier, not UnoRouter's status.** The gateway's catalog
+    publishes a channel *list* and no per-channel health, so there is no green
+    dot to read and none is invented: what is coloured here is how many channels
+    stand behind a model, which is a fact, mapped through thresholds that are
+    ours (see ``unorouter.UPSTREAM_THIN``). The count is printed next to the
+    colour precisely so the colour can never be mistaken for a signal the
+    gateway issued.
+
+    ``unknown`` is deliberately dim rather than green or amber. A catalog that
+    did not say is not a good sign or a bad one, and colouring it either way
+    would be reading a fact into a blank.
+    """
+    return {
+        "good": palette.accent,
+        "thin": palette.amber,
+        "single": palette.red,
+        "unknown": palette.dim,
+    }.get(tier, palette.dim)
+
+
 def _parse_crack_args(args) -> tuple[str, int | None, float, bool, str]:
     """Parse `/crack`'s arguments. Returns ``(path, mode, max_time, deep, err)``.
 
@@ -2316,7 +2339,11 @@ class ZimZillaApp(App):
 
         UnoRouter's answers only for its free tier — its paid entries publish
         credit ratios, not rates, so they fall through to the estimate table
-        rather than being converted into a dollar figure it never stated.
+        rather than being converted into a dollar figure it never stated. Its
+        note also carries the upstream channel count, which is the figure that
+        decides whether the model answers at all: a free model with one channel
+        behind it rate limits, and no price is worth knowing about a model that
+        will not reply.
         """
         live = th_mod.price_for(name, catalog)
         if live is None:
@@ -2325,15 +2352,35 @@ class ZimZillaApp(App):
             live = uno_mod.price_for(name, uno_catalog)
         if live is not None:
             pin, pout = live
-            if pin == 0.0 and pout == 0.0:
-                return "free"
-            return f"${pin:g}/${pout:g} per Mtok"
+            note = "free" if (pin == 0.0 and pout == 0.0) \
+                else f"${pin:g}/${pout:g} per Mtok"
+            return note + self._uno_upstream_clause(name, uno_catalog)
         pin, pout = price_for(name)
         note = f"${pin:.2f}/${pout:.2f} per Mtok"
         health = lf_mod.health_for(name) if lf_catalog else None
         if health is not None and not health.healthy:
             note += f"  ·  {health.status}" if health.status else "  ·  degraded"
         return note
+
+    def _uno_upstream_clause(self, name: str, uno_catalog) -> str:
+        """``"  ·  1 upstream"`` for a UnoRouter model, or ``""``.
+
+        A plain string rather than a coloured segment, because ``_model_note``
+        returns one string that the caller renders in a single dim style — the
+        colour lives in the ``/models`` list, where the row is built from parts.
+        The count is the load-bearing half anyway: it is what the operator acts
+        on, and it survives being printed without its colour.
+
+        Empty whenever the catalog is absent or has no entry for *name* — the
+        same silence ``Model.upstream_note`` keeps for an unread channel list.
+        """
+        if not uno_catalog:
+            return ""
+        for m in uno_catalog:
+            if m.id == name:
+                note = getattr(m, "upstream_note", "")
+                return f"  ·  {note}" if note else ""
+        return ""
 
     def _cmd_cost(self, args=None) -> None:
         p = self.palette
@@ -3143,6 +3190,18 @@ class ZimZillaApp(App):
                     t.append(" " * (_MODEL_COL - len(shown) + 1))
                 else:
                     t.append("\n    ")
+                # UnoRouter's upstream count leads, in its own colour. The
+                # number is what the operator asked for — how many channels
+                # stand behind this model, i.e. whether a rate limit on one of
+                # them is survivable. The colour is OUR tier, not UnoRouter's
+                # status (the catalog publishes none), which is why the count is
+                # printed beside the dot rather than replaced by it: a bare
+                # colour would read as a health signal the gateway never issued.
+                if kind == "unorouter":
+                    note = getattr(m, "upstream_note", "")
+                    if note:
+                        t.append(note, style=_upstream_style(p, m.redundancy))
+                        t.append(" · ", style=p.dim)
                 t.append(m.blurb + "\n", style=p.dim)
                 if kind == "antseed" and shown != m.id:
                     t.append(f"      → {m.id}\n", style=p.dim)
@@ -3157,6 +3216,20 @@ class ZimZillaApp(App):
                 "tools-capable only,\n  so image, embedding and speech models "
                 "are filtered out\n",
                 style=p.dim)
+            # The upstream count is the reason this list is sorted the way it
+            # is, so the legend has to say what the number means AND what the
+            # colour does not. Both halves matter: without the first, the
+            # operator cannot use it; without the second, a colour gets read as
+            # a health dot UnoRouter never publishes.
+            t.append("\n  upstreams = how many channels can serve this model. "
+                     "One channel means\n  a rate limit there is the end of the "
+                     "request, not a retry elsewhere —\n  which is why the "
+                     "single-channel models at the bottom are the ones that\n"
+                     "  stall. Sorted most-redundant first.\n", style=p.dim)
+            t.append("  the colour is this harness's read of that count, ",
+                     style=p.dim)
+            t.append("not UnoRouter's status", style=f"bold {p.amber}")
+            t.append(" — it publishes none\n", style=p.dim)
         if kind == "antseed":
             t.append(
                 "  free = a seller charging 0 in and 0 out · the id shown is "

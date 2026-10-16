@@ -488,6 +488,49 @@ them as a dated snapshot rather than a specification. The `usable_free_models()`
 filter is the thing that holds; the numbers are what it returned on one
 afternoon.
 
+#### Upstream redundancy — why some free models stall
+
+UnoRouter does not serve a model from one place. Each model has a list of
+**upstream channels** behind it, and how many there are decides what a rate
+limit means. One channel means a 429 there is the end of the request; a hundred
+means the router tries elsewhere and you never see it. That is the difference
+between a free model that works and one that appears to hang.
+
+`/models unorouter` shows the count beside every model, coloured by a tier, and
+**sorts the list most-redundant first** — so the top of the list is the safest
+pick:
+
+```
+  ○ minimax-m2.7:free                  101 upstreams · free · reasoning · 204k ctx
+  ○ nemotron-3-super-120b-a12b:free    19 upstreams · free · reasoning · 262k ctx
+  ◉ gemini-3.6-flash:free              13 upstreams · free · reasoning · 1000k ctx
+  ○ gpt-oss-20b:free                   13 upstreams · free · reasoning · 128k ctx
+  ...
+  ○ glm-4.5-flash:free                 1 upstream · free · 131k ctx
+```
+
+The share that matters holds even though the counts do not. Measured on
+2026-10-16 across three consecutive reads, the number of usable free models moved
+47 → 45 → 42 while the **single-channel share stayed at 38–42%** — so roughly
+**two in five of the free models on offer have exactly one upstream**, and those
+are the ones that stall. They were previously indistinguishable from the rest of
+the list. As with the counts above, treat any absolute figure here as a dated
+snapshot: the ratio is the finding, the totals are one afternoon's reading.
+
+Two things this is **not**, both worth stating plainly:
+
+- **It is not a health signal.** UnoRouter's public catalog publishes a channel
+  *list* and no per-channel status — checked field by field, there is no such
+  field on the API. A model with 20 channels could have all 20 degraded. What is
+  counted is how many places the router *could* go, not how many are answering.
+- **The tier boundaries are ZimZilla's, not UnoRouter's.** The count is measured;
+  where "good" begins (`UPSTREAM_THIN = 5`) is our judgement about the point at
+  which one channel failing stops mattering. The number is printed next to the
+  colour so the colour can never be mistaken for something the gateway said.
+
+A model whose catalog entry carries no channel list reads as `unknown` and is
+left uncoloured — absence of the field is not evidence of a single channel.
+
 A note on prices: UnoRouter publishes *credit ratios*, not dollars per million
 tokens, so this integration does not invent a rate from them. Free models read
 `free` — which is exact — and a paid model falls through to ZimZilla's own
@@ -521,15 +564,27 @@ The run-to-run variance is larger than the difference between the models, so the
 honest reading is not "gemini is best" but **all five can call a tool and none
 does so dependably** — a property of the free tier rather than of any one model.
 The shortlist therefore records what was *verified* (each name returned a real
-`tool_use` at least once) and breaks the tie on **context**: the default is
-`gemini-3.6-flash:free`, whose 1M window beats `qwen3.8-27b:free`'s 64k for the
-tool loop this harness runs. Below those two the order is a preference, not a
-finding.
+`tool_use` at least once) and breaks the tie on **upstream redundancy** first,
+**context** second. The default is `gemini-3.6-flash:free` and
+`gpt-oss-20b:free` behind it — both with 13 channels, so the context tiebreak
+decides and `gemini`'s 1M window wins. `qwen3.8-27b:free` and
+`glm-5.3-flash:free` sit at **one or two** channels and rank below them.
+
+The reordering came from this same measurement, and it corrected a mistake worth
+recording: a single read put `gpt-oss-20b:free` at 14 channels against
+`gemini`'s 12, which looked like grounds to promote it. Five consecutive reads
+then showed both at 13 every time — the gap was drift, not signal. Promoting on
+it would have been reading noise into a ±2 wobble, so the two are treated as
+tied. What the counts *do* settle is that two of the five shortlisted names have
+a single channel, so the model this harness chose on the operator's behalf was, a
+third of the time, one of the fragile ones. A default that quietly picks a model
+which rate limits is the same complaint as a list that hides which models rate
+limit.
 
 Entries do disappear: `glm-5.3-flash:free` was gone from the catalog within the
-hour it was measured. The list falls through to the next name and then to the
-catalog's own order, so a vanished entry costs one lookup rather than a broken
-switch.
+hour it was measured, and `deepseek-v4.1-flash:free` is gone now. The list falls
+through to the next name and then to the catalog's own order, so a vanished entry
+costs one lookup rather than a broken switch.
 
 ### AntSeed
 
@@ -688,7 +743,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/openrouter-api-setup <key>` | store your OpenRouter API key |
 | `/zim-unorouter` | switch upstream to UnoRouter — hosted, free models, native Messages |
 | `/unorouter-api-setup <key>` | store your UnoRouter API key |
-| `/unorouter-models` | the live free catalog — free, text-output and tools-capable |
+| `/unorouter-models` | the live free catalog — free, text-output and tools-capable, most upstream channels first |
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
 | `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `antseed` |
