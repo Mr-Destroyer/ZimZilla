@@ -24,6 +24,12 @@ Four behaviours are pinned here:
 4. A finish at the token ceiling is reported as **truncated** and is **not**
    nudged — re-prompting a model that was cut off mid-``Write`` just spends
    another ceiling on the same truncation.
+5. A finish at the token ceiling that carried **nothing at all** is a different
+   shape and is handled differently: it is reported as ``reasoning_exhausted``
+   and retried once with a doubled ceiling. This is the reasoning-model case —
+   the budget went to thinking the proxy never forwards, so there is no dropped
+   work to protect and the ceiling is known to be too small. See the note on the
+   branch in ``agent.run_turn``.
 
 No network: ``_stream_once`` is replaced with a stub that yields canned
 messages, exactly as ``test_phase4`` does.
@@ -80,6 +86,17 @@ def _text(msg: str, stop_reason: str | None = None) -> _Msg:
     return _Msg([_Blk(type="text", text=msg)], stop_reason=stop_reason)
 
 
+def _empty(stop_reason: str = "max_tokens") -> _Msg:
+    """A truncated reply that carries nothing: the reasoning-exhaustion shape.
+
+    What a reasoning model looks like through a proxy that does not forward its
+    thinking — one ``text`` block holding an empty string, and no tool call. The
+    budget went somewhere the harness never sees. Measured, not imagined: see the
+    note on this branch in ``agent.run_turn``.
+    """
+    return _Msg([_Blk(type="text", text="")], stop_reason=stop_reason)
+
+
 def _write(path: Path, body: str = "the report") -> _Msg:
     """A reply that calls the real write tool.
 
@@ -115,9 +132,14 @@ def _stub(agent: Agent, messages: list[_Msg]) -> dict:
     carries no tool call — a real model stops after writing, and a stub that
     keeps offering another ``write_file`` does not. See ``_done``.
     """
-    state = {"n": 0}
+    state = {"n": 0, "ceilings": []}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
+        # The ceiling is recorded, not ignored: the reasoning-exhaustion retry is
+        # only correct if the second call actually asks for more room than the
+        # first, and a stub that swallows the argument would hide a retry that
+        # re-sent the same ceiling.
+        state["ceilings"].append(max_tokens)
         i = state["n"]
         state["n"] += 1
         if i < len(messages):
@@ -252,6 +274,70 @@ async def test_a_truncated_finish_is_not_nudged(tmp: Path) -> None:
           final and final[0]["written"] is False, str(final))
     check("truncated: zero nudges are reported",
           final and final[0]["nudges"] == 0, str(final))
+    check("truncated: a mid-Write cut is NOT the empty shape",
+          "reasoning_exhausted" not in kinds, str(kinds))
+
+
+async def test_an_empty_truncation_retries_with_more_room(tmp: Path) -> None:
+    """A truncated reply carrying nothing is retried, not reported and dropped.
+
+    The failure this pins: ``so where are we ?`` came back as
+    "reply truncated at 32768 output tokens" with no reply above it. The model
+    was a reasoning model, its thinking is billed against ``max_tokens``, and the
+    proxy forwards none of it — so the harness was handed an empty turn. Nothing
+    the model asked for was dropped, so re-sending costs only the ceiling that
+    was already known to be too small.
+    """
+    agent = Agent(_cfg(tmp))
+    state = _stub(agent, [
+        _empty(),
+        _done("We are on wave 7 of the x.test campaign."),
+    ])
+
+    events = await _drive(agent, "so where are we ?", None)
+    kinds = _kinds(events)
+    exh = [e for e in events if e["type"] == "reasoning_exhausted"]
+
+    check("empty: the empty truncation was named", len(exh) == 1, str(exh))
+    check("empty: it is not called a mid-Write truncation",
+          "truncated" not in kinds, str(kinds))
+    check("empty: it names the ceiling that was spent",
+          exh and exh[0]["max_tokens"] == agent.cfg.max_tokens, str(exh))
+    check("empty: it says what it is retrying with",
+          exh and exh[0]["retry_tokens"] == agent.cfg.max_tokens * 2, str(exh))
+    check("empty: it spent exactly two calls", state["n"] == 2, str(state["n"]))
+    check("empty: the retry actually asked for more room",
+          len(state["ceilings"]) == 2
+          and state["ceilings"][1] > state["ceilings"][0], str(state["ceilings"]))
+    check("empty: the blank turn was dropped from the history",
+          len(agent.messages) == 2, str(agent.messages))
+    check("empty: the turn ended without error", "error" not in kinds, str(kinds))
+
+
+async def test_a_second_empty_truncation_stops_honestly(tmp: Path) -> None:
+    """The retry is bounded: double once, then say so — never a loop.
+
+    A model that spends a doubled ceiling on reasoning and still emits nothing is
+    not going to answer on a third attempt, so the second one is reported rather
+    than retried. The history must be left clean too: the turn ends on the user's
+    message, with no blank assistant reply carried into the next request.
+    """
+    agent = Agent(_cfg(tmp))
+    state = _stub(agent, [_empty()])
+
+    events = await _drive(agent, "so where are we ?", None)
+    kinds = _kinds(events)
+    exh = [e for e in events if e["type"] == "reasoning_exhausted"]
+
+    check("empty x2: both attempts were reported", len(exh) == 2, str(len(exh)))
+    check("empty x2: the first offered the retry",
+          exh and exh[0]["retry_tokens"] == agent.cfg.max_tokens * 2, str(exh))
+    check("empty x2: the second offered no further retry",
+          len(exh) == 2 and exh[1]["retry_tokens"] is None, str(exh))
+    check("empty x2: it stopped after two calls", state["n"] == 2, str(state["n"]))
+    check("empty x2: the history is left clean",
+          len(agent.messages) == 1, str(agent.messages))
+    check("empty x2: the turn ended without error", "error" not in kinds, str(kinds))
 
 
 async def test_a_truncation_after_a_nudge_still_stops(tmp: Path) -> None:
@@ -359,6 +445,8 @@ def main() -> int:
             test_a_nudged_model_can_recover,
             test_a_first_try_write_is_not_nudged,
             test_a_truncated_finish_is_not_nudged,
+            test_an_empty_truncation_retries_with_more_room,
+            test_a_second_empty_truncation_stops_honestly,
             test_a_truncation_after_a_nudge_still_stops,
             test_no_deliverable_means_no_change,
             test_a_zero_nudge_budget_never_nudges,

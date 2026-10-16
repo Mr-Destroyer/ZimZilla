@@ -955,7 +955,7 @@ def _hunt_factory(script):
                       can_report=kw.get("can_report", False))
         state = {"n": 0}
 
-        async def fake_stream():
+        async def fake_stream(max_tokens=None):
             state["n"] += 1
             prompt = agent.messages[-1]["content"] if agent.messages else ""
             prompt = prompt if isinstance(prompt, str) else ""
@@ -1863,7 +1863,7 @@ async def test_hunt_stops_midwave(wd: Path) -> None:
         agent = Agent(cfg, permission_handler=kw.get("permission_handler"),
                       tool_hook=kw.get("tool_hook"))
 
-        async def fake_stream():
+        async def fake_stream(max_tokens=None):
             prompt = agent.messages[-1]["content"] if agent.messages else ""
             prompt = prompt if isinstance(prompt, str) else ""
 
@@ -2194,7 +2194,7 @@ async def test_campaign_reaches_the_main_agent(wd: Path) -> None:
         })
         seen: list[str] = []
 
-        async def _fake_stream():
+        async def _fake_stream(max_tokens=None):
             # Records what the turn is about to send, then ends the stream so
             # run_turn unwinds without needing a gateway.
             seen.append(app.agent.messages[-1]["content"])
@@ -2238,7 +2238,7 @@ async def test_recon_reports_live(wd: Path) -> None:
         agent = Agent(cfg, permission_handler=kw.get("permission_handler"),
                       tool_hook=kw.get("tool_hook"))
 
-        async def fake_stream():
+        async def fake_stream(max_tokens=None):
             prompt = agent.messages[-1]["content"] if agent.messages else ""
             prompt = prompt if isinstance(prompt, str) else ""
             if _RECON_MARK in prompt:
@@ -2572,7 +2572,7 @@ async def test_transcript_shows_full_command(wd: Path) -> None:
             stream = agent._stream_once
             calls = {"n": 0}
 
-            async def stopping_stream():
+            async def stopping_stream(max_tokens=None):
                 calls["n"] += 1
                 if calls["n"] == 2 and app._hunt_run is not None:
                     app._handle_command("/stop-hunt")
@@ -2659,7 +2659,7 @@ async def test_loop_rail_shows_hack_during_hunt(wd: Path) -> None:
             stream = agent._stream_once
             calls = {"n": 0}
 
-            async def stopping_stream():
+            async def stopping_stream(max_tokens=None):
                 calls["n"] += 1
                 if calls["n"] == 2 and app._hunt_run is not None:
                     app._handle_command("/stop-hunt")
@@ -3642,7 +3642,7 @@ async def test_bug_hunt_reuses_recon_from_the_ui(wd: Path) -> None:
             stream = agent._stream_once
             calls = {"n": 0}
 
-            async def stopping_stream():
+            async def stopping_stream(max_tokens=None):
                 calls["n"] += 1
                 if calls["n"] == 2 and a._hunt_run is not None:
                     a._handle_command("/stop-hunt")

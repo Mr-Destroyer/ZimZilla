@@ -120,7 +120,7 @@ def _stub(agent: Agent, messages: list[_Msg], used: int = 0) -> dict:
     """
     state = {"n": 0}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         i = state["n"]
         state["n"] += 1
         msg = messages[min(i, len(messages) - 1)]
@@ -268,7 +268,7 @@ async def test_auto_compact_fires_above_the_threshold(tmp: Path) -> None:
     seen: list[int] = []
     original = agent._stream_once
 
-    async def recording_stream():
+    async def recording_stream(max_tokens=None):
         seen.append(len(agent.messages))
         async for item in original():
             yield item
@@ -434,7 +434,7 @@ async def test_overflow_triggers_one_compact_and_retry(tmp: Path) -> None:
 
     calls = {"n": 0}
 
-    async def stream():
+    async def stream(max_tokens=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise _overflow_error()
@@ -473,7 +473,7 @@ async def test_overflow_is_retried_only_once(tmp: Path) -> None:
 
     calls = {"n": 0}
 
-    async def stream():
+    async def stream(max_tokens=None):
         # A function that raises before reaching a `yield` is a coroutine, not
         # an async generator — `async for` rejects it with a TypeError that
         # would mask the very thing under test. The unreachable `yield` is what
@@ -507,7 +507,7 @@ async def test_overflow_without_auto_compact_is_not_retried(tmp: Path) -> None:
 
     calls = {"n": 0}
 
-    async def stream():
+    async def stream(max_tokens=None):
         calls["n"] += 1
         raise _overflow_error()
         yield  # pragma: no cover - makes this an async generator; never reached

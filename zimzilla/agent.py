@@ -15,6 +15,8 @@ Events yielded
 ``retry``        transient API error, backing off
 ``usage``        token counts for the completed request
 ``truncated``    the reply hit ``max_tokens`` and was cut off
+``reasoning_exhausted`` a truncated reply carried nothing at all — the whole
+                 ceiling went to reasoning the endpoint never forwards
 ``deliverable``  a declared file was or was not written by the end of the turn
 ``continuing``   the soft round cap was passed because the turn is progressing
 ``iteration_cap`` the turn stopped at a round cap — soft (stuck) or hard (runaway)
@@ -45,6 +47,32 @@ PermissionHandler = Callable[[str, dict, object], Awaitable[str]]
 # Returning a context manager rather than a plain coroutine is what lets the
 # lock span the whole call instead of being released the instant it is taken.
 ToolHook = Callable[[str, dict], AsyncContextManager[None]]
+
+#: Ceiling a reasoning-exhaustion retry may raise the output budget to.
+#: The retry doubles the ceiling that was just exhausted; this bounds the
+#: doubling so it cannot run off the end of what the endpoint will accept.
+#: Measured 2026-10-16 against Token Juice's ``deepseek-v4.1-flash`` through the
+#: LiteLLM proxy: ``max_tokens: 200000`` was accepted, so 131072 sits inside the
+#: envelope rather than on its edge.
+MAX_OUTPUT_CEILING = 131072
+
+
+def _has_visible_content(content) -> bool:
+    """Whether a reply carried anything the operator can see or act on.
+
+    True for non-blank text, or for any tool call. Deliberately not
+    ``bool(content)``: the failure this exists for arrives as a single ``text``
+    block holding an empty string, which is a non-empty *list* and an empty
+    *answer*, so the obvious truthiness test reads it as a real reply.
+    """
+    for block in content or []:
+        kind = getattr(block, "type", None)
+        if kind == "tool_use":
+            return True
+        if kind == "text" and (getattr(block, "text", "") or "").strip():
+            return True
+    return False
+
 
 IDENTITY = """You are ZimZilla, a specialised agentic coding CLI created by ZIM (Mr-Destroyer).
 
@@ -529,6 +557,14 @@ class Agent:
         #: compaction means compaction is not shrinking the prompt — retrying
         #: would just spend another request to fail the same way.
         overflow_retried = False
+        #: The output ceiling this turn's calls ask for. Starts at the configured
+        #: value and is raised only by the reasoning-exhaustion retry below.
+        ceiling = self.cfg.max_tokens
+        #: One reasoning-exhaustion retry per turn, for the same reason as the
+        #: overflow retry: a model that spends a doubled ceiling on reasoning and
+        #: still emits nothing is not going to answer on a third attempt, and
+        #: retrying would just spend it again.
+        reasoning_retried = False
         #: The window the auto-compact threshold is measured against, resolved
         #: once per turn: the live catalog's figure for this model when it has
         #: one, else the configured fallback.
@@ -596,7 +632,7 @@ class Agent:
 
             try:
                 final = None
-                async for ev, final_msg in self._stream_once():
+                async for ev, final_msg in self._stream_once(ceiling):
                     if ev is not None:
                         yield ev
                     if final_msg is not None:
@@ -664,6 +700,7 @@ class Agent:
                 }
 
             # ---- store assistant turn verbatim
+            depth = len(self.messages)
             content = [self._block_to_dict(b) for b in final.content]
             self.messages.append({"role": "assistant", "content": content})
 
@@ -679,8 +716,50 @@ class Agent:
             # way and breaks in both cases.
             stop_reason = getattr(final, "stop_reason", None)
             truncated = stop_reason == "max_tokens"
+
+            # A truncation that carried NOTHING is a third shape, and the one an
+            # operator actually hit: "so where are we?" answered with the
+            # warning below and no answer at all.
+            #
+            # ``deepseek-v4.1-flash`` on Token Juice is a reasoning model, and a
+            # reasoning model's thinking is billed against ``max_tokens`` like
+            # any other output. The LiteLLM proxy in front of it does not
+            # translate that thinking into a ``thinking`` block — measured
+            # 2026-10-16, an OpenAI-shaped request for the same prompt came back
+            # with ``message.content: None``, a populated ``reasoning_content``
+            # and ``completion_tokens_details.reasoning_tokens`` equal to the
+            # whole budget, while the Anthropic-shaped one returned a single
+            # ``text`` block holding ``""``. So when the reasoning runs to the
+            # ceiling, the harness is handed an empty reply and told it was cut
+            # off — with no text, no tool call, and no way to tell from the
+            # transcript that the model never got to speak.
+            #
+            # The mid-``Write`` branch below must not re-prompt, because the
+            # model's work is in the transcript and re-sending spends another
+            # ceiling on the same truncation. None of that applies here: there is
+            # nothing to lose and the ceiling is *known* to be too small, so the
+            # honest move is to drop the empty turn and ask again with more room.
+            if truncated and not tool_calls and not _has_visible_content(final.content):
+                # Drop the empty assistant turn. Keeping it would leave a blank
+                # text block in the history for the retry to resend, and would
+                # leave the transcript ending on an assistant message that says
+                # nothing.
+                del self.messages[depth:]
+                raised = min(ceiling * 2, MAX_OUTPUT_CEILING)
+                retrying = not reasoning_retried and raised > ceiling
+                yield {
+                    "type": "reasoning_exhausted",
+                    "max_tokens": ceiling,
+                    "retry_tokens": raised if retrying else None,
+                }
+                if retrying:
+                    reasoning_retried = True
+                    ceiling = raised
+                    continue
+                break
+
             if truncated:
-                yield {"type": "truncated", "max_tokens": self.cfg.max_tokens}
+                yield {"type": "truncated", "max_tokens": ceiling}
 
             if not tool_calls:
                 # A turn with a declared deliverable is not finished until the
@@ -930,20 +1009,26 @@ class Agent:
         }
 
     # ---- streaming with retry --------------------------------------------
-    async def _stream_once(self):
+    async def _stream_once(self, max_tokens: int | None = None):
         """One API call. Yields (event_or_None, final_message_or_None).
 
         Retries transient failures with exponential backoff and jitter.
+
+        *max_tokens* overrides the configured output ceiling for this call only.
+        The reasoning-exhaustion retry is the one caller that passes it: the
+        ceiling it just spent is provably too small, and re-sending the identical
+        request would spend it again on the same wall.
         """
         import anthropic
 
         attempt = 0
         max_attempts = 5
+        ceiling = self.cfg.max_tokens if max_tokens is None else max_tokens
         while True:
             try:
                 kwargs: dict = {
                     "model": self.cfg.model,
-                    "max_tokens": self.cfg.max_tokens,
+                    "max_tokens": ceiling,
                     "system": self.system_prompt(),
                     "messages": self.messages,
                     "tools": self.tool_schemas(),

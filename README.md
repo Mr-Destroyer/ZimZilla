@@ -282,9 +282,47 @@ stops is almost always one of the last two, not the first.
 | Limit | Default | What happens at it |
 |---|---|---|
 | **Context window** | the model's own, from the live catalog (1M fallback) | History is compacted automatically at 80% — see below |
-| **Output ceiling** | 32768 tokens | The reply is cut off; reported as `truncated`, never silently |
+| **Output ceiling** | 32768 tokens | The reply is cut off; reported as `truncated`, never silently. A cut that carried *nothing* is retried once at double — see below |
 | **Rounds before pause** | 40 | The turn **continues** if the last round did real work; otherwise it stops and says so |
 | **Hard round limit** | 400 | The turn stops and says so — this is the runaway guard |
+
+### When the ceiling goes to thinking
+
+A reasoning model's thinking is billed against the output ceiling like any other
+output, so a model can spend the whole budget before it writes a word. That is
+survivable when the thinking reaches you — but through a proxy that does not
+forward it, it is not: the reply arrives as a single `text` block holding an
+empty string, and the harness is told only that it was cut off.
+
+Measured 2026-10-16 on Token Juice's `deepseek-v4.1-flash` behind the LiteLLM
+proxy, same prompt through both protocol shapes:
+
+```
+OpenAI   /v1/chat/completions  finish_reason: length
+                               message.content: None
+                               message.reasoning_content: "We need answer. Need be careful…"
+                               completion_tokens_details.reasoning_tokens: 16   # the whole budget
+
+Anthropic /v1/messages         stop_reason: max_tokens
+                               content: [{"type": "text", "text": ""}]
+```
+
+The Anthropic shape is what ZimZilla speaks, so a question as ordinary as
+*"so where are we ?"* against a loaded session came back as
+`reply truncated at 32768 output tokens` with no reply above it — the model had
+reasoned its way to the ceiling and the harness could not see any of it. The
+warning was also wrong about what had happened: nothing the model asked for was
+dropped, so "the requested action may not have run" described a different
+failure.
+
+A truncation that carries nothing is now its own shape, `reasoning_exhausted`,
+and it is retried once with the ceiling doubled (capped at 131072). Re-sending
+costs only a ceiling already known to be too small, and there is no dropped work
+to protect — which is exactly why the mid-`Write` truncation below must *not* be
+retried, and still is not. If the doubled ceiling is spent the same way, the
+turn stops and says so rather than doubling again. The empty assistant turn is
+dropped from the history either way, so the next request does not carry a blank
+reply.
 
 ### Why a long turn used to just stop
 
@@ -1516,7 +1554,7 @@ python tests/test_osint_tree.py    # the result tree — parser, real reports, /
 python tests/test_update.py        # self-update — real git, throwaway repos
 python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv
-python tests/test_deliverable.py   # the deliverable check — nudge, truncation, honesty
+python tests/test_deliverable.py   # the deliverable check — nudge, truncation, reasoning exhaustion
 python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, overflow
 ```
 

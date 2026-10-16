@@ -953,7 +953,7 @@ async def test_ui(wd: Path) -> None:
 
         gate = asyncio.Event()
 
-        async def held_stream():
+        async def held_stream(max_tokens=None):
             await gate.wait()
             yield (None, _Msg([_Blk(type="text", text="done")]))
 
@@ -1018,7 +1018,7 @@ async def test_ui(wd: Path) -> None:
         # case dir cleared.
         gate.clear()
 
-        async def reporting_stream():
+        async def reporting_stream(max_tokens=None):
             await gate.wait()
             # The case dir is the only one under osint/ for this state_dir.
             case = next((cfg.state_dir / "osint").glob("github-torvalds-*"))

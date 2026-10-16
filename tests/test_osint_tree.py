@@ -710,7 +710,7 @@ async def test_ui(wd: Path) -> None:
 
             gate = asyncio.Event()
 
-            async def reporting_stream():
+            async def reporting_stream(max_tokens=None):
                 await gate.wait()
                 case = next((cfg.state_dir / "osint").glob("email-demo-example.com-*"))
                 (case / "report.md").write_text(SHAPE_A)
@@ -766,7 +766,7 @@ async def test_ui(wd: Path) -> None:
             # ---- and it is typeable while busy -------------------------
             gate.clear()
 
-            async def held_stream():
+            async def held_stream(max_tokens=None):
                 await gate.wait()
                 yield (None, _Msg([_Blk(type="text", text="done")]))
 

@@ -15,7 +15,7 @@ async def main():
                           base_url="http://localhost:4001", mode="auto")
     agent = Agent(cfg)
     state = {"n": 0}
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         state["n"] += 1
         if state["n"] == 1:
             yield (None, Msg([Blk(type="tool_use", id="t1", name="bash",

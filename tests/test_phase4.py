@@ -73,7 +73,7 @@ def _stub_agent(mode: str, workdir: Path):
     agent = Agent(_cfg(workdir, mode=mode), permission_handler=handler)
     state = {"n": 0}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         state["n"] += 1
         if state["n"] == 1:
             yield ({"type": "text_delta", "text": "running"}, None)
@@ -638,7 +638,7 @@ def _stub_agent_usage(workdir: Path):
     agent = Agent(_cfg(workdir), permission_handler=lambda *a: asyncio.sleep(0, result="yes"))
     state = {"n": 0}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         state["n"] += 1
         if state["n"] == 1:
             yield ({"type": "text_delta", "text": "working"}, None)
@@ -1363,7 +1363,7 @@ def _team_factory(script):
                       tool_hook=kw.get("tool_hook"))
         state = {"n": 0}
 
-        async def fake_stream():
+        async def fake_stream(max_tokens=None):
             state["n"] += 1
             if cfg.mode == "plan":
                 yield ({"type": "text_delta", "text": script["roster"]}, None)
@@ -1449,7 +1449,7 @@ async def test_team_parallel(wd: Path) -> None:
     def factory(cfg, **kw):
         agent = Agent(cfg, tool_hook=kw.get("tool_hook"))
 
-        async def fake_stream():
+        async def fake_stream(max_tokens=None):
             if cfg.mode == "plan":
                 yield ({"type": "text_delta", "text": roster}, None)
                 yield (None, _Msg([_Blk(type="text", text=roster)]))
@@ -1494,7 +1494,7 @@ async def test_team_failure_contained(wd: Path) -> None:
     def factory(cfg, **kw):
         agent = Agent(cfg, tool_hook=kw.get("tool_hook"))
 
-        async def fake_stream():
+        async def fake_stream(max_tokens=None):
             if cfg.mode == "plan":
                 yield ({"type": "text_delta", "text": roster}, None)
                 yield (None, _Msg([_Blk(type="text", text=roster)]))
@@ -1581,7 +1581,7 @@ async def test_team_tool_hook(wd: Path) -> None:
     agent = Agent(_cfg(wd), tool_hook=hook)
     state = {"n": 0}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         state["n"] += 1
         if state["n"] == 1:
             yield (None, _Msg([

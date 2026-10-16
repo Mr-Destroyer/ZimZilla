@@ -1685,6 +1685,34 @@ class ZimZillaApp(App):
                 self._sys_line(f"auto-compact failed: {ev['note']}", warn=True)
             bar.set_activity("thinking", busy=True)
 
+        elif etype == "reasoning_exhausted":
+            # A truncation that carried nothing. The reply hit the ceiling and
+            # came back empty, which is what a reasoning model looks like through
+            # a proxy that does not forward its thinking: the whole budget went
+            # to reasoning the harness never receives, so there is no text and no
+            # tool call to show. Named separately from `truncated` because the
+            # advice differs — nothing the model asked for was dropped, so
+            # "the requested action may not have run" would be a lie, and the
+            # fix is more room rather than a re-run.
+            self._flush_stream(chat, p)
+            chat.card_finish()
+            if ev.get("retry_tokens"):
+                self._sys_line(
+                    f"empty reply at {ev['max_tokens']:,} output tokens — the "
+                    "model spent the whole budget on reasoning this endpoint "
+                    f"does not forward; retrying with {ev['retry_tokens']:,}",
+                    warn=True,
+                )
+                bar.set_activity("thinking", busy=True)
+            else:
+                self._sys_line(
+                    f"empty reply at {ev['max_tokens']:,} output tokens — the "
+                    "model spent the whole budget on reasoning this endpoint "
+                    "does not forward, and the raised retry hit the same wall. "
+                    "Ask again, or narrow the request.",
+                    warn=True,
+                )
+
         elif etype == "truncated":
             # The reply hit the output ceiling and was cut off. Said out loud
             # because the SDK drops a truncated tool call, so a `Write` that ran

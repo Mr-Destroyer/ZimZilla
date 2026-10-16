@@ -65,6 +65,16 @@ def _text(msg: str, stop_reason: str | None = None) -> _Msg:
     return _Msg([_Blk(type="text", text=msg)], stop_reason=stop_reason)
 
 
+def _empty() -> _Msg:
+    """A truncated reply carrying nothing: the reasoning-exhaustion shape.
+
+    One ``text`` block holding an empty string and no tool call — what a
+    reasoning model looks like when its thinking spends the whole ceiling and the
+    proxy forwards none of it. See the note on this branch in ``agent.run_turn``.
+    """
+    return _Msg([_Blk(type="text", text="")], stop_reason="max_tokens")
+
+
 def _write(path: Path, body: str = "# the report\n") -> _Msg:
     """A reply that calls the real write tool — ``write_file``, not ``write``."""
     return _Msg([
@@ -97,7 +107,7 @@ def _scripted(app, plan) -> dict:
     """
     state = {"n": 0}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         i = state["n"]
         state["n"] += 1
         yield (None, plan(i))
@@ -255,6 +265,42 @@ async def test_a_truncated_finish_is_named_as_truncation(wd: Path) -> None:
               "report.md was not written" not in blob, blob[-900:])
 
 
+async def test_an_empty_truncation_is_named_and_retried(wd: Path) -> None:
+    """A ceiling hit that carried nothing is said out loud, then retried.
+
+    The reported failure as the operator met it: ``so where are we ?`` rendered
+    ``reply truncated at 32768 output tokens`` with no reply above it, because
+    the model reasoned its way to the ceiling and the proxy forwarded none of it.
+    Two things must be visible here — that the reply was *empty* rather than cut
+    mid-work, and that a retry with more room is what happens next, rather than a
+    silent second call that leaves the operator guessing why the bill grew.
+    """
+    cfg = _cfg(wd, boot_rain=False)
+    cfg.state_dir = wd / "ui-state"
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        state = _scripted(app, lambda i: _empty() if i == 0 else _done())
+
+        app._submit_text("so where are we ?")
+        await _settle(pilot, app)
+
+        blob = _transcript(app)
+        check("ui empty: the empty reply was named",
+              "empty reply at" in blob, blob[-900:])
+        check("ui empty: it names the ceiling that was spent",
+              f"empty reply at {app.cfg.max_tokens:,}" in blob, blob[-900:])
+        check("ui empty: it says what it is retrying with",
+              f"{app.cfg.max_tokens * 2:,}" in blob, blob[-900:])
+        check("ui empty: it is not reported as a mid-Write cut",
+              "truncated at" not in blob, blob[-900:])
+        check("ui empty: the retry really happened", state["n"] == 2,
+              f"{state['n']} stream calls")
+
+
 async def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -262,6 +308,7 @@ async def main() -> int:
             test_a_missing_report_is_said_out_loud,
             test_a_written_report_is_confirmed_and_finalised,
             test_a_truncated_finish_is_named_as_truncation,
+            test_an_empty_truncation_is_named_and_retried,
         )):
             wd = tmp / f"ui{i}"
             wd.mkdir(parents=True, exist_ok=True)

@@ -62,7 +62,7 @@ def _stub(workdir: Path):
     )
     state = {"n": 0}
 
-    async def fake_stream():
+    async def fake_stream(max_tokens=None):
         state["n"] += 1
         n = state["n"]
         if n == 1:
