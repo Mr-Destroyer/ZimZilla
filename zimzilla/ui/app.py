@@ -32,6 +32,7 @@ from .. import antseed as as_mod
 from .. import hunt as hunt_mod
 from .. import ldxhub as ldx_mod
 from .. import logfare as lf_mod
+from .. import opencode as oc_mod
 from .. import osint as osint_mod
 from .. import openrouter as or_mod
 from .. import osint_tree as osint_tree_mod
@@ -1975,6 +1976,13 @@ class ZimZillaApp(App):
         # harness state, starts no turn, and is most wanted while a turn is
         # running — which is exactly when the reasoning is on screen.
         "think",
+        # `/zim-opencode` hands the terminal to a *different* program and starts
+        # no turn on `self.agent`, so it cannot interleave a second turn into a
+        # running one. It is also the case where being able to escape a long
+        # turn matters most: the whole point is to go and use another agent
+        # while this one works. The TUI is suspended and restored around it, so
+        # the running turn resumes exactly where it was.
+        "zim-opencode",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -2008,6 +2016,7 @@ class ZimZillaApp(App):
             "findings": lambda a: self._cmd_findings(a),
             "report-bug-hunt": lambda a: self._cmd_report_bug_hunt(a),
             "panes": lambda a: self._cmd_panes(a),
+            "zim-opencode": lambda a: self._cmd_zim_opencode(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare"),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice"),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
@@ -2075,6 +2084,7 @@ class ZimZillaApp(App):
             ("/ldxhub-api-setup [key]", "store your LDXHub API key (document jobs)"),
             ("/ldxhub-models [service]", "LDXHub models/engines — pick the default per service"),
             ("/panes", "re-open this session under tmux — ctrl+b h/v split"),
+            ("/zim-opencode", "open opencode behind a fresh rotating IP"),
             ("/save [name]", "write the session to disk"),
             ("/load [name]", "restore a saved session"),
             ("/compact", "summarise history to free context"),
@@ -3697,6 +3707,143 @@ class ZimZillaApp(App):
         )
         # Handed back as the app's exit value; __main__ does the relaunch.
         self.exit(_panes.Relaunch(resume=resume))
+
+    # ---- /zim-opencode ----------------------------------------------------
+    @work(exclusive=True, thread=True)
+    def _zim_opencode_worker(self, args: list[str], model: str | None,
+                             refresh: bool = False) -> None:
+        """Rotate, prove the route, then hand the terminal to opencode.
+
+        Runs on a worker thread because both the pool build and the pre-flight
+        turn block on sockets for tens of seconds — doing that on the UI thread
+        would freeze the app with no explanation.
+
+        The terminal hand-off itself must happen on the *UI* thread, so the
+        worker stops at the point of launching and calls back into
+        :meth:`_zim_opencode_launch`.
+        """
+        binary = oc_mod.find_binary()
+        if binary is None:
+            self.call_from_thread(self._sys_line,
+                                  "opencode not found - install it please !", True, False)
+            return
+
+        self.call_from_thread(self._sys_line, "building the proxy pool…")
+
+        # A fresh pool on first use, the cached one afterwards. The callback
+        # keeps the operator informed — a cold build is ~25s.
+        def pool_progress(done, total):
+            if done % 100 == 0 or done == total:
+                self.call_from_thread(self._sys_line,
+                                      f"  validating proxies… {done}/{total}")
+
+        pool = oc_mod.get_pool(refresh=refresh, progress=pool_progress)
+        if not pool.proxies:
+            self.call_from_thread(
+                self._sys_line,
+                "no usable proxies found — opencode will run from your own address",
+                True, False)
+            self.call_from_thread(self._zim_opencode_launch, binary, None, args, model)
+            return
+
+        self.call_from_thread(
+            self._sys_line, f"{len(pool.proxies)} proxies live — testing the route…")
+
+        def try_progress(i, n, proxy):
+            self.call_from_thread(self._sys_line, f"  attempt {i}/{n}: {proxy.url}")
+
+        proxy, note = oc_mod.find_working_proxy(
+            binary, model=model or oc_mod.DEFAULT_MODEL,
+            attempts=6, progress=try_progress)
+        if proxy is None:
+            # Say why rather than opening a TUI that will fail on its first
+            # message. `note` distinguishes "no proxies" from "the model id is
+            # retired", which need different fixes.
+            self.call_from_thread(
+                self._sys_line,
+                f"could not find a working route ({note}) — "
+                "try /zim-opencode again, or --model <id>", True, False)
+            return
+        self.call_from_thread(self._zim_opencode_launch, binary, proxy, args, model)
+
+    def _zim_opencode_launch(self, binary: str, proxy, args: list[str],
+                             model: str | None) -> None:
+        """Suspend the TUI, run opencode in the freed terminal, then resume.
+
+        ``suspend`` is what makes this possible at all: opencode's TUI wants the
+        terminal, and ZimZilla is holding it. Suspending hands the real terminal
+        back exactly as it was, so opencode draws to a clean screen and the
+        operator gets its full interface — then ZimZilla redraws over it when
+        the child exits.
+        """
+        ip = oc_mod.probe_exit_ip(proxy) if proxy is not None else None
+        where = f"{proxy.url} (exit {ip})" if proxy is not None else "your own address"
+        self._sys_line(f"opening opencode through {where} — quit it to come back", ok=True)
+
+        # The alias is (re)written here rather than at install time so a moved
+        # checkout re-points itself, and so a session that never runs this
+        # command leaves no file behind.
+        ok, detail = oc_mod.install_alias()
+        if ok:
+            self._sys_line(f"{oc_mod.ALIAS} → {detail}", ok=True)
+        else:
+            self._sys_line(f"could not install {oc_mod.ALIAS}: {detail}", warn=True)
+
+        try:
+            with self.suspend():
+                rc = oc_mod.run(proxy, binary, args=args, model=model,
+                                cwd=str(self.cfg.workdir))
+        except Exception as e:  # noqa: BLE001
+            self._sys_line(f"opencode could not start: {type(e).__name__}: {e}", warn=True)
+            return
+        if rc != 0:
+            self._sys_line(f"opencode exited with status {rc}", warn=True)
+        else:
+            self._sys_line("back in zimzilla", ok=True)
+        self.refresh(layout=True)
+
+    def _cmd_zim_opencode(self, args: list[str]) -> None:
+        """/zim-opencode [--model <id>] [--refresh] [-- <opencode args>]
+
+        Opens opencode behind a rotating IP, with no account and no key: its
+        free models are reachable anonymously, and the only obstacle is that the
+        free tier refuses Tor exits — hence an ordinary HTTP proxy pool rather
+        than Tor.
+        """
+        model = None
+        refresh = False
+        passthrough: list[str] = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--model" and i + 1 < len(args):
+                model = args[i + 1]
+                i += 2
+                continue
+            if a == "--refresh":
+                refresh = True
+                i += 1
+                continue
+            # Everything after `--` goes to opencode untouched, so its own
+            # flags stay reachable without this parser having to know them.
+            if a == "--":
+                passthrough.extend(args[i + 1:])
+                break
+            passthrough.append(a)
+            i += 1
+
+        if oc_mod.find_binary() is None:
+            # The exact wording asked for, plus the install lines that actually
+            # work — a bare "install it" leaves the operator hunting for the
+            # right package manager.
+            self._sys_line("opencode not found - install it please !", warn=True)
+            self._sys_line("  curl -fsSL https://opencode.ai/install | bash", warn=True)
+            self._sys_line("  or: mise use -g opencode   ·   brew install opencode", warn=True)
+            return
+
+        if refresh:
+            self._sys_line("refreshing the proxy pool…")
+        self._zim_opencode_worker(passthrough, model, refresh)
 
     def _cmd_load(self, args) -> None:
         p = self.palette
@@ -5944,6 +6091,8 @@ class ZimZillaApp(App):
             ("/ldxhub-models", "LDXHub models/engines — pick the default per service",
              "ldxhub-models"),
             ("/panes", "re-open this session under tmux", "panes"),
+            ("/zim-opencode", "open opencode behind a fresh rotating IP",
+             "zim-opencode"),
             ("/save", "write the session to disk", "save"),
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),

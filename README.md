@@ -272,6 +272,73 @@ A pre-existing server on the private socket would otherwise keep tmux's stock
 key table — `tmux -f` is read only when a server *starts* — so `--panes` sources
 its config into whatever server it finds before attaching.
 
+### opencode, behind a rotating IP
+
+`/zim-opencode` opens [opencode](https://opencode.ai) **in this terminal**,
+egressing from a different address each time. No account, no API key: opencode
+serves a set of free models itself, and they answer with no credentials on disk
+at all.
+
+It does three things:
+
+1. **Checks the binary.** Missing, it says exactly
+   `opencode not found - install it please !` and prints the install lines that
+   work (`curl -fsSL https://opencode.ai/install | bash`, `mise use -g opencode`,
+   `brew install opencode`). It never half-runs.
+2. **Installs the `opencode-zim` alias** into `~/.local/bin` — a small shim that
+   calls back into ZimZilla, so the shell path and the slash command cannot drift
+   apart. Delete the file to remove it. It takes no arguments of its own; they
+   all go to opencode.
+3. **Rotates the exit IP and hands over the terminal.** The pool's cursor is
+   persisted, so consecutive runs differ even across restarts.
+
+```console
+/zim-opencode                       # open the TUI behind the next proxy
+/zim-opencode --refresh             # rebuild the proxy pool first
+/zim-opencode --model <id>          # a different free model
+/zim-opencode -- --auto --agent build   # everything after `--` goes to opencode
+```
+
+**Nothing global is touched.** The proxy is passed to the child process through
+its environment, so only opencode egresses through it — your shell, your other
+programs and your real address are unaffected. This is *not* proxychains: no
+`LD_PRELOAD`, no root, no whole-process-tree hook.
+
+**Why not Tor.** opencode's free tier refuses Tor exit IPs — the same request
+that succeeds through an ordinary proxy comes back *"OpenCode's free tier can
+only be used from within OpenCode"* through Tor. Tor publishes its exit list, so
+refusing it is one line for anyone. That is also why a commercial VPN works
+where Tor does not, and it is what makes ordinary HTTP proxies usable here.
+(SOCKS is not an option regardless: opencode's fetch layer rejects `socks5://`
+outright, which is another reason the pool is plain HTTP.)
+
+**It is honest about the odds.** Free proxies are free because they are
+unreliable, and opencode's gate accepts some exit addresses and refuses others —
+worse, these proxies rotate their *own* exits per request, so the same proxy can
+work and then not. So the command does not guess: it proves the route with a
+throwaway one-shot turn before opening the TUI, retrying across proxies (up to
+six) until one completes a turn. Expect this to take a while the first time —
+building the pool is ~25s, and each failed attempt costs up to ~40s. It also
+tells the three failures apart, because only two are worth retrying:
+
+| What came back | Verdict |
+|---|---|
+| the free-tier refusal, a TLS/certificate error, a dead connection | retry the next proxy |
+| *"Model is unavailable"* | stop — the id is retired, another proxy will not help |
+| nothing worked | say so, with the reason, rather than opening a TUI that will fail |
+
+If no proxy can be found at all it runs opencode **from your own address** and
+says so — it never falls back silently, because a silent fallback would defeat
+the point of the command. The pool is cached under `~/.zimzilla/opencode/` and
+rebuilt when it runs dry or is more than six hours old.
+
+Two caveats worth stating plainly. The free models are opencode's own and
+documented as limited-time — they rotate and retire, which is why
+`--model <id>` exists and why a retired id is reported instead of retried. And
+free proxies see your traffic: opencode's own traffic, but in the clear as far
+as the proxy is concerned. Do not send anything through them you would not send
+through a stranger's server.
+
 ---
 
 ## Limits
@@ -804,6 +871,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/rain` | toggle the matrix rain |
 | `/think` | show the model's own reasoning — where the endpoint forwards it |
 | `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
+| `/zim-opencode [--model id] [--refresh] [-- args]` | open **opencode** in this terminal behind a fresh rotating IP — free models, no account, nothing global |
 | `/save [name]` | write the session to disk |
 | `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |
@@ -1561,6 +1629,7 @@ zimzilla/                     the package
   hunt.py                     the campaign engine — wave loop, per-wave dirs, reports
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
+  opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan / system palettes, and the
                               remembered choice ($ZIMZILLA_HOME/current-theme)
@@ -1598,6 +1667,7 @@ python tests/test_deliverable.py   # the deliverable check — nudge, truncation
 python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, overflow
 python tests/test_reasoning.py     # the reasoning display — forwarding, ordering, renderables
 python tests/test_boot.py          # the boot screen — the logo spin, frame geometry
+python tests/test_opencode.py      # /zim-opencode — the pool, rotation, retry policy, alias
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so
@@ -1645,6 +1715,19 @@ steps switched off, and checks the layout and the interpreter the launcher then
 chooses. `test_requirements.py` is a tripwire rather than a test of behaviour: it
 fails if `requirements.txt` ever lists `litellm` or `uvloop` again, which would
 make the harness environment unsatisfiable and install nothing at all.
+
+`test_opencode.py` is offline too — every fetch is served by a stub `urlopen`
+and every subprocess is mocked, so nothing here depends on a proxy being alive.
+It pins the parts that are invisible from the command's happy path: that the
+rotation cursor is *persisted* (an in-memory counter would reset and hand you
+the same exit IP twice, which is the one thing the command exists to prevent),
+that a proxy is only kept if it carries real traffic rather than merely
+accepting a connection, that `classify` gets its three verdicts and its
+precedence right — a retired model id arriving wrapped in connection noise must
+still stop the loop rather than trigger six slow retries — and that the child
+environment sets both spellings of every proxy variable while always bypassing
+localhost, since opencode's TUI runs its own local server and proxying that
+breaks it.
 
 ---
 

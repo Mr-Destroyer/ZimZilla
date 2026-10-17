@@ -51,6 +51,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
     ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
     ("/models", "free models of an upstream — /models [source]"),
+    ("/zim-opencode", "open opencode behind a fresh rotating IP"),
     ("/save", "write the session to disk"),
     ("/load", "restore a saved session"),
     ("/compact", "summarise history to free context"),
