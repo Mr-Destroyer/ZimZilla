@@ -470,6 +470,13 @@ def test_ui_wiring():
     check("--refresh reaches the worker",
           "refresh: bool = False" in src and "get_pool(refresh=refresh" in src)
 
+    # These proxies are flaky per-request, so the launch can succeed and the
+    # courtesy exit-IP lookup still fail. That must not render "(exit None)" —
+    # it reads as a failure at the exact moment the route proved itself. The
+    # parenthetical is built only when the IP is known.
+    check("exit IP is guarded, never '(exit None)'",
+          "elif ip:" in src and 'where = f"{proxy.url} (exit {ip})"' in src)
+
 
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="zz-opencode-"))

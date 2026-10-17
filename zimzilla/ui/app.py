@@ -3776,8 +3776,18 @@ class ZimZillaApp(App):
         operator gets its full interface — then ZimZilla redraws over it when
         the child exits.
         """
+        # The exit IP is a courtesy, not a promise: these proxies are flaky
+        # per-request, so the launch can succeed and the follow-up lookup still
+        # fail. When it does, say only what is known rather than printing
+        # "(exit None)" — which reads like a failure at the exact moment the
+        # route just proved itself.
         ip = oc_mod.probe_exit_ip(proxy) if proxy is not None else None
-        where = f"{proxy.url} (exit {ip})" if proxy is not None else "your own address"
+        if proxy is None:
+            where = "your own address"
+        elif ip:
+            where = f"{proxy.url} (exit {ip})"
+        else:
+            where = proxy.url
         self._sys_line(f"opening opencode through {where} — quit it to come back", ok=True)
 
         # The alias is (re)written here rather than at install time so a moved
