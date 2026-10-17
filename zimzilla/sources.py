@@ -64,9 +64,11 @@ class Source:
 # reject chat completions, so they are omitted here.
 #
 # Token Juice is deliberately a single entry: its whole catalog is one model,
-# exposed upstream as `deepseek-ai/DeepSeek-V4.1-Flash` and aliased to
-# `deepseek-v4.1-flash` by its litellm config. It publishes no status API, so
-# this list is all there is for it.
+# exposed upstream as a snapshot-suffixed `deepseek-ai/DeepSeek-V4.1-Flash-<n>`
+# id and aliased to `deepseek-v4.1-flash` by its litellm config. It publishes no
+# status API, so this list is all there is for it. The alias is stable; the
+# upstream id is not — packaging/tokenjuice/litellm-config.yaml is the only
+# place that name belongs.
 LOGFARE_MODELS: tuple[str, ...] = (
     "deepseek-v4.1-flash",
     "gemma-4-26b",
