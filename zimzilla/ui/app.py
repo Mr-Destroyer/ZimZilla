@@ -58,6 +58,19 @@ from .web import WaveWeb
 from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
 
 
+#: What `/zim-opencode` says while it works. Deliberately no counts: how many
+#: proxies are in the pool says nothing about how many will be accepted (a pool
+#: of 24 measured 12% usable at one point and 79% at another), so a number would
+#: be noise dressed as information. The promise it does make — a working route,
+#: and a different one next time — is one the command can actually keep.
+_HUNTING = "ZIM IS MAKING IT UNLIMITED - FINDING THE BEST PROXIES ..."
+
+#: Braille spinner. Chosen over the ASCII `|/-\` because it advances in place
+#: without the baseline jitter that makes an ASCII spinner look like the line
+#: is being rewritten.
+_HUNT_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
 def _dedupe(items) -> list[str]:
     """Order-preserving de-dupe.
 
@@ -958,6 +971,12 @@ class ZimZillaApp(App):
         self.busy = False
         self._cancelled = False
         self._stream_buf = ""
+        # The /zim-opencode hunt spinner. A UI-thread timer rather than a
+        # worker callback: the worker blocks inside single socket calls for tens
+        # of seconds, so an animation driven by its progress would freeze for
+        # exactly the stretch the operator is waiting through.
+        self._hunt_timer = None
+        self._hunt_frame = 0
         # The model's in-flight reasoning, when the endpoint forwards it. Held
         # separately from `_stream_buf` because the two can both be non-empty
         # (a model reasons, answers, then reasons again after a tool result),
@@ -3709,6 +3728,49 @@ class ZimZillaApp(App):
         self.exit(_panes.Relaunch(resume=resume))
 
     # ---- /zim-opencode ----------------------------------------------------
+    def _chat_pane(self) -> ChatPane | None:
+        """The transcript pane, or None if the app is tearing down.
+
+        The spinner timer can fire in the gap between shutdown starting and the
+        pane unmounting, so this returns None rather than raising NoMatches out
+        of a paint tick.
+        """
+        try:
+            return self.query_one(ChatPane)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _set_hunt_spinner(self, on: bool) -> None:
+        """Start or stop the proxy-hunt animation (UI thread)."""
+        pane = self._chat_pane()
+        self._hunt_frame = 0
+        if on:
+            if pane is not None:
+                pane.set_spinner(f"{_HUNT_FRAMES[0]}  {_HUNTING}")
+            if self._hunt_timer is None:
+                self._hunt_timer = self.set_interval(0.12, self._pulse_hunt_spinner)
+        else:
+            if self._hunt_timer is not None:
+                self._hunt_timer.stop()
+                self._hunt_timer = None
+            if pane is not None:
+                pane.clear_spinner()
+
+    def _pulse_hunt_spinner(self) -> None:
+        """Advance the spinner.
+
+        Driven by a UI timer rather than by the worker's progress callbacks on
+        purpose: the worker blocks for tens of seconds at a time inside a single
+        socket call, so a callback-driven animation would freeze for exactly the
+        stretch the operator is waiting through and staring at.
+        """
+        if self._hunt_timer is None:
+            return
+        self._hunt_frame = (self._hunt_frame + 1) % len(_HUNT_FRAMES)
+        pane = self._chat_pane()
+        if pane is not None:
+            pane.set_spinner(f"{_HUNT_FRAMES[self._hunt_frame]}  {_HUNTING}")
+
     @work(exclusive=True, thread=True)
     def _zim_opencode_worker(self, args: list[str], model: str | None,
                              refresh: bool = False) -> None:
@@ -3728,33 +3790,26 @@ class ZimZillaApp(App):
                                   "opencode not found - install it please !", True, False)
             return
 
-        self.call_from_thread(self._sys_line, "building the proxy pool…")
+        # Deliberately no counts and no addresses on screen: how many proxies
+        # there are says nothing useful (a pool of 24 ran 12% usable at one
+        # point and 79% at another), and an address that has not been proven
+        # yet is noise at best and a misleading failure at worst. Only the
+        # phases are shown, and the proxy is named once it works.
+        self.call_from_thread(self._sys_line, _HUNTING, ok=True)
+        self.call_from_thread(self._set_hunt_spinner, True)
 
-        # A fresh pool on first use, the cached one afterwards. The callback
-        # keeps the operator informed — a cold build is ~25s.
-        def pool_progress(done, total):
-            if done % 100 == 0 or done == total:
-                self.call_from_thread(self._sys_line,
-                                      f"  validating proxies… {done}/{total}")
+        pool = oc_mod.get_pool(refresh=refresh, binary=binary,
+                               model=model or oc_mod.DEFAULT_MODEL)
+        proxy = None
+        if pool.proxies:
+            proxy, note = oc_mod.find_working_proxy(
+                binary, model=model or oc_mod.DEFAULT_MODEL,
+                attempts=8, pool=pool)
+        else:
+            note = "no proxies in the pool"
 
-        pool = oc_mod.get_pool(refresh=refresh, progress=pool_progress)
-        if not pool.proxies:
-            self.call_from_thread(
-                self._sys_line,
-                "no usable proxies found — opencode will run from your own address",
-                True, False)
-            self.call_from_thread(self._zim_opencode_launch, binary, None, args, model)
-            return
+        self.call_from_thread(self._set_hunt_spinner, False)
 
-        self.call_from_thread(
-            self._sys_line, f"{len(pool.proxies)} proxies live — testing the route…")
-
-        def try_progress(i, n, proxy):
-            self.call_from_thread(self._sys_line, f"  attempt {i}/{n}: {proxy.url}")
-
-        proxy, note = oc_mod.find_working_proxy(
-            binary, model=model or oc_mod.DEFAULT_MODEL,
-            attempts=6, progress=try_progress)
         if proxy is None:
             # Say why rather than opening a TUI that will fail on its first
             # message. `note` distinguishes "no proxies" from "the model id is

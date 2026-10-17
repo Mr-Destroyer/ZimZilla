@@ -238,6 +238,14 @@ class ChatPane(Vertical):
     ChatPane #card.hidden {
         display: none;
     }
+    ChatPane #spinner {
+        height: auto;
+        padding: 0 1;
+        background: transparent;
+    }
+    ChatPane #spinner.hidden {
+        display: none;
+    }
     """
 
     def __init__(self, palette: Palette, rain: bool = True, **kwargs) -> None:
@@ -269,6 +277,13 @@ class ChatPane(Vertical):
         yield stream
         card = Static(id="card", classes="hidden")
         yield card
+        # A slot for a line that changes several times a second. It cannot be
+        # the transcript: RichLog is append-only, so each frame would add a new
+        # line rather than replace the old one, and a spinner that scrolls the
+        # pane is worse than none. `#stream` and `#thought` are already spoken
+        # for by in-flight answer and reasoning, so this gets its own.
+        spinner = Static(id="spinner", classes="hidden")
+        yield spinner
 
     # ---- transcript -------------------------------------------------------
     def write_block(self, renderable) -> None:
@@ -385,6 +400,31 @@ class ChatPane(Vertical):
             return
         w.update("")
         w.add_class("hidden")
+
+    # ---- transient status spinner ----------------------------------------
+    # Tolerant of a missing child for the same reason the stream slot is: the
+    # timer that drives this can fire in the gap between the app tearing down
+    # and the pane unmounting.
+    def _spinner_widget(self) -> Static | None:
+        try:
+            return self.query_one("#spinner", Static)
+        except Exception:
+            return None
+
+    def set_spinner(self, text: str) -> None:
+        """Show a transient status line. An empty *text* hides the slot."""
+        w = self._spinner_widget()
+        if w is None:
+            return
+        if not text:
+            w.update("")
+            w.add_class("hidden")
+            return
+        w.remove_class("hidden")
+        w.update(Text(text, style=f"bold {self.palette.accent}"))
+
+    def clear_spinner(self) -> None:
+        self.set_spinner("")
 
     # ---- live reasoning line ---------------------------------------------
     def _thought_widget(self) -> Static | None:

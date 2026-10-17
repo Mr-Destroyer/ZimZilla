@@ -3,9 +3,18 @@
 What this is
 ------------
 ``opencode`` ships a set of models it serves itself, and the free ones need no
-account, no key and no signup — verified against a clean ``$HOME``: with no
-credentials on disk at all, ``opencode run -m opencode/deepseek-v4.1-flash-free``
-answers. So the whole feature is reachable with nothing but the binary.
+account, no key and no signup — verified by *deleting the credential and keeping
+the config*: copy ``~/.local/share/opencode`` and ``~/.config/opencode`` to a
+temp ``HOME``, remove ``auth.json``, and ``opencode run -m
+opencode/deepseek-v4.1-flash-free`` still answers. So the whole feature is
+reachable with nothing but the binary.
+
+(An empty ``$HOME`` does NOT prove this, though it looks like it should. A fresh
+home has no config and no model cache, so opencode fails there for reasons that
+have nothing to do with credentials — and a refusal is not a "no credential
+needed" signal. Delete the credential, keep the config. A machine that has an
+``auth.json`` is also not evidence against keyless operation: the key is simply
+unused for these model ids.)
 
 The catch is that opencode's free tier **refuses Tor exit IPs** — a request
 through Tor comes back "OpenCode's free tier can only be used from within
@@ -36,14 +45,46 @@ applies to the whole process tree and needs root to configure.
 
 Rotation
 --------
-Every launch takes the next proxy from the pool and marks it used, so
-consecutive runs leave from different addresses. The pool is validated by
-actually fetching an IP through each candidate — a list entry that does not
-answer is worthless and worse than useless if it silently fails mid-turn.
-Validation is cached to disk so a launch does not have to wait for a full scan
-every time; the cache is refreshed when it runs dry or ages out.
+Every launch takes a proxy that has completed a turn and marks it used, so
+consecutive runs leave from different addresses *and* each of them works.
 
-Nothing here writes a credential: these proxies take no authentication.
+Those two goals contradict each other, which is the trap here. A pool built by
+turn-validation has every entry proven, so "prefer a proven proxy" hands back
+the same address on every launch — the first version of this did exactly that,
+returning one proxy five times out of five. So the two facts are tracked
+separately: ``proven_at`` is whether a proxy *works*, ``used_at`` is whether it
+has already been *given out*, and each launch takes a proven proxy that has not
+been used yet. Only once those run out does the plain cursor take over, which
+makes a small pool degrade into reuse rather than into failure. Both markers are
+persisted, so a restart does not reset the rotation.
+
+A refusal retires a proxy, because it is newer evidence than the proof that put
+it at the front of the queue — free proxies die without warning, and one that
+answered yesterday and died overnight would otherwise be tried first on every
+launch and time out for ~40s before the pool moved on. Recovery clears it.
+
+Validation is two stages, and the second is the one that matters. An ipify
+fetch through a candidate proves it carries traffic; it says nothing about
+whether opencode will accept the exit IP. Measured on this pool, those two are
+close to independent: validated on liveness alone a pool ran ~12% usable, while
+the same pool re-validated with real turns ran 79%. So the survivors of the
+cheap stage get a real one-shot turn, in parallel, and only the ones that
+answer are kept — stamped with ``proven_at`` at the moment they pass, since a
+pool saved unmarked would carry no memory at all.
+
+The gate has no pattern worth predicting — residential and datacenter addresses
+scored identically — so the only check that predicts a working launch is a
+launch. That is also why the pool *remembers*: a proxy that answered once is
+better evidence than any measurement, and the pool gets cheaper the more it is
+used.
+
+Working proxies are not volatile. Re-tested hours later, four of five still
+answered, so a validated pool is worth caching to disk; it is refreshed when it
+runs dry or ages out, and known-good entries are carried across a rebuild.
+
+Nothing here writes a credential: these proxies take no authentication. The
+free model ids need no credential either — see the note at the top about how
+that was actually verified.
 """
 
 from __future__ import annotations
@@ -90,6 +131,29 @@ PROBE_WORKERS = 96
 #: A proxy that cannot complete an HTTPS fetch in this many seconds is dropped.
 #: Generous, because a slow proxy still works and the pool is chosen from.
 PROBE_TIMEOUT = 7.0
+
+#: The second, decisive stage: how many of the ipify-live proxies get a real
+#: opencode turn, how many run at once, and how long each is given.
+#:
+#: This stage is why the pool is worth anything. An ipify fetch proves a proxy
+#: carries traffic; it says nothing about whether opencode's free tier will
+#: accept the exit IP, and those two are close to independent — measured, a pool
+#: validated on ipify alone ran ~12% usable, while the same pool re-validated
+#: with real turns ran 79%. The gate refuses *some* addresses and not others
+#: with no pattern worth predicting (residential and datacenter scored
+#: identically), so the only check that predicts a working launch is a launch.
+#:
+#: It is affordable because it is parallel and because the yield is high:
+#: 24 candidates at 12 workers is ~90s to fill a pool that then works on the
+#: first try, against ~25s to build one that mostly fails.
+TURN_LIMIT = 48
+TURN_WORKERS = 12
+TURN_TIMEOUT = 60.0
+
+#: Working proxies are NOT volatile — re-tested hours later, 4 of 5 still
+#: answered — so a validated pool is worth keeping, and a proxy that worked once
+#: is worth trying first next time. This is how long that knowledge is trusted.
+KNOWN_GOOD_AGE = 24 * 3600
 
 #: The pool is re-validated when it is older than this. Free proxies die within
 #: hours, so a day-old pool is mostly dead entries.
@@ -159,17 +223,58 @@ class Proxy:
     port: int
     #: Measured seconds to complete one HTTPS fetch through it, when known.
     latency: float | None = None
+    #: When this proxy last completed a real opencode turn, if it ever has.
+    #: This is the only field that predicts anything: `latency` says the proxy
+    #: carries traffic, which is nearly unrelated to whether opencode accepts
+    #: its exit IP. A proxy with a `proven_at` is worth trying before one
+    #: without, whatever their latencies say.
+    proven_at: float = 0.0
+    #: When this proxy was last handed to a launch. Distinct from `proven_at`,
+    #: which records whether it *works*. Rotation needs to know what the
+    #: operator has already been given: a pool where every entry is proven would
+    #: otherwise hand out its best proxy every single time, which is the one
+    #: thing the command must not do.
+    used_at: float = 0.0
+    #: When this proxy last failed a turn, if it has failed since it last
+    #: worked. A failure is *newer evidence* than a proof, so it invalidates
+    #: one: free proxies die without warning, and a proxy that is still trusted
+    #: on the strength of yesterday's success would be tried first on every
+    #: launch and cost a ~40s timeout each time before the pool moved on.
+    failed_at: float = 0.0
 
     @property
     def url(self) -> str:
         return f"http://{self.host}:{self.port}"
 
+    @property
+    def key(self) -> str:
+        return f"{self.host}:{self.port}"
+
+    def is_proven(self, now: float | None = None) -> bool:
+        """True if this proxy completed a turn recently enough to trust.
+
+        A failure after the proof cancels it. Without that, a proxy that worked
+        yesterday and died overnight keeps its place at the head of the queue
+        and is retried — and timed out — on every single launch.
+        """
+        if not self.proven_at:
+            return False
+        if self.failed_at > self.proven_at:
+            return False
+        now = time.time() if now is None else now
+        return (now - self.proven_at) < KNOWN_GOOD_AGE
+
     def to_json(self) -> dict:
-        return {"host": self.host, "port": self.port, "latency": self.latency}
+        return {"host": self.host, "port": self.port, "latency": self.latency,
+                "proven_at": self.proven_at, "used_at": self.used_at,
+                "failed_at": self.failed_at}
 
     @classmethod
     def from_json(cls, d: dict) -> "Proxy":
-        return cls(host=str(d["host"]), port=int(d["port"]), latency=d.get("latency"))
+        return cls(host=str(d["host"]), port=int(d["port"]),
+                   latency=d.get("latency"), proven_at=float(d.get("proven_at") or 0.0),
+                   used_at=float(d.get("used_at") or 0.0),
+                   failed_at=float(d.get("failed_at") or 0.0))
 
 
 @dataclass
@@ -198,13 +303,99 @@ class Pool:
             validated_at=float(d.get("validated_at", 0.0)),
         )
 
-    def next_proxy(self) -> Proxy | None:
-        """The next proxy in rotation, advancing the cursor. None if empty."""
+    def next_proxy(self, mark: bool = False) -> Proxy | None:
+        """The next proxy in rotation, advancing the cursor. None if empty.
+
+        ``mark`` stamps ``used_at``, which is what the proven-first path reads
+        to decide what has already been handed out. A dry peek at the next
+        proxy should leave it False so looking does not consume it.
+        """
         if not self.proxies:
             return None
         p = self.proxies[self.cursor % len(self.proxies)]
         self.cursor = (self.cursor + 1) % len(self.proxies)
+        if mark:
+            p.used_at = time.time()
         return p
+
+    def known_good(self) -> list[Proxy]:
+        """Proxies that have completed a turn, most recent first."""
+        return sorted((p for p in self.proxies if p.is_proven()),
+                      key=lambda p: -p.proven_at)
+
+    def next_unused(self, exclude: set[str] | None = None) -> Proxy | None:
+        """A proven proxy the operator has not been handed yet.
+
+        The two requirements pull against each other: the launch must work, so
+        it wants a proven proxy, and it must differ from last time, so it wants
+        one that has not been used. Proven-and-unused satisfies both. Ordering
+        by `used_at` ascending makes this a rotation rather than a fixed
+        favourite — without it the same proxy would win every launch, because
+        every entry in a fresh pool is proven.
+
+        ``exclude`` is a set of keys to skip, for a caller that is assembling
+        several at once and must not be handed the same one twice. It is a
+        parameter rather than a side effect so that merely *considering* a proxy
+        does not consume it.
+
+        None when every proven proxy has already been handed out; the caller
+        then falls back to the plain cursor, which is what keeps a small pool
+        cycling instead of failing.
+        """
+        skip = exclude or set()
+        unused = [p for p in self.proxies
+                  if p.is_proven() and not p.used_at and p.key not in skip]
+        if not unused:
+            return None
+        return min(unused, key=lambda p: (p.used_at, -p.proven_at))
+
+    def mark_used(self, proxy: Proxy) -> None:
+        """Record that *proxy* was handed to a launch, so it rotates out.
+
+        Only this makes consecutive launches differ. `proven_at` cannot do it:
+        it answers "does this work", and in a freshly validated pool every
+        entry answers yes.
+        """
+        now = time.time()
+        for p in self.proxies:
+            if p.key == proxy.key:
+                p.used_at = now
+                return
+        proxy.used_at = now
+        self.proxies.append(proxy)
+
+    def mark_proven(self, proxy: Proxy) -> None:
+        """Record that *proxy* completed a real turn, and keep it in the pool.
+
+        Called on every success, so the pool improves the more it is used. A
+        proxy that answered once is the best evidence available that it will
+        answer again — better than any liveness measurement.
+        """
+        now = time.time()
+        for p in self.proxies:
+            if p.key == proxy.key:
+                p.proven_at = now
+                p.failed_at = 0.0  # it just worked, so the last failure is moot
+                return
+        proxy.proven_at = now
+        proxy.failed_at = 0.0
+        self.proxies.append(proxy)
+
+    def mark_failed(self, proxy: Proxy) -> None:
+        """Record that *proxy* was refused, retiring it from the trusted set.
+
+        Free proxies die without warning, so a failure is newer evidence than
+        the proof it contradicts and has to cancel it — otherwise a proxy that
+        worked yesterday and died overnight keeps being tried first, costing a
+        ~40s timeout on every launch before the pool moves on.
+        """
+        now = time.time()
+        for p in self.proxies:
+            if p.key == proxy.key:
+                p.failed_at = now
+                return
+        proxy.failed_at = now
+        self.proxies.append(proxy)
 
     def is_fresh(self, now: float | None = None) -> bool:
         now = time.time() if now is None else now
@@ -341,39 +532,137 @@ def validate(candidates: list[Proxy], target: int = POOL_TARGET,
     return live
 
 
-def build_pool(target: int = POOL_TARGET, progress=None) -> Pool:
-    """Fetch, validate and persist a fresh pool."""
+def validate_turns(candidates: list[Proxy], binary: str, model: str | None = None,
+                   target: int = POOL_TARGET, limit: int = TURN_LIMIT,
+                   workers: int = TURN_WORKERS, progress=None) -> list[Proxy]:
+    """Keep the proxies that complete a real opencode turn.
+
+    The decisive stage. An ipify fetch proves a proxy carries traffic; it says
+    nothing about whether opencode's free tier will accept the exit IP, and
+    measured, that distinction is the difference between a pool that runs ~12%
+    usable and one that runs 79%.
+
+    Parallel because it is slow — a turn is tens of seconds — and the yield is
+    high enough that a small sample fills a pool. A "model" verdict is not this
+    proxy's fault and is reported by the caller instead of being retried here.
+
+    Every survivor is stamped with ``proven_at`` here rather than by the caller.
+    Passing a turn is the strongest evidence available and the whole reason
+    :meth:`Pool.known_good` exists, so a pool that arrives unstamped would hand
+    the next launch a set of proxies it cannot prefer — the memory would be
+    built and then immediately thrown away.
+
+    ``progress`` is called with ``(done, total, verdict)`` after each attempt.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    sample = candidates[:limit]
+    if not sample:
+        return []
+    proven: list[Proxy] = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(probe_launch, p, binary, model, TURN_TIMEOUT): p
+                   for p in sample}
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                verdict = fut.result()
+            except Exception:  # noqa: BLE001
+                verdict = "retry"
+            if progress is not None:
+                progress(done, len(sample), verdict)
+            if verdict == "ok":
+                proxy = futures[fut]
+                proxy.proven_at = time.time()
+                # It just answered, so any earlier refusal is superseded. These
+                # are freshly fetched candidates and normally carry no history,
+                # but a proxy handed in from the old pool does.
+                proxy.failed_at = 0.0
+                proven.append(proxy)
+                if len(proven) >= target:
+                    for f in futures:
+                        f.cancel()
+                    break
+    return proven
+
+
+def build_pool(target: int = POOL_TARGET, progress=None,
+               binary: str | None = None, model: str | None = None,
+               turn_progress=None) -> Pool:
+    """Fetch, validate and persist a fresh pool.
+
+    Two stages, and the second is the one that matters: ipify-liveness to cut
+    thousands of candidates down cheaply, then a real opencode turn on the
+    survivors. Skipping the second stage is what made an earlier version of this
+    build pools that were mostly refused — see :data:`TURN_LIMIT`.
+    """
     candidates = fetch_candidates()
     random.shuffle(candidates)
-    live = validate(candidates, target=target, progress=progress)
-    pool = Pool(proxies=live, cursor=0, validated_at=time.time())
-    if live:
+    live = validate(candidates, target=max(target * 2, target), progress=progress)
+    if not live:
+        return Pool(validated_at=time.time())
+
+    # Without a binary there is no way to run the decisive check, so the
+    # liveness result is all there is. The caller has already reported that
+    # opencode is missing, so this is a degraded path, not a silent one.
+    if not binary:
+        return Pool(proxies=live[:target], cursor=0, validated_at=time.time())
+
+    proven = validate_turns(live, binary, model=model, target=target,
+                            progress=turn_progress)
+    pool = Pool(proxies=proven, cursor=0, validated_at=time.time())
+    if proven:
         save_pool(pool)
     return pool
 
 
-def get_pool(refresh: bool = False, progress=None) -> Pool:
+def get_pool(refresh: bool = False, progress=None, binary: str | None = None,
+             model: str | None = None, turn_progress=None) -> Pool:
     """The pool to rotate from: the cache when it is fresh, else a new build."""
     pool = load_pool()
     if not refresh and pool.is_fresh():
         return pool
-    fresh = build_pool(progress=progress)
+    fresh = build_pool(progress=progress, binary=binary, model=model,
+                       turn_progress=turn_progress)
     # A rebuild that found nothing must not throw away a pool that still has
     # entries — free lists have bad days, and a stale-but-live proxy beats none.
     if not fresh.proxies and pool.proxies:
         return pool
+    # Carry forward what the old pool learned. A proxy that completed a turn
+    # yesterday is better evidence than anything the rebuild just measured, and
+    # discarding it would make every refresh start from zero knowledge.
+    if fresh.proxies and pool.proxies:
+        seen = {p.key for p in fresh.proxies}
+        for p in pool.known_good():
+            if p.key not in seen:
+                fresh.proxies.append(p)
     return fresh
 
 
-def rotate(refresh: bool = False, progress=None) -> Proxy | None:
+def rotate(refresh: bool = False, progress=None, prefer_proven: bool = True,
+           pool: Pool | None = None) -> Proxy | None:
     """Take the next proxy and advance the pool's cursor.
 
     Returns None when no proxy could be found, which the caller must treat as
     "go direct" and say so — silently falling back to the operator's real IP
     would defeat the entire point of the command.
+
+    ``prefer_proven`` hands out a proxy that has completed a turn before one
+    that has only been shown to carry traffic, because the second says almost
+    nothing about whether opencode will accept it — but only while there is a
+    proven proxy left that has not already been handed out. Picking from
+    ``known_good`` alone would return the same entry on every call once the
+    whole pool is proven, which is precisely what rotation exists to prevent.
     """
-    pool = get_pool(refresh=refresh, progress=progress)
-    proxy = pool.next_proxy()
+    pool = pool or get_pool(refresh=refresh, progress=progress)
+    proxy = None
+    if prefer_proven:
+        proxy = pool.next_unused()
+    if proxy is None:
+        proxy = pool.next_proxy(mark=True)
+    else:
+        pool.mark_used(proxy)
     if proxy is not None:
         save_pool(pool)  # persist the advanced cursor
     return proxy
@@ -543,33 +832,73 @@ def probe_launch(proxy: Proxy, binary: str, model: str | None = None,
 
 
 def find_working_proxy(binary: str, model: str | None = None,
-                       attempts: int = 6, progress=None) -> tuple[Proxy | None, str]:
+                       attempts: int = 6, progress=None,
+                       pool: Pool | None = None) -> tuple[Proxy | None, str]:
     """Rotate until a proxy actually completes a turn.
 
     Returns ``(proxy, note)``. ``proxy`` is None when nothing worked, and the
     note says why so the caller can be honest about it instead of opening a TUI
     that will fail.
 
-    Each attempt takes the next proxy from the pool, so this is also what makes
-    consecutive launches differ: the cursor advances on every try, not only on
-    success.
+    Two requirements have to hold at once, and they pull in opposite
+    directions: the launch must work, so it wants a proxy that has completed a
+    turn, and it must differ from the last launch, so it wants one that has not
+    been handed out. In a pool built by :func:`validate_turns` *every* entry is
+    proven, so "proven" alone would return the same proxy forever. The queue is
+    therefore proven-and-unused first, then proven, then whatever the cursor
+    reaches — and every attempt is stamped as used.
+
+    On success the proxy is recorded in the pool and saved, which is what makes
+    the next launch cheaper than this one.
     """
+    pool = pool or load_pool()
+    # The candidates for this launch: proven proxies the operator has not been
+    # handed yet, then the plain cursor once those run out. `exclude` keeps the
+    # fill from returning the same proxy repeatedly — and, unlike stamping
+    # `used_at` as we go, it leaves a proxy that is only *considered* here still
+    # available to the next launch.
+    queue: list[Proxy] = []
+    taken: set[str] = set()
+    for _ in range(attempts):
+        unused = pool.next_unused(exclude=taken)
+        if unused is None:
+            break
+        queue.append(unused)
+        taken.add(unused.key)
     last = ""
+    tried = 0
     for i in range(attempts):
-        proxy = rotate()
+        if queue:
+            proxy = queue.pop(0)
+        else:
+            proxy = pool.next_proxy(mark=True)
         if proxy is None:
             return None, "no proxies in the pool"
+        tried += 1
         if progress is not None:
             progress(i + 1, attempts, proxy)
         verdict = probe_launch(proxy, binary, model=model)
         if verdict == "ok":
+            # Remember it, so the next launch starts from here rather than from
+            # a cold scan. This is the only place the pool learns anything.
+            pool.mark_proven(proxy)
+            pool.mark_used(proxy)
+            save_pool(pool)
             return proxy, ""
         if verdict == "model":
             # The route is fine; the model id is not. Another proxy will not
-            # help, so stop and let the caller report it.
+            # help, so stop and let the caller report it. Not a failure of this
+            # proxy, so it must not be retired for it.
             return proxy, "model unavailable"
+        # A refusal retires the proxy: it is newer evidence than whatever proof
+        # put it at the front of the queue, and without recording it a dead
+        # proxy would be retried, and timed out, on every future launch.
+        pool.mark_failed(proxy)
+        pool.mark_used(proxy)
         last = verdict
-    return None, f"{attempts} proxies tried, none worked (last: {last})"
+    if tried:
+        save_pool(pool)
+    return None, f"{tried} proxies tried, none worked (last: {last})"
 
 
 # ---------------------------------------------------------------------------
@@ -637,9 +966,14 @@ def main(argv: list[str] | None = None) -> int:
     if binary is None:
         print("opencode not found - install it please !", file=sys.stderr)
         return 127
-    proxy = rotate()
+
+    # A shell launch has no UI to show progress in, but it should not hand back
+    # a TUI that is about to be refused either — so it converges on a working
+    # route the same way the slash command does, just more quietly.
+    proxy, note = find_working_proxy(binary, attempts=6)
     if proxy is None:
-        print("zimzilla: no proxy available — running from your own address", file=sys.stderr)
+        print(f"zimzilla: no working proxy ({note}) — running from your own address",
+              file=sys.stderr)
     else:
         ip = probe_exit_ip(proxy)
         print(f"zimzilla: routing through {proxy.url}"

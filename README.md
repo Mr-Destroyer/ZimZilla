@@ -312,14 +312,26 @@ where Tor does not, and it is what makes ordinary HTTP proxies usable here.
 (SOCKS is not an option regardless: opencode's fetch layer rejects `socks5://`
 outright, which is another reason the pool is plain HTTP.)
 
-**It is honest about the odds.** Free proxies are free because they are
-unreliable, and opencode's gate accepts some exit addresses and refuses others —
-worse, these proxies rotate their *own* exits per request, so the same proxy can
-work and then not. So the command does not guess: it proves the route with a
-throwaway one-shot turn before opening the TUI, retrying across proxies (up to
-six) until one completes a turn. Expect this to take a while the first time —
-building the pool is ~25s, and each failed attempt costs up to ~40s. It also
-tells the three failures apart, because only two are worth retrying:
+The gate is not a datacenter block, though it looks like one: residential and
+datacenter addresses scored *identically* when tested (2/6 each), so filtering
+proxies by IP type buys nothing. What it refuses is a specific set of addresses
+at a specific moment, which is why the only reliable test is a real turn.
+
+**The free models need no account — verified properly.** Copy
+`~/.local/share/opencode` and `~/.config/opencode` to a temp `HOME`, delete
+`auth.json`, and it still answers. (An empty `$HOME` does *not* prove this: a
+fresh home has no config or model cache, so it fails for unrelated reasons. And
+having an `auth.json` is not evidence against it — the key is simply unused for
+these model ids.)
+
+**It is honest about the odds.** The thing that decides whether a launch works
+is not whether a proxy carries traffic — it is whether opencode's free tier
+accepts that exit IP, and the two are close to independent. Measured: a pool
+validated on liveness alone ran **12% usable**, while the same pool re-validated
+with real turns ran **79%**. So the command validates in two stages — a cheap
+fetch to cut thousands of candidates down, then a real one-shot opencode turn on
+the survivors, in parallel. It also tells the three failures apart, because only
+two are worth retrying:
 
 | What came back | Verdict |
 |---|---|
@@ -327,10 +339,41 @@ tells the three failures apart, because only two are worth retrying:
 | *"Model is unavailable"* | stop — the id is retired, another proxy will not help |
 | nothing worked | say so, with the reason, rather than opening a TUI that will fail |
 
-If no proxy can be found at all it runs opencode **from your own address** and
-says so — it never falls back silently, because a silent fallback would defeat
-the point of the command. The pool is cached under `~/.zimzilla/opencode/` and
-rebuilt when it runs dry or is more than six hours old.
+**Working proxies are not volatile** — re-tested hours later, four of five still
+answered — so the pool *remembers*: every proxy that completes a turn is
+timestamped and tried first next time. The pool gets cheaper the more it is
+used.
+
+Those two goals contradict each other, and the naive version of the first
+silently destroys the second. A pool built by turn-validation has *every* entry
+proven, so "prefer a proven proxy" returns the same one on every launch — the
+first cut of this did exactly that, handing back an identical address five times
+out of five. Rotation is therefore tracked separately: `proven_at` records
+whether a proxy works, `used_at` records whether you have already been given it,
+and each launch takes a proven proxy you have *not* had yet. Only when they run
+out does the pool cycle, so a small pool degrades into reuse rather than into
+failure. Both markers persist, so a restart does not reset the rotation.
+
+**A refusal retires a proxy**, because it is newer evidence than whatever proof
+put it at the front of the queue. Free proxies die without warning, and a proxy
+that answered yesterday and died overnight would otherwise be tried first on
+every launch and time out for ~40s before the pool moved on. If it comes back it
+is trusted again — the failure is cleared the moment it completes a turn.
+
+Expect the first run to take a minute or two — building the pool runs real model
+turns (~4 minutes for a full pool), and each retry costs up to ~40s. The pool is
+cached under `~/.zimzilla/opencode/` and rebuilt when it runs dry or is more than
+six hours old; known-good entries are carried across a rebuild.
+
+While it works, the screen says only this:
+
+```
+  ⠹  ZIM IS MAKING IT UNLIMITED - FINDING THE BEST PROXIES ...
+```
+
+No counts, because how many proxies there are says nothing about how many will
+be accepted — a pool of 24 measured 12% usable at one point and 79% at another.
+The proxy is named once it has been proven, not while it is being guessed at.
 
 Two caveats worth stating plainly. The free models are opencode's own and
 documented as limited-time — they rotate and retire, which is why
@@ -1718,16 +1761,20 @@ make the harness environment unsatisfiable and install nothing at all.
 
 `test_opencode.py` is offline too — every fetch is served by a stub `urlopen`
 and every subprocess is mocked, so nothing here depends on a proxy being alive.
-It pins the parts that are invisible from the command's happy path: that the
-rotation cursor is *persisted* (an in-memory counter would reset and hand you
-the same exit IP twice, which is the one thing the command exists to prevent),
-that a proxy is only kept if it carries real traffic rather than merely
-accepting a connection, that `classify` gets its three verdicts and its
-precedence right — a retired model id arriving wrapped in connection noise must
-still stop the loop rather than trigger six slow retries — and that the child
-environment sets both spellings of every proxy variable while always bypassing
-localhost, since opencode's TUI runs its own local server and proxying that
-breaks it.
+It pins the parts that are invisible from the command's happy path: that five
+consecutive launches really do produce five distinct addresses (the proven-first
+rule and the be-different rule contradict each other, and the obvious
+implementation of the first satisfies it by returning one proxy forever), that
+the rotation markers are *persisted* (an in-memory counter would reset on the
+next process and hand you the same exit IP twice, which is the one thing the
+command exists to prevent), that a proxy is only kept if it carries real traffic
+rather than merely accepting a connection, that turn-validated survivors are
+stamped at the moment they pass rather than saved unmarked, that `classify` gets
+its three verdicts and its precedence right — a retired model id arriving
+wrapped in connection noise must still stop the loop rather than trigger six
+slow retries — and that the child environment sets both spellings of every proxy
+variable while always bypassing localhost, since opencode's TUI runs its own
+local server and proxying that breaks it.
 
 ---
 

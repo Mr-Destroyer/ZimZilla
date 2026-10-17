@@ -37,6 +37,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -260,7 +261,7 @@ def test_probe_launch_verdicts():
         check("refusal on rc=0 still retries", oc.probe_launch(proxy, binary) == "retry")
 
 
-def test_find_working_proxy():
+def test_find_working_proxy(tmp: Path):
     binary = "/usr/bin/opencode"
     pool = oc.Pool(proxies=[oc.Proxy("10.0.0.%d" % i, 80) for i in range(6)])
 
@@ -271,31 +272,232 @@ def test_find_working_proxy():
         calls.append(proxy.host)
         return "ok" if len(calls) == 3 else "retry"
 
-    def nxt(refresh=False, progress=None):
-        return pool.next_proxy()
-
-    with mock.patch.object(oc, "rotate", side_effect=nxt):
+    with mock.patch.object(oc, "save_pool"):
         with mock.patch.object(oc, "probe_launch", side_effect=flaky):
-            got, note = oc.find_working_proxy(binary, attempts=6)
+            got, note = oc.find_working_proxy(binary, attempts=6, pool=pool)
     check("finds a working proxy after failures", got is not None and note == "", note)
     check("tried until it worked", len(calls) == 3, str(calls))
 
     # A model error must stop immediately: another proxy cannot fix a bad id,
     # and six attempts would just be six slow identical failures.
-    with mock.patch.object(oc, "rotate", side_effect=nxt):
-        with mock.patch.object(oc, "probe_launch", return_value="model") as pl:
-            got, note = oc.find_working_proxy(binary, attempts=6)
+    p2 = oc.Pool(proxies=[oc.Proxy("10.1.0.%d" % i, 80) for i in range(6)])
+    with mock.patch.object(oc, "probe_launch", return_value="model") as pl:
+        got, note = oc.find_working_proxy(binary, attempts=6, pool=p2)
     check("model error stops the loop", pl.call_count == 1, str(pl.call_count))
     check("model error is reported as such", "model" in note, note)
 
-    with mock.patch.object(oc, "rotate", return_value=None):
-        got, note = oc.find_working_proxy(binary, attempts=3)
+    with mock.patch.object(oc, "probe_launch", return_value="retry"):
+        got, note = oc.find_working_proxy(binary, attempts=3, pool=oc.Pool())
     check("no proxies reported honestly", got is None and "no proxies" in note, note)
 
-    with mock.patch.object(oc, "rotate", side_effect=nxt):
-        with mock.patch.object(oc, "probe_launch", return_value="retry"):
-            got, note = oc.find_working_proxy(binary, attempts=2)
+    p3 = oc.Pool(proxies=[oc.Proxy("10.2.0.%d" % i, 80) for i in range(6)])
+    with mock.patch.object(oc, "probe_launch", return_value="retry"):
+        got, note = oc.find_working_proxy(binary, attempts=2, pool=p3)
     check("exhausted attempts reported honestly", got is None and "2 proxies" in note, note)
+
+
+def test_every_launch_is_a_different_proxy():
+    """The requirement the command exists for: a second launch must leave from
+    a different address than the first.
+
+    This is not free. A pool built by validate_turns has *every* entry proven,
+    so "prefer the proven proxy" and "be different each time" contradict each
+    other, and the naive implementation of the first silently defeats the
+    second. This is the regression test for that.
+    """
+    now = time.time()
+    pool = oc.Pool(proxies=[oc.Proxy("10.0.0.%d" % i, 80, proven_at=now)
+                            for i in range(5)])
+
+    with mock.patch.object(oc, "save_pool"):
+        with mock.patch.object(oc, "probe_launch", return_value="ok"):
+            seen = []
+            for _ in range(5):
+                got, _ = oc.find_working_proxy("/usr/bin/opencode", attempts=4, pool=pool)
+                seen.append(got.key)
+
+    check("five launches gave five distinct proxies",
+          len(set(seen)) == 5, str(seen))
+    check("no proxy repeated before the pool was exhausted",
+          len(seen) == len(set(seen)), str(seen))
+
+    # Once every proven proxy has been handed out, the cursor must take over
+    # rather than the command failing — a small pool has to cycle.
+    with mock.patch.object(oc, "save_pool"):
+        with mock.patch.object(oc, "probe_launch", return_value="ok"):
+            more = [oc.find_working_proxy("/usr/bin/opencode", attempts=4,
+                                          pool=pool)[0].key for _ in range(5)]
+    check("an exhausted pool keeps cycling", all(more), str(more))
+    check("cycling does not stall on one proxy", len(set(more)) > 1, str(more))
+
+
+def test_a_dead_proxy_stops_being_trusted():
+    """A failure is newer evidence than a proof, so it cancels it.
+
+    Without this, a proxy that worked yesterday and died overnight keeps its
+    place at the head of the queue and is retried — and timed out, ~40s — on
+    every launch before the pool moves on.
+    """
+    now = time.time()
+    dead = oc.Proxy("10.0.0.1", 80, proven_at=now - 300)
+    alive = oc.Proxy("10.0.0.2", 80, proven_at=now - 300)
+    pool = oc.Pool(proxies=[dead, alive])
+
+    check("both start out trusted", len(pool.known_good()) == 2,
+          str(len(pool.known_good())))
+    pool.mark_failed(dead)
+    check("a failed proxy is no longer proven", not dead.is_proven())
+    check("the other one is unaffected", alive.is_proven())
+    check("known_good drops the failed one",
+          [p.key for p in pool.known_good()] == [alive.key],
+          str([p.key for p in pool.known_good()]))
+
+    # Ordering matters: a failure only cancels a proof it is newer than.
+    old_fail = oc.Proxy("10.0.0.3", 80, proven_at=now, failed_at=now - 500)
+    check("a failure older than the proof does not cancel it", old_fail.is_proven())
+
+    # Recovering must clear the failure, or a proxy that comes back is never
+    # trusted again.
+    pool.mark_proven(dead)
+    check("a proxy that works again is trusted again", dead.is_proven())
+    check("recovery clears failed_at", dead.failed_at == 0.0, str(dead.failed_at))
+
+    # And a refusal during a hunt must be persisted, not just held in memory.
+    failing = oc.Pool(proxies=[oc.Proxy("10.0.0.9", 80, proven_at=now)])
+    with mock.patch.object(oc, "save_pool") as sp:
+        with mock.patch.object(oc, "probe_launch", return_value="retry"):
+            got, note = oc.find_working_proxy("/usr/bin/opencode", attempts=1,
+                                              pool=failing)
+    check("a refused hunt returns nothing", got is None, str(got))
+    check("the refusal is recorded", failing.proxies[0].failed_at > 0)
+    check("a refused pool is still saved", sp.called)
+
+
+def test_failed_at_survives_a_save():
+    p = oc.Proxy("1.2.3.4", 8080, proven_at=100.0, failed_at=150.0)
+    check("a later failure cancels the proof", not p.is_proven(now=200.0))
+    path = oc.pool_file()
+    oc.save_pool(oc.Pool(proxies=[p], validated_at=1.0), path)
+    back = oc.load_pool(path).proxies[0]
+    check("failed_at survives a save/load", back.failed_at == 150.0, str(back.failed_at))
+    check("so the dead proxy stays retired after a restart", not back.is_proven(now=200.0))
+    path.write_text('{"proxies":[{"host":"9.9.9.9","port":80,"proven_at":5.0}],'
+                    '"cursor":0,"validated_at":1.0}', encoding="utf-8")
+    check("a pre-failed_at pool file loads", oc.load_pool(path).proxies[0].failed_at == 0.0)
+
+
+def test_used_at_survives_a_save():
+    """used_at is what makes rotation survive a restart. An in-memory-only
+    marker would reset on the next process and hand back the same address."""
+    path = oc.pool_file()
+    p = oc.Proxy("1.2.3.4", 8080, proven_at=100.0, used_at=200.0)
+    oc.save_pool(oc.Pool(proxies=[p], validated_at=1.0), path)
+    back = oc.load_pool(path).proxies[0]
+    check("used_at survives a save/load", back.used_at == 200.0, str(back.used_at))
+    # A pool file written before used_at existed must still load.
+    path.write_text('{"proxies":[{"host":"9.9.9.9","port":80,"proven_at":5.0}],'
+                    '"cursor":0,"validated_at":1.0}', encoding="utf-8")
+    old = oc.load_pool(path).proxies[0]
+    check("a pre-used_at pool file loads", old.used_at == 0.0, str(old.used_at))
+    check("and its proof is still honoured", old.is_proven(now=6.0))
+
+
+def test_known_good_is_tried_first(tmp: Path):
+    """The pool's memory is the point: a proxy that worked once is better
+    evidence than any liveness measurement, so it must be tried before the
+    rest — and remembered after."""
+    stale = [oc.Proxy("10.0.0.%d" % i, 80) for i in range(4)]
+    proven = oc.Proxy("10.9.9.9", 8080, proven_at=time.time() - 60)
+    pool = oc.Pool(proxies=stale + [proven])
+
+    check("known_good finds the proven one",
+          [p.key for p in pool.known_good()] == [proven.key],
+          str([p.key for p in pool.known_good()]))
+
+    # A proven proxy is tried first, whatever its position in the list.
+    order: list[str] = []
+    with mock.patch.object(oc, "save_pool"):
+        with mock.patch.object(oc, "probe_launch",
+                               side_effect=lambda p, b, model=None, timeout=None:
+                               (order.append(p.key), "ok")[1]):
+            got, _ = oc.find_working_proxy("/usr/bin/opencode", attempts=6, pool=pool)
+    check("proven proxy tried first", order and order[0] == proven.key, str(order))
+    check("proven proxy returned", got is not None and got.key == proven.key)
+
+    # Success is recorded, which is what makes the next launch cheaper.
+    fresh = oc.Pool(proxies=[oc.Proxy("10.5.5.5", 80)])
+    with mock.patch.object(oc, "save_pool") as sp:
+        with mock.patch.object(oc, "probe_launch", return_value="ok"):
+            got, _ = oc.find_working_proxy("/usr/bin/opencode", attempts=3, pool=fresh)
+    check("success is marked proven", got.proven_at > 0, str(got.proven_at))
+    check("pool was saved after success", sp.called)
+    check("marked proxy is now known_good", fresh.known_good() != [])
+
+    # An aged-out success must not be trusted forever.
+    old = oc.Proxy("10.7.7.7", 80, proven_at=time.time() - oc.KNOWN_GOOD_AGE - 1)
+    check("stale proof is not trusted", not old.is_proven())
+    check("fresh proof is trusted", oc.Proxy("1.1.1.1", 80, proven_at=time.time()).is_proven())
+    check("never-proven is not trusted", not oc.Proxy("1.1.1.1", 80).is_proven())
+
+
+def test_proven_at_round_trips(tmp: Path):
+    path = tmp / "pool2.json"
+    p = oc.Proxy("1.2.3.4", 8080, latency=0.5, proven_at=1234.0)
+    oc.save_pool(oc.Pool(proxies=[p], validated_at=1.0), path)
+    back = oc.load_pool(path).proxies[0]
+    check("proven_at survives a save/load", back.proven_at == 1234.0, str(back.proven_at))
+    check("latency still survives", back.latency == 0.5)
+    # An old pool file written before this field existed must still load.
+    path.write_text(json.dumps({"proxies": [{"host": "1.1.1.1", "port": 80}],
+                                "cursor": 0, "validated_at": 1.0}), encoding="utf-8")
+    check("a pre-proven_at pool file still loads",
+          oc.load_pool(path).proxies[0].proven_at == 0.0)
+
+
+def test_build_pool_two_stages():
+    """The decisive stage: liveness alone is not enough, so the survivors of
+    the cheap probe must get a real turn before they are kept."""
+    cands = [oc.Proxy("10.0.0.%d" % i, 80) for i in range(10)]
+
+    with mock.patch.object(oc, "fetch_candidates", return_value=cands):
+        with mock.patch.object(oc, "_probe",
+                               side_effect=lambda p, timeout=None: p):
+            # No binary: degraded path, keeps the liveness result so the caller
+            # (which has already reported opencode missing) still gets a pool.
+            with mock.patch.object(oc, "save_pool"):
+                p = oc.build_pool(target=4, binary=None)
+            check("no binary falls back to liveness", len(p.proxies) == 4, str(len(p.proxies)))
+
+        with mock.patch.object(oc, "_probe",
+                               side_effect=lambda p, timeout=None: p):
+            seen: list[str] = []
+
+            def fake_turn(proxy, binary, model=None, timeout=None):
+                seen.append(proxy.key)
+                return "ok" if len(seen) <= 2 else "retry"
+
+            with mock.patch.object(oc, "save_pool"):
+                with mock.patch.object(oc, "probe_launch", side_effect=fake_turn):
+                    p = oc.build_pool(target=2, binary="/usr/bin/opencode")
+            check("only turn-proven proxies are kept", len(p.proxies) == 2, str(len(p.proxies)))
+            check("the decisive stage actually ran", len(seen) > 0, str(len(seen)))
+            # A pool that arrives unstamped hands the next launch a set of
+            # proxies it cannot prefer, so the memory is built and discarded.
+            # Passing a turn must be recorded at the moment it passes.
+            check("survivors are stamped proven_at",
+                  all(x.proven_at > 0 for x in p.proxies),
+                  str([x.proven_at for x in p.proxies]))
+            check("a freshly built pool knows its good proxies",
+                  len(p.known_good()) == 2, str(len(p.known_good())))
+
+        # A turn-stage that finds nothing must not persist an empty pool.
+        with mock.patch.object(oc, "_probe",
+                               side_effect=lambda p, timeout=None: p):
+            with mock.patch.object(oc, "probe_launch", return_value="retry"):
+                with mock.patch.object(oc, "save_pool") as sp:
+                    p = oc.build_pool(target=2, binary="/usr/bin/opencode")
+            check("all-refused build yields an empty pool", p.proxies == [])
+            check("empty pool is not saved", not sp.called)
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +680,46 @@ def test_ui_wiring():
           "elif ip:" in src and 'where = f"{proxy.url} (exit {ip})"' in src)
 
 
+def test_hunt_spinner():
+    """The waiting screen: the exact wording asked for, no counts, and an
+    animation driven by the UI thread rather than by the worker."""
+    from zimzilla.ui import app as app_mod
+    from zimzilla.ui.widgets import ChatPane
+
+    check("the hunting message is the one asked for",
+          app_mod._HUNTING == "ZIM IS MAKING IT UNLIMITED - FINDING THE BEST PROXIES ...",
+          app_mod._HUNTING)
+    check("it does not announce a count",
+          not any(c.isdigit() for c in app_mod._HUNTING), app_mod._HUNTING)
+    check("spinner has multiple frames", len(app_mod._HUNT_FRAMES) > 3,
+          str(len(app_mod._HUNT_FRAMES)))
+    check("spinner frames are single-width",
+          all(len(f) == 1 for f in app_mod._HUNT_FRAMES), app_mod._HUNT_FRAMES)
+
+    # The animation must be on a UI timer: the worker blocks in single socket
+    # calls for tens of seconds, so a callback-driven spinner would freeze for
+    # exactly the stretch being waited through.
+    src = Path(app_mod.__file__).read_text(encoding="utf-8")
+    check("spinner runs on a UI interval",
+          "set_interval(0.12, self._pulse_hunt_spinner)" in src)
+    check("spinner is stopped after the hunt",
+          "self._hunt_timer.stop()" in src)
+    check("spinner state is initialised in __init__",
+          "self._hunt_timer = None" in src and "self._hunt_frame = 0" in src)
+    # A timer can fire during teardown; the pane lookup must tolerate it.
+    check("pane lookup tolerates teardown", "def _chat_pane" in src)
+
+    check("ChatPane has a spinner slot", "id=\"spinner\"" in ChatPane.DEFAULT_CSS
+          or hasattr(ChatPane, "set_spinner"))
+    check("ChatPane can set and clear it",
+          hasattr(ChatPane, "set_spinner") and hasattr(ChatPane, "clear_spinner"))
+
+    # No counts and no unproven addresses on screen while it works.
+    check("no proxy count is printed while hunting",
+          "proxies live" not in src)
+    check("no per-attempt address is printed", "attempt {i}/{n}" not in src)
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="zz-opencode-"))
     try:
@@ -490,7 +732,14 @@ def main() -> int:
         test_progress_callback()
         test_classify()
         test_probe_launch_verdicts()
-        test_find_working_proxy()
+        test_find_working_proxy(tmp)
+        test_every_launch_is_a_different_proxy()
+        test_a_dead_proxy_stops_being_trusted()
+        test_failed_at_survives_a_save()
+        test_used_at_survives_a_save()
+        test_known_good_is_tried_first(tmp)
+        test_proven_at_round_trips(tmp)
+        test_build_pool_two_stages()
         test_child_env()
         test_build_argv()
         test_run_env_and_status()
@@ -499,6 +748,7 @@ def main() -> int:
         test_binary_lookup(tmp)
         test_state_paths(tmp)
         test_ui_wiring()
+        test_hunt_spinner()
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
