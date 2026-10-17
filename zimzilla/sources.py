@@ -42,10 +42,34 @@ class Source:
     model: str          # default model name for this upstream
     root: Path          # checkout the service manager is started from
     models: tuple[str, ...] = ()   # declared fallback list; the live one is fetched
+    #: Non-None while the route is deliberately not usable — the reason to print.
+    #: See UNDER_CONSTRUCTION.
+    under_construction: str | None = None
 
     @property
     def base_url(self) -> str:
         return f"http://localhost:{self.port}"
+
+
+# Sources that are installed, still discovered, and still listed by
+# `/zim-source` — but deliberately not switchable right now. Key -> the reason
+# to print.
+#
+# Parked rather than removed so the route stays *visible*: an operator who
+# cannot see a source cannot tell "not installed on this machine" from
+# "installed and deliberately off", and those call for different actions. It is
+# also what makes bringing it back a one-line change in here plus the UI, with
+# no second copy of the decision to find.
+#
+# A parked source is never marked active, never started by a switch, and a
+# remembered selection of it is refused by `current_key` — so a stale
+# `current-source` cannot drag a session back onto it.
+UNDER_CONSTRUCTION: dict[str, str] = {
+    "tokenjuice": (
+        "the upstream keeps renaming its model id, and the last rename took "
+        "the alias with it"
+    ),
+}
 
 
 # The *fallback* list for each upstream — what to show when the live catalog
@@ -253,6 +277,7 @@ def _build(key: str, label: str, port: int, model: str) -> Source | None:
         key=key, label=label, port=port, profile=profile,
         service=service, config=config, model=model, root=DEFAULT_ROOT,
         models=MODELS_BY_KEY.get(key, ()),
+        under_construction=UNDER_CONSTRUCTION.get(key),
     )
 
 
@@ -299,11 +324,15 @@ def current_key() -> str | None:
     """The source the user last selected, if it is still a valid one.
 
     A discovered source is valid while its files are present. A built-in one is
-    valid always — there is nothing on disk that could go missing.
+    valid always — there is nothing on disk that could go missing. A parked one
+    is valid never: see UNDER_CONSTRUCTION, which is why this is checked before
+    the others rather than after.
     """
     try:
         key = _state_file().read_text(encoding="utf-8").strip()
     except OSError:
+        return None
+    if key in UNDER_CONSTRUCTION:
         return None
     if key in BUILTIN_KEYS:
         return key
@@ -311,7 +340,13 @@ def current_key() -> str | None:
 
 
 def set_current(key: str) -> None:
-    """Record the selection. Never fatal — a read-only home must not break the TUI."""
+    """Record the selection. Never fatal — a read-only home must not break the TUI.
+
+    A parked source may be written here; it is ``current_key`` that refuses to
+    read one back. Keeping the write unconditional means this stays the plain
+    "remember the choice" function it reads as, and the parking decision lives
+    in exactly one place rather than being half-applied at both ends.
+    """
     try:
         ZIMZILLA_HOME.mkdir(parents=True, exist_ok=True)
         _state_file().write_text(key + "\n", encoding="utf-8")

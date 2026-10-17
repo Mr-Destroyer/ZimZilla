@@ -2083,7 +2083,7 @@ class ZimZillaApp(App):
             ("/think", "toggle showing the model's own reasoning"),
             ("/theme green|amber|cyan|system", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare        (:4001)"),
-            ("/zim-tokenjuice", "switch upstream to Token Juice    (:4000)"),
+            ("/zim-tokenjuice", "Token Juice — under construction   (:4000)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
             ("/zim-unorouter", "switch upstream to UnoRouter    (hosted, free models)"),
@@ -2712,6 +2712,15 @@ class ZimZillaApp(App):
             t = Text()
             t.append("  UPSTREAM SOURCES\n\n", style=f"bold {p.accent}")
             for k, src in found.items():
+                if src.under_construction:
+                    # Listed, never marked active, and never offered as a
+                    # switch target — the reason replaces the proxy state,
+                    # because "proxy up/down" is not the question here.
+                    t.append(f"  ○ {k:<12}", style=p.dim)
+                    t.append(f":{src.port}  {src.label:<12} ", style=p.dim)
+                    t.append(f"under construction: {src.under_construction}\n",
+                             style=p.amber)
+                    continue
                 mark = "◉" if k == active else "○"
                 style = f"bold {p.accent}" if k == active else p.primary
                 up = sources_mod.proxy_healthy(src.port)
@@ -2780,10 +2789,16 @@ class ZimZillaApp(App):
             else:
                 t.append(f"key from {creds[2]} (document tools, not a source)\n",
                          style=p.accent)
-            t.append("\n  switch with  /zim-logfare,  /zim-tokenjuice,  "
-                     "/zim-tokenharbour\n                 or  /zim-openrouter,  "
-                     "/zim-unorouter,  /zim-aihubmix,\n                 "
-                     "or  /zim-antseed\n", style=p.dim)
+            t.append("\n  switch with  /zim-logfare,  /zim-tokenharbour\n"
+                     "                 or  /zim-openrouter,  /zim-unorouter,\n"
+                     "                 /zim-aihubmix,  or  /zim-antseed\n",
+                     style=p.dim)
+            # Any route that is present but parked is named once here, so the
+            # list above and this hint agree about what is actually reachable.
+            for _k in sorted(sources_mod.UNDER_CONSTRUCTION):
+                if _k in found:
+                    t.append(f"  /zim-{_k} is under construction\n",
+                             style=p.amber)
             self.query_one(ChatPane).write_block(t)
             return
 
@@ -2791,6 +2806,14 @@ class ZimZillaApp(App):
         if src is None:
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
+                warn=True,
+            )
+            return
+
+        if src.under_construction:
+            self._sys_line(
+                f"{src.label} is under construction and cannot be switched to — "
+                f"{src.under_construction}",
                 warn=True,
             )
             return

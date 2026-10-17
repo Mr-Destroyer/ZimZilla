@@ -62,6 +62,17 @@ if [[ -r "$ZIMZILLA_HOME/current-source" ]]; then
   _current_source="$(tr -d '[:space:]' < "$ZIMZILLA_HOME/current-source" 2>/dev/null || true)"
 fi
 
+# A parked source is not a selection. Token Juice is under construction — the
+# authority for that is UNDER_CONSTRUCTION in zimzilla/sources.py, and the
+# check is repeated here only because this script reads current-source itself
+# and cannot import Python. Without it, a selection file left over from before
+# the park would start the :4000 proxy and point the session at it, which is
+# the one thing parking it is meant to prevent. Everything below therefore sees
+# a parked choice as no choice, and falls through to Logfare.
+case "$_current_source" in
+  tokenjuice) _current_source="" ;;
+esac
+
 # An endpoint already in the environment wins over everything below.
 #
 # `source ~/claude-source/haiku-5.5 && zimzilla` is how the operator points a
