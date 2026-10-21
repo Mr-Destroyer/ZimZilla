@@ -7,9 +7,11 @@ subdomains do the same or do not resolve. So it cannot be a hosted gateway the
 way TokenHarbour or BeatAPI is — nothing here speaks the Anthropic Messages
 protocol back.
 
-What makes it a source is the same arrangement Logfare and Token Juice use: a
-local LiteLLM proxy on :4002 translates ``/v1/messages`` into ``/v1/chat/
-completions`` at ``https://api.iteracompute.com/v1``. Since the harness grew a
+What makes it a source is the same arrangement Logfare uses: a local LiteLLM
+proxy on :4002 translates ``/v1/messages`` into ``/v1/chat/
+completions`` at ``https://api.iteracompute.com/v1``. (Token Juice used to be
+the third one; it is direct-only now — no proxy at all.) Since the harness grew
+a
 native Chat Completions transport (``zimzilla.openai_compat``), the proxy is no
 longer the route a switch takes: ``/zim-iteracompute`` reads this source's proxy
 config for the upstream URL and the model ids and goes straight there, with the
@@ -82,8 +84,9 @@ ZIMZILLA_HOME = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzill
 CLAUDE_SOURCE = Path(os.environ.get("ZIMZILLA_CLAUDE_SOURCE")
                      or (Path.home() / "claude-source"))
 
-#: The port the local LiteLLM translation proxy listens on. 4001 is Logfare and
-#: 4000 is Token Juice; this one must not collide with either.
+#: The port the local LiteLLM translation proxy listens on. 4001 is Logfare;
+#: this one must not collide with it. (Token Juice has no port: it is reached
+#: directly, with no proxy.)
 PROXY_PORT = 4002
 
 #: What the session points at. This is the **local proxy**, not the upstream:

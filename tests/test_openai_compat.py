@@ -782,12 +782,12 @@ def test_direct_route(tmp: Path) -> None:
 
     The config is the authority on purpose: it already spells out which id each
     proxy alias maps to, so a model added there is reachable directly with no
-    second edit here.
+    second edit here. Token Juice has no config — its route is declared in
+    ``sources.TOKENJUICE_DIRECT`` — so it is asserted from the declaration.
     """
     shipped = ROOT / "packaging"
     for key, model, url in (
         ("logfare", "deepseek-v4.1-flash", "https://logfare.ai/v1"),
-        ("tokenjuice", "deepseek-v4.1-flash", "https://api.tokenjuice.ai/v1"),
         ("iteracompute", "qwen/qwen3.8-27b", "https://api.iteracompute.com/v1"),
         ("infronai", "deepseek/deepseek-v4.1-flash:free", "https://llm.onerouter.pro/v1"),
     ):
@@ -800,17 +800,29 @@ def test_direct_route(tmp: Path) -> None:
               route is not None and route.base_url == url,
               str(route and route.base_url))
 
+    # Token Juice: no proxy, no config, no service — the route is declared.
+    check("route: tokenjuice has no proxy files in the tree",
+          not (shipped / "tokenjuice" / "litellm-config.yaml").exists()
+          and not (shipped / "tokenjuice" / "start-litellm.sh").exists(),
+          str(sorted(p.name for p in (shipped / "tokenjuice").iterdir())))
+
     tj = sources_mod.Source(
         key="tokenjuice", label="Token Juice", port=0, profile=Path("/dev/null"),
-        service=Path("/dev/null"),
-        config=shipped / "tokenjuice" / "litellm-config.yaml",
-        model="deepseek-v4.1-flash", root=ROOT)
+        model="deepseek-v4.1-flash", root=ROOT,
+        direct=sources_mod.TOKENJUICE_DIRECT)
     route = sources_mod.direct_route(tj)
+    check("route: tokenjuice is direct-only", tj.is_direct_only,
+          str(tj.is_direct_only))
     assert route is not None
-    check("route: the proxy alias is translated to the upstream id",
+    check("route: tokenjuice points at its own upstream",
+          route.base_url == "https://api.tokenjuice.ai/v1", route.base_url)
+    check("route: the old proxy alias is translated to the upstream id",
           route.upstream_model("deepseek-v4.1-flash")
           == "deepseek-ai/DeepSeek-V4.1-Flash-1017",
           route.upstream_model("deepseek-v4.1-flash"))
+    check("route: the upstream id is passed through unchanged",
+          route.upstream_model("deepseek-ai/DeepSeek-V4.1-Flash-1017")
+          == "deepseek-ai/DeepSeek-V4.1-Flash-1017")
     check("route: an unmapped name is passed through",
           route.upstream_model("other") == "other")
 
@@ -930,6 +942,76 @@ def test_switch_direct(tmp: Path) -> None:
           str(without))
 
 
+def test_switch_direct_only(tmp: Path) -> None:
+    """A source with no proxy is switched directly, whatever the arguments say.
+
+    Token Juice has no LiteLLM proxy: no service, no config, no port. The
+    switch must never try to start one, and `proxy` — an argument that means
+    something for the other local routes — must not send it down that path.
+    """
+    from zimzilla.ui.app import ZimZillaApp
+
+    profile = tmp / "tj-source"
+    profile.write_text('export ANTHROPIC_AUTH_TOKEN="tj-test"\n'
+                       'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n',
+                       encoding="utf-8")
+    src = sources_mod.Source(
+        key="directfake", label="Direct Fake", port=0, profile=profile,
+        model="deepseek-v4.1-flash", root=tmp,
+        direct=sources_mod.DirectRoute(
+            base_url="https://direct.example/v1",
+            models={"deepseek-v4.1-flash": "upstream-one"}))
+    check("direct-only: the source has no proxy", src.is_direct_only,
+          str(src.is_direct_only))
+
+    cfg = Config.from_env(workdir=tmp, api_key="k", base_url="http://localhost:4001",
+                          model="deepseek-v4.1-flash")
+    app = ZimZillaApp(cfg)
+    zhome = tmp / "zhome-direct"
+    zhome.mkdir(exist_ok=True)
+
+    def no_proxy(*a, **k):
+        raise AssertionError("a direct-only source must not start a proxy")
+
+    async def go():
+        async with app.run_test(size=(110, 34)) as pilot:
+            with mock.patch.object(sources_mod, "ZIMZILLA_HOME", zhome), \
+                 mock.patch.object(sources_mod, "start_proxy", no_proxy), \
+                 mock.patch.object(oc, "probe", return_value=(True, "1 models")):
+                oc._MODEL_CACHE[oc._cache_key("https://direct.example/v1")] = (
+                    "upstream-one",)
+                # `proxy` is asked for and there is nothing to ask: it must
+                # still land on the upstream rather than refuse the command.
+                await ZimZillaApp._switch_source.__wrapped__(
+                    app, src, use_proxy=True)
+            await pilot.pause()
+            return (cfg.base_url, cfg.protocol, cfg.model,
+                    app.agent.protocol)
+
+    base_url, protocol, model, resolved = asyncio.run(go())
+    check("direct-only: the endpoint is the upstream", base_url == "https://direct.example/v1",
+          base_url)
+    check("direct-only: the protocol is Chat Completions", protocol == "openai",
+          protocol)
+    check("direct-only: the alias became the upstream id", model == "upstream-one",
+          model)
+    check("direct-only: the agent resolves to openai", resolved == "openai", resolved)
+
+    # Already on it: `proxy` cannot move a direct-only route onto a proxy, so
+    # the command says so and leaves the session alone.
+    async def go2():
+        async with app.run_test(size=(110, 34)) as pilot:
+            with mock.patch.object(sources_mod, "discover",
+                                   return_value={"directfake": src}), \
+                 mock.patch.object(ZimZillaApp, "_switch_source") as switch:
+                app._cmd_zim_source("directfake", ["proxy"])
+                await pilot.pause()
+                return switch.called
+
+    check("direct-only: `proxy` does not re-switch an already-direct session",
+          asyncio.run(go2()) is False, "the switch was called")
+
+
 def main() -> int:
     test_protocol_resolution()
     test_urls()
@@ -957,6 +1039,8 @@ def main() -> int:
         test_active_key_direct(Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_switch_direct(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        test_switch_direct_only(Path(tmp))
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

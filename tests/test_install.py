@@ -288,6 +288,93 @@ def test_setup_installs_without_a_key_and_without_prompting(td: Path) -> None:
           written.read_text()[:120] if written.is_file() else "missing")
 
 
+def test_setup_migrates_tokenjuice_to_direct(td: Path) -> None:
+    """An older Token Juice profile is moved onto the direct route, key intact.
+
+    The route had a LiteLLM proxy on :4000. It does not any more — the upstream
+    serves Chat Completions itself — so a profile left pointing at that port
+    would aim the session at an address nothing answers. setup.sh rewrites the
+    address and the model id, keeps the key byte for byte, and removes the
+    retired proxy files rather than leaving a manager nothing will start.
+
+    Shell-side, so it is run against a throwaway checkout and HOME.
+    """
+    home = td / "home-tokenjuice"
+    home.mkdir()
+    zhome = home / ".zimzilla"
+    checkout = td / "checkout-tokenjuice"
+    (checkout / "packaging" / "logfare").mkdir(parents=True)
+    (checkout / "packaging" / "tokenjuice").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "logfare" / "source",
+                checkout / "packaging" / "logfare" / "source")
+    shutil.copy(ROOT / "packaging" / "tokenjuice" / "source.example",
+                checkout / "packaging" / "tokenjuice" / "source.example")
+    shutil.copy(ROOT / "setup.sh", checkout / "setup.sh")
+    os.chmod(checkout / "setup.sh", 0o755)
+
+    venv_bin = checkout / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    shim = venv_bin / "python"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    os.chmod(shim, 0o755)
+
+    # The install as it was: a :4000 profile, plus the proxy it started.
+    tj = zhome / "tokenjuice"
+    tj.mkdir(parents=True)
+    old = (
+        'export ANTHROPIC_BASE_URL="http://localhost:4000"\n'
+        'export ANTHROPIC_AUTH_TOKEN="tj_test_key_123"\n'
+        'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n'
+        'export ANTHROPIC_API_KEY=""\n'
+    )
+    (tj / "source").write_text(old)
+    os.chmod(tj / "source", 0o600)
+    (tj / "start-litellm.sh").write_text("#!/bin/sh\n")
+    (tj / "litellm-config.yaml").write_text("model_list: []\n")
+
+    env = base_env(home)
+    env["ZIMZILLA_HOME"] = str(zhome)
+    env["ZIMZILLA_ROOT"] = str(checkout)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    stubs = td / "stubs-tokenjuice"
+    stubs.mkdir()
+    (stubs / "litellm").write_text("#!/bin/sh\nexit 0\n")
+    (stubs / "curl").write_text("#!/bin/sh\nexit 1\n")
+    for stub in stubs.iterdir():
+        os.chmod(stub, 0o755)
+    env["PATH"] = f"{stubs}:/usr/bin:/bin"
+
+    proc = subprocess.run(
+        ["bash", str(checkout / "setup.sh")],
+        cwd=str(checkout), env=env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+    )
+    check("setup/tokenjuice: finishes", proc.returncode == 0,
+          (proc.stdout + proc.stderr).strip()[-400:])
+
+    text = (tj / "source").read_text() if (tj / "source").is_file() else ""
+    check("setup/tokenjuice: the profile now names the upstream",
+          'ANTHROPIC_BASE_URL="https://api.tokenjuice.ai/v1"' in text, text[:200])
+    check("setup/tokenjuice: and the model the upstream serves",
+          'ANTHROPIC_MODEL="deepseek-ai/DeepSeek-V4.1-Flash-1017"' in text,
+          text[:200])
+    check("setup/tokenjuice: the key is untouched",
+          'ANTHROPIC_AUTH_TOKEN="tj_test_key_123"' in text, text[:200])
+    check("setup/tokenjuice: the profile stays mode 600",
+          (tj / "source").stat().st_mode & 0o777 == 0o600,
+          oct((tj / "source").stat().st_mode & 0o777))
+    check("setup/tokenjuice: the previous profile is kept as a backup",
+          (tj / "source.bak").is_file(), str(sorted(p.name for p in tj.iterdir())))
+    check("setup/tokenjuice: the retired proxy files are gone",
+          not (tj / "start-litellm.sh").exists()
+          and not (tj / "litellm-config.yaml").exists(),
+          str(sorted(p.name for p in tj.iterdir())))
+    check("setup/tokenjuice: the template is refreshed",
+          (tj / "source.example").is_file()
+          and "api.tokenjuice.ai" in (tj / "source.example").read_text())
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td_str:
         td = Path(td_str)
@@ -295,6 +382,7 @@ def main() -> int:
         test_launcher_prefers_bundled_venv(ctx)
         test_launcher_falls_back_to_path_python(td)
         test_setup_installs_without_a_key_and_without_prompting(td)
+        test_setup_migrates_tokenjuice_to_direct(td)
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

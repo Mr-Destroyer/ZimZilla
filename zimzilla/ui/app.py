@@ -2151,7 +2151,7 @@ class ZimZillaApp(App):
             ("/think", "toggle showing the model's own reasoning"),
             ("/theme green|amber|cyan|system", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare (bundled proxy, all models)"),
-            ("/zim-tokenjuice", "Token Juice — under construction   (:4000)"),
+            ("/zim-tokenjuice", "switch upstream to Token Juice (direct, no proxy)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
             ("/zim-unorouter", "switch upstream to UnoRouter    (hosted, free models)"),
@@ -2881,15 +2881,16 @@ class ZimZillaApp(App):
         self._sys_line(f"theme switched to {name}", ok=True)
 
     # ---- upstream sources ------------------------------------------------
-    # /zim-logfare and /zim-tokenjuice repoint the session at the other local
-    # LiteLLM proxy. Both upstreams go down independently, so this is the
-    # failover: the key, base_url and client are all rebuilt in place, and the
-    # choice is persisted so the next launch starts on the one that worked.
+    # /zim-logfare and /zim-tokenjuice repoint the session at a different
+    # upstream. Both go down independently, so this is the failover: the key,
+    # base_url and client are all rebuilt in place, and the choice is persisted
+    # so the next launch starts on the one that worked. Logfare is a local
+    # proxy; Token Juice is reached directly and has none.
     #
     # Logfare is a full switch target. Its key is shared, so it can hit the
     # upstream's daily budget — a 429 that the turn path reports rather than
     # retries — but that is a reason to say so when it happens, not a reason to
-    # refuse the route. Only Token Juice is parked (sources.UNDER_CONSTRUCTION).
+    # refuse the route.
     def _cmd_zim_source(self, key: str | None, args: list[str] | None = None) -> None:
         """/zim-<source> [proxy] — switch upstream, directly when possible."""
         p = self.palette
@@ -2904,11 +2905,19 @@ class ZimZillaApp(App):
             for k, src in found.items():
                 mark = "◉" if k == active else "○"
                 style = f"bold {p.accent}" if k == active else p.primary
-                up = sources_mod.proxy_healthy(src.port)
-                state = "proxy up" if up else "proxy down"
                 t.append(f"  {mark} {k:<12}", style=style)
-                t.append(f":{src.port}  {src.label:<12} ", style=p.primary)
-                t.append(f"{state}\n", style=p.accent if up else p.amber)
+                if src.is_direct_only:
+                    # No proxy and no port: "proxy up" is not a question that
+                    # can be asked, so the route is named instead.
+                    route = sources_mod.direct_route(src)
+                    t.append(f"{'direct':<7}{src.label:<12} ", style=p.primary)
+                    where = route.base_url if route is not None else "no route"
+                    t.append(f"no proxy · {where}\n", style=p.accent)
+                else:
+                    up = sources_mod.proxy_healthy(src.port)
+                    state = "proxy up" if up else "proxy down"
+                    t.append(f":{src.port}  {src.label:<12} ", style=p.primary)
+                    t.append(f"{state}\n", style=p.accent if up else p.amber)
                 if src.under_construction:
                     # Not offered as a switch target — the reason sits under
                     # the row rather than replacing its state, because "proxy
@@ -2996,11 +3005,11 @@ class ZimZillaApp(App):
             t.append("\n  wire protocol  ", style=p.dim)
             t.append(f"{self.agent.protocol}", style=f"bold {p.accent}")
             t.append(f"  ·  {self.cfg.base_url}\n", style=p.dim)
-            t.append("  switch with  /zim-logfare,  /zim-tokenharbour,\n"
-                     "                 /zim-openrouter,  /zim-unorouter,\n"
-                     "                 /zim-aihubmix,  /zim-beatapi,\n"
-                     "                 /zim-iteracompute,  /zim-infronai,\n"
-                     "                 or  /zim-antseed\n",
+            t.append("  switch with  /zim-logfare,  /zim-tokenjuice,\n"
+                     "                 /zim-tokenharbour,  /zim-openrouter,\n"
+                     "                 /zim-unorouter,  /zim-aihubmix,\n"
+                     "                 /zim-beatapi,  /zim-iteracompute,\n"
+                     "                 /zim-infronai,  or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
             # list above and this hint agree about what is actually reachable.
@@ -3023,6 +3032,13 @@ class ZimZillaApp(App):
                     f"{_label} is not set up on this machine — set your key "
                     f"with /{key}-api-setup <key>", warn=True)
                 return
+            if key == "tokenjuice":
+                # No proxy files to miss: the profile is the whole install.
+                self._sys_line(
+                    "Token Juice is not set up on this machine — write your "
+                    "tj_ key to ~/.zimzilla/tokenjuice/source (mode 600); the "
+                    "format is in source.example beside it", warn=True)
+                return
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
                 warn=True,
@@ -3037,11 +3053,25 @@ class ZimZillaApp(App):
             )
             return
 
+        if src.is_direct_only and use_proxy:
+            # There is no proxy to ask for: the upstream serves Chat Completions
+            # and nothing is installed in front of it. Say so, then switch the
+            # way the route actually works rather than refusing the command.
+            self._sys_line(
+                f"{src.label} has no local proxy — it is reached directly",
+                warn=True)
+            use_proxy = False
+
         if sources_mod.active_key(self.cfg.base_url) == key:
-            on_proxy = self.cfg.base_url.rstrip("/") == src.base_url
+            route = sources_mod.direct_route(src)
+            direct_url = route.base_url.rstrip("/") if route is not None else ""
+            on_proxy = (not src.is_direct_only
+                        and self.cfg.base_url.rstrip("/") == src.base_url)
+            on_direct = bool(direct_url) and \
+                self.cfg.base_url.rstrip("/") == direct_url
             # `proxy` asks for the hop explicitly, so being on the direct route
             # already is not a reason to refuse it — and vice versa.
-            if on_proxy == use_proxy:
+            if (on_proxy and use_proxy) or (on_direct and not use_proxy):
                 where = f":{src.port}" if on_proxy else "directly"
                 self._sys_line(f"already on {src.label} ({where})", ok=True)
                 return
@@ -3060,7 +3090,19 @@ class ZimZillaApp(App):
         default; `proxy` is there for the cases the proxy still earns its keep
         (a local audit of the traffic, or an upstream that needs its translation
         for a model whose Chat Completions route is broken).
+
+        A direct-only source has no proxy to fall back to: its route is the
+        only route, and it is always taken.
         """
+        if src.is_direct_only:
+            route = sources_mod.direct_route(src)
+            if route is None:
+                self._sys_line(
+                    f"{src.label} has no route — nothing is configured to "
+                    f"reach it", warn=True)
+                return
+            await self._switch_direct(src, route)
+            return
         route = None if use_proxy else sources_mod.direct_route(src)
         if route is not None:
             await self._switch_direct(src, route)
@@ -3129,10 +3171,10 @@ class ZimZillaApp(App):
 
         The key comes from the same profile the proxy would have used, so this
         changes the route and nothing else. The model is translated through the
-        proxy config's alias map — the upstream answers to its own ids, not the
-        proxy's — and checked against the live catalog while the switch is
-        already paying for a round-trip, because these lineups turn over and a
-        retired name fails as a 404 on the first turn instead of here.
+        route's alias map — the upstream answers to its own ids, not a proxy's
+        — and checked against the live catalog while the switch is already
+        paying for a round-trip, because these lineups turn over and a retired
+        name fails as a 404 on the first turn instead of here.
         """
         self.busy = True
         bar = self.query_one(StatusBar)
@@ -3446,8 +3488,8 @@ class ZimZillaApp(App):
     def _cmd_zim_tokenharbour(self, args) -> None:
         """/zim-tokenharbour — repoint the session at the hosted gateway.
 
-        Unlike /zim-logfare and /zim-tokenjuice there is no local proxy to start
-        and no shipped profile: the key comes from wherever the operator put it
+        Unlike /zim-logfare there is no local proxy to start and no shipped
+        profile: the key comes from wherever the operator put it
         — the environment (a sourced ~/claude-source profile), ZimZilla's own
         profile, or a ~/claude-source file — and the model defaults to a free
         one so a fresh switch costs nothing.

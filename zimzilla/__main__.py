@@ -281,17 +281,33 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.protocol == "auto":
         _active = sources_mod.active_key(cfg.base_url)
         _src = sources_mod.discover().get(_active) if _active else None
+        # A direct-only source has no proxy to be recognised by port, so a
+        # profile written before its proxy was removed still names
+        # http://localhost:4000 — an address nothing answers. Fall back to the
+        # remembered selection when the endpoint is a local one; the route
+        # declared in sources.py then decides where the session really goes.
+        if _src is None:
+            _remembered = sources_mod.current_key()
+            _cand = sources_mod.discover().get(_remembered) if _remembered else None
+            from . import openai_compat as oa_mod
+            if (_cand is not None and _cand.is_direct_only
+                    and oa_mod.is_local_proxy(cfg.base_url)):
+                _src = _cand
         _route = sources_mod.direct_route(_src) if _src is not None else None
         if (_src is not None and _route is not None
-                and cfg.base_url.rstrip("/") == _src.base_url):
+                and (cfg.base_url.rstrip("/") == _src.base_url
+                     or _src.is_direct_only)):
             # The profile's model is often blank (it is stored, not derived), so
             # the name here can be the default of a different source. Fall back
             # to the declared default of *this* one rather than sending an alias
-            # the upstream has never served.
+            # the upstream has never served. An explicit --model is the
+            # operator's choice, so it is only translated through the alias map.
             _model = cfg.model
-            if _model not in _route.models and _model != _src.model:
-                _model = _src.model
-            cfg.model = _route.upstream_model(_model)
+            if _model in _route.models:
+                _model = _route.upstream_model(_model)
+            elif args.model is None and _model != _src.model:
+                _model = _route.upstream_model(_src.model)
+            cfg.model = _model
             cfg.base_url = _route.base_url
             cfg.protocol = "openai"
             print(

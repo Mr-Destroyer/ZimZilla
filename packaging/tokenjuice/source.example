@@ -8,16 +8,22 @@
 # committed here once, carrying a live key, which is why the route now reports
 # itself unavailable rather than shipping a working profile.
 #
-# Token Juice keys start with `tj_`. The same key is the bearer token ZimZilla
-# sends and the upstream OpenAI key LiteLLM forwards.
+# There is no proxy on this route. Token Juice serves Chat Completions itself,
+# so ZimZilla talks to it directly: the URL below is the upstream, not a
+# localhost port, and nothing needs starting. The key is the only thing this
+# file has to carry — it is the bearer token for every request.
+#
+# Token Juice keys start with `tj_`.
 
-export ANTHROPIC_BASE_URL="http://localhost:4000"
+export ANTHROPIC_BASE_URL="https://api.tokenjuice.ai/v1"
 export ANTHROPIC_AUTH_TOKEN="tj_REPLACE_ME"
-export ANTHROPIC_MODEL="deepseek-v4.1-flash"
+# The id the upstream itself serves. The snapshot suffix rotates; /zim-tokenjuice
+# re-reads the live catalog on every switch and moves to the current one.
+export ANTHROPIC_MODEL="deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 # Load-bearing: an empty string keeps ANTHROPIC_AUTH_TOKEN authoritative and
 # clears any real API key inherited from the shell.
 export ANTHROPIC_API_KEY=""
 
 # Token Juice serves exactly one chat model, so there is nothing to alias.
-export MODEL_DEFAULT="deepseek-v4.1-flash"
+export MODEL_DEFAULT="deepseek-ai/DeepSeek-V4.1-Flash-1017"

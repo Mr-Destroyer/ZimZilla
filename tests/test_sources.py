@@ -2,12 +2,13 @@
 
 Run:  python tests/test_sources.py   (from an activated venv)
 
-Protects the /zim-tokenjuice switch: the installed ~/.zimzilla/tokenjuice
-route must win over a leftover $HOME/start-litellm.sh from an older
-deepseek-claude layout, and start_proxy must not wrap the service in flock.
-A leaked flock on /tmp/zimzilla-proxy.lock is what made the in-TUI switch
-hang until timeout while a manual start of the same script finished in
-seconds.
+Protects the /zim-tokenjuice route: it is direct-only, so the installed
+~/.zimzilla/tokenjuice profile must win over a leftover
+$HOME/claude-source/deepseek-claude from an older layout, and a proxy left in
+the same directory must not be adopted. Also protects start_proxy, which must
+not wrap the service in flock: a leaked flock on /tmp/zimzilla-proxy.lock is
+what made the in-TUI switch hang until timeout while a manual start of the same
+script finished in seconds.
 """
 
 from __future__ import annotations
@@ -47,12 +48,11 @@ def test_tokenjuice_prefers_installed_route() -> None:
         home = Path(td) / "home"
         zhome = Path(td) / "zimzilla"
         # Both layouts exist — the leftover $HOME copy must lose.
-        _touch(home / "start-litellm.sh", 0o755)
-        _touch(home / "litellm-config.yaml")
         _touch(home / "claude-source" / "deepseek-claude")
-        installed_svc = _touch(zhome / "tokenjuice" / "start-litellm.sh", 0o755)
-        installed_cfg = _touch(zhome / "tokenjuice" / "litellm-config.yaml")
         installed_src = _touch(zhome / "tokenjuice" / "source")
+        # A proxy left behind by an older install is not part of the route.
+        _touch(zhome / "tokenjuice" / "start-litellm.sh", 0o755)
+        _touch(zhome / "tokenjuice" / "litellm-config.yaml")
 
         with mock.patch.object(sources, "DEFAULT_HOME", home), \
              mock.patch.object(sources, "ZIMZILLA_HOME", zhome):
@@ -62,12 +62,28 @@ def test_tokenjuice_prefers_installed_route() -> None:
         check("tokenjuice is discovered when both layouts exist", tj is not None)
         if tj is None:
             return
-        check("tokenjuice service is the installed copy",
-              tj.service == installed_svc, str(tj.service))
-        check("tokenjuice config is the installed copy",
-              tj.config == installed_cfg, str(tj.config))
         check("tokenjuice profile is the installed copy",
               tj.profile == installed_src, str(tj.profile))
+        check("tokenjuice has no proxy to start",
+              tj.service is None and tj.config is None,
+              f"{tj.service} {tj.config}")
+        check("tokenjuice is direct-only", tj.is_direct_only,
+              str(tj.is_direct_only))
+        route = sources.direct_route(tj)
+        check("tokenjuice routes to its upstream, with no proxy",
+              route is not None
+              and route.base_url == "https://api.tokenjuice.ai/v1",
+              str(route and route.base_url))
+        check("tokenjuice translates the alias a profile may still name",
+              route is not None
+              and route.upstream_model("deepseek-v4.1-flash")
+              == "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+              str(route and route.upstream_model("deepseek-v4.1-flash")))
+        # Nothing to start, and saying so is the answer — not a timeout on a
+        # port that has no owner.
+        ok, detail = sources.start_proxy(tj, timeout=1)
+        check("tokenjuice: start_proxy says there is no proxy",
+              ok is False and "no local proxy" in detail, f"{ok!r} {detail!r}")
 
 
 def test_tokenjuice_falls_back_to_home_layout() -> None:
@@ -75,8 +91,6 @@ def test_tokenjuice_falls_back_to_home_layout() -> None:
         home = Path(td) / "home"
         zhome = Path(td) / "zimzilla"
         zhome.mkdir()
-        home_svc = _touch(home / "start-litellm.sh", 0o755)
-        home_cfg = _touch(home / "litellm-config.yaml")
         home_src = _touch(home / "claude-source" / "deepseek-claude")
 
         with mock.patch.object(sources, "DEFAULT_HOME", home), \
@@ -87,20 +101,22 @@ def test_tokenjuice_falls_back_to_home_layout() -> None:
         check("tokenjuice falls back to $HOME when not installed", tj is not None)
         if tj is None:
             return
-        check("fallback service is $HOME/start-litellm.sh",
-              tj.service == home_svc, str(tj.service))
-        check("fallback config is $HOME/litellm-config.yaml",
-              tj.config == home_cfg, str(tj.config))
         check("fallback profile is $HOME/claude-source/deepseek-claude",
               tj.profile == home_src, str(tj.profile))
+        # The profile is the whole install: there is nothing else to find.
+        check("fallback still needs no proxy",
+              tj.is_direct_only and tj.port == 0,
+              f"{tj.is_direct_only} {tj.port}")
 
 
 def test_start_proxy_does_not_flock() -> None:
     with tempfile.TemporaryDirectory() as td:
         svc = _touch(Path(td) / "start-litellm.sh", 0o755)
+        # A proxy source, whatever its name: start_proxy is only ever reached
+        # for one of those now that Token Juice has no proxy at all.
         src = sources.Source(
-            key="tokenjuice",
-            label="Token Juice",
+            key="logfare",
+            label="Logfare",
             port=3999,
             profile=Path(td) / "source",
             service=svc,
@@ -249,9 +265,11 @@ def test_logfare_is_a_switchable_route() -> None:
             check("logfare: a remembered selection is honoured",
                   sources.current_key() == "logfare", str(sources.current_key()))
 
-            # Token Juice is still parked, and must still be dropped.
+            # Token Juice is a live route now, not a parked one — but with no
+            # profile on this machine it is simply not discovered, and an
+            # undiscovered local source is still dropped.
             sources.set_current("tokenjuice")
-            check("park: tokenjuice is still refused",
+            check("logfare: token juice without a profile is still dropped",
                   sources.current_key() is None, str(sources.current_key()))
 
     # The shipped profile is what makes the route work out of the box, so it
@@ -305,6 +323,30 @@ def test_logfare_offers_every_chat_model() -> None:
         check(f"proxy: {model} is registered", f"model_name: {model}" in config)
     check("proxy: a wildcard route exists so new models need no release",
           'model_name: "*"' in config, "no wildcard in litellm-config.yaml")
+
+
+def test_nothing_ships_parked() -> None:
+    """A parked route stays visible but is never selectable.
+
+    Token Juice was the last thing parked, and it is a working direct route
+    now. The mechanism is still the way a route is turned off without also
+    hiding that it exists, so it is asserted directly rather than left to the
+    next route that needs it.
+    """
+    check("park: nothing is parked in the shipped tree",
+          sources.UNDER_CONSTRUCTION == {}, str(sources.UNDER_CONSTRUCTION))
+
+    with tempfile.TemporaryDirectory() as td:
+        zhome = Path(td) / "zimzilla"
+        zhome.mkdir()
+        empty_home = Path(td) / "home"
+        empty_home.mkdir()
+        with mock.patch.object(sources, "ZIMZILLA_HOME", zhome), \
+             mock.patch.object(sources, "DEFAULT_HOME", empty_home), \
+             mock.patch.dict(sources.UNDER_CONSTRUCTION, {"logfare": "test"}):
+            sources.set_current("logfare")
+            check("park: a remembered selection of a parked source is dropped",
+                  sources.current_key() is None, str(sources.current_key()))
 
 
 def test_switchable_names_only_what_would_work() -> None:
@@ -373,11 +415,9 @@ def test_switchable_names_only_what_would_work() -> None:
           "infronai" in run({"infronai": fake}, {}),
           str(run({"infronai": fake}, {})))
 
-    # Parked sources are never offered, discovered or not — /zim-tokenjuice
-    # refuses them, so naming it would send the operator into a refusal.
-    # Parked *openrouter* here rather than using tokenjuice: tokenjuice is
-    # already absent from the preference list, so offering it proves nothing
-    # about the guard. This parks a key the loop does reach.
+    # Parked sources are never offered, discovered or not. Nothing ships parked
+    # today, so this parks a key the preference loop does reach and checks that
+    # the guard still works.
     with mock.patch.dict(sources.UNDER_CONSTRUCTION, {"openrouter": "test"}):
         check("switchable: a parked source is never offered",
               "openrouter" not in run({}, {"openrouter": "sk-x"}),
@@ -419,6 +459,7 @@ def main() -> int:
     test_models_for_reads_the_remote_catalogs()
     test_logfare_is_a_switchable_route()
     test_logfare_offers_every_chat_model()
+    test_nothing_ships_parked()
     test_switchable_names_only_what_would_work()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

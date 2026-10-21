@@ -62,10 +62,10 @@ if [[ -r "$ZIMZILLA_HOME/current-source" ]]; then
   _current_source="$(tr -d '[:space:]' < "$ZIMZILLA_HOME/current-source" 2>/dev/null || true)"
 fi
 
-# A parked source is not a selection. Token Juice is under construction — the
-# authority for that is UNDER_CONSTRUCTION in zimzilla/sources.py, and the check
+# A parked source is not a selection. Nothing is parked right now — the
+# authority for that is UNDER_CONSTRUCTION in zimzilla/sources.py, and any check
 # is repeated here only because this script reads current-source itself and
-# cannot import Python. Without it, a selection file left over from before the
+# cannot import Python. Without it, a selection file left over from before a
 # park would start that proxy and point the session at it, which is the one
 # thing parking it is meant to prevent.
 #
@@ -73,9 +73,6 @@ fi
 # selection of it is honoured like any other. It also happens to be the default
 # route, so a cleared selection still lands there — the difference is that an
 # explicit one now survives a restart.
-case "$_current_source" in
-  tokenjuice) _current_source="" ;;
-esac
 
 # An endpoint already in the environment wins over everything below.
 #
@@ -156,26 +153,19 @@ if [[ "$_current_source" == "infronai" ]]; then
 fi
 
 if [[ "$_current_source" == "tokenjuice" ]]; then
-  # Prefer the installed route, which setup.sh populates; fall back to the
+  # Direct route: no proxy, no port, nothing to start. The profile is the whole
+  # install — it carries the key and the upstream URL, so sourcing it below is
+  # enough, and the "not the local proxy" check that follows turns the proxy
+  # handling off by itself. Prefer the installed profile; fall back to the
   # standalone deepseek-claude layout for a machine that had one before
-  # ZimZilla was installed. Checking the installed copy first is what makes
-  # this work on a fresh machine — the old hardcoded $HOME paths only exist on
-  # the box where deepseek-claude happened to be installed.
-  _tj_profile=""; _tj_service=""
-  for _cand in "$ZIMZILLA_HOME/tokenjuice/source:$ZIMZILLA_HOME/tokenjuice/start-litellm.sh" \
-               "$HOME/claude-source/deepseek-claude:$HOME/start-litellm.sh"; do
-    _p="${_cand%%:*}"; _s="${_cand##*:}"
-    if [[ -r "$_p" && -x "$_s" ]]; then
-      _tj_profile="$_p"; _tj_service="$_s"; break
-    fi
-  done
-  # Only switch if the Token Juice side is actually installed; otherwise fall
-  # through to Logfare rather than dying on a missing profile.
-  if [[ -n "$_tj_profile" ]]; then
+  # ZimZilla was installed.
+  _tj_profile="$ZIMZILLA_HOME/tokenjuice/source"
+  [[ -r "$_tj_profile" ]] || _tj_profile="$HOME/claude-source/deepseek-claude"
+  # Only switch if a profile is actually there; otherwise fall through to
+  # Logfare rather than dying fail-closed on a route that has no key.
+  if [[ -r "$_tj_profile" ]]; then
     LITELLM_ENV_FILE="${_env_override:-$_tj_profile}"
-    LITELLM_PORT="${_port_override:-4000}"
-    LITELLM_SERVICE="${_svc_override:-$_tj_service}"
-    LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-tj.log}"
+    ZIMZILLA_NO_PROXY=1
   fi
 fi
 
@@ -281,8 +271,13 @@ fi
 case "${ANTHROPIC_BASE_URL:-}" in
   *"localhost:${LITELLM_PORT}"*|*"127.0.0.1:${LITELLM_PORT}"*) ;;
   *)
-    warn "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-<unset>} is not the local proxy"
-    warn "on :${LITELLM_PORT}; skipping the proxy start-up check."
+    # A route that already knows it has no proxy — a hosted gateway, or Token
+    # Juice's direct endpoint — is not a mistake worth a warning. One that was
+    # expected to be local and is not still is.
+    if [[ "$ZIMZILLA_NO_PROXY" != "1" ]]; then
+      warn "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-<unset>} is not the local proxy"
+      warn "on :${LITELLM_PORT}; skipping the proxy start-up check."
+    fi
     ZIMZILLA_NO_PROXY=1
     ;;
 esac
@@ -320,7 +315,7 @@ ensure_proxy() {
 #
 # Close the lock fd before exec. Without that, the harness (and any LiteLLM
 # it later starts) inherits the open file and holds the lock for the whole
-# session — /zim-tokenjuice then blocks on flock until start_proxy times out,
+# session — an in-TUI switch then blocks on flock until start_proxy times out,
 # even though a manual start takes a few seconds.
 if command -v flock >/dev/null 2>&1 && [[ "$ZIMZILLA_NO_PROXY" != "1" ]]; then
   exec 9>"${TMPDIR:-/tmp}/zimzilla-proxy.lock"

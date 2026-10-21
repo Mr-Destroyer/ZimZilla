@@ -966,9 +966,10 @@ class Agent:
             #
             # ``deepseek-v4.1-flash`` on Token Juice is a reasoning model, and a
             # reasoning model's thinking is billed against ``max_tokens`` like
-            # any other output. The LiteLLM proxy in front of it does not
-            # translate that thinking into a ``thinking`` block — measured
-            # 2026-10-16, an OpenAI-shaped request for the same prompt came back
+            # any other output. The LiteLLM proxy that used to sit in front of
+            # it did not translate that thinking into a ``thinking`` block —
+            # measured 2026-10-16, an OpenAI-shaped request for the same prompt
+            # came back
             # with ``message.content: None``, a populated ``reasoning_content``
             # and ``completion_tokens_details.reasoning_tokens`` equal to the
             # whole budget, while the Anthropic-shaped one returned a single

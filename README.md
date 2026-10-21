@@ -446,8 +446,8 @@ survivable when the thinking reaches you — but through a proxy that does not
 forward it, it is not: the reply arrives as a single `text` block holding an
 empty string, and the harness is told only that it was cut off.
 
-Measured 2026-10-16 on Token Juice's `deepseek-v4.1-flash` behind the LiteLLM
-proxy, same prompt through both protocol shapes:
+Measured 2026-10-16 on Token Juice's `deepseek-v4.1-flash`, behind the LiteLLM
+proxy it ran in front of at the time, same prompt through both protocol shapes:
 
 ```
 OpenAI   /v1/chat/completions  finish_reason: length
@@ -504,15 +504,20 @@ whole thing; `--no-think` turns it off at launch.
 | OpenRouter | Anthropic-native | **Yes** — `thinking` block, 107 `thinking_delta` events, `thinking_tokens: 490` in usage |
 | Token Juice (`:4000`) | LiteLLM → OpenAI adapter | **No** — reasoning exists (`reasoning_content`, 1948 reasoning tokens) but LiteLLM's `/v1/messages` bridge drops it |
 
-So on OpenRouter you watch it think. On Token Juice's `deepseek-v4.1-flash` you
-will not, and that is not something the harness can fix: the thinking is real and
-is *billed* — it just never crosses the proxy's Anthropic bridge. This is the
-same proxy gap that causes the empty-reply truncation above, seen from the other
-side. `LiteLLM` 1.100.1 was tested with `merge_reasoning_content_in_choices`,
-with the `deepseek/` provider in place of `openai/`, and with every
-`thinking`-parameter variant (`budget_tokens` 1024–6000, `reasoning_effort`) —
-all accepted, none forwarded. ZimZilla's own code is endpoint-agnostic: where the
-block arrives it is shown, and where it does not, nothing changes.
+So on OpenRouter you watch it think. On Token Juice's `deepseek-v4.1-flash`
+through that proxy you would not, and that is not something the harness could
+fix from its side: the thinking is real and is *billed* — it just never crossed
+the proxy's Anthropic bridge. This is the same proxy gap that causes the
+empty-reply truncation above, seen from the other side. `LiteLLM` 1.100.1 was
+tested with `merge_reasoning_content_in_choices`, with the `deepseek/` provider
+in place of `openai/`, and with every `thinking`-parameter variant
+(`budget_tokens` 1024–6000, `reasoning_effort`) — all accepted, none forwarded.
+
+**That route has no proxy now.** Token Juice is reached over Chat Completions
+directly, and the native transport forwards `reasoning_content` like any other
+delta — so the measurement above is history, not a current limitation. It is
+also why the proxy is gone rather than merely bypassed: a bridge that silently
+eats a paid-for reasoning block is not one to keep around.
 
 ### Why a long turn used to just stop
 
@@ -634,7 +639,7 @@ up:
 | Source | Endpoint | Key | How it starts |
 |---|---|---|---|
 | **Logfare** | `:4001` | yours | the bundled proxy — the default, all chat models |
-| **Token Juice** | `:4000` | discovered | direct (proxy on `:4000` if asked) — under construction |
+| **Token Juice** | `api.tokenjuice.ai` | yours | direct, no proxy — one model, Chat Completions |
 | **IteraCompute** | `:4002` | yours | direct (proxy on `:4002` if asked) — free Qwen tier |
 | **InfronAI** | `:4003` | yours | direct (proxy on `:4003` if asked) — free tier, $5 balance required |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
@@ -644,14 +649,16 @@ up:
 | **BeatAPI** | `direct.beatapi.io` | yours | hosted — nothing to start |
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 
-Switch with `/zim-logfare`, `/zim-iteracompute`, `/zim-infronai`,
-`/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`,
-`/zim-beatapi` or `/zim-antseed`; the choice is remembered, so the next launch
-comes back to the one that was working.
+Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
+`/zim-infronai`, `/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`,
+`/zim-aihubmix`, `/zim-beatapi` or `/zim-antseed`; the choice is remembered, so
+the next launch comes back to the one that was working.
 
-The four routes with a local proxy are reached **directly** by default — the
+The three routes with a local proxy are reached **directly** by default — the
 proxy is a translation shim, and the harness speaks both protocols now. Add
-`proxy` to go through it: `/zim-iteracompute proxy`.
+`proxy` to go through it: `/zim-iteracompute proxy`. Token Juice has no proxy to
+ask for: its upstream serves Chat Completions itself, so the route is direct and
+`/zim-tokenjuice` says so if you pass `proxy` anyway.
 
 Logfare is a full switch target: it serves every chat model on Logfare's
 catalog, and `/logfare-models` shows what is up right now. You need your own key
@@ -660,9 +667,14 @@ committed to a public repo is a budget anyone can spend. `/logfare-api-setup
 <key>` stores it and shows the last four characters of whichever key is in
 force, so it is obvious which credential a turn will use. On a direct endpoint the new key is live immediately; through the
 local proxy the proxy is restarted, because that is where LiteLLM reads the key
-from at start-up. Token Juice is the one route still
-listed by `/zim-source` as **under construction**, because its upstream keeps
-renaming its model id; the reason prints in full, and the route stays visible.
+from at start-up.
+
+Token Juice is a direct route and nothing else: `/zim-source` lists it with
+`direct` where the others show a port, because there is no proxy to report on.
+Its whole catalog is one model, `deepseek-ai/DeepSeek-V4.1-Flash-1017`, and
+every switch re-reads that catalog — the upstream rotates the snapshot suffix,
+and a retired id is replaced with the one it is serving rather than 404ing on
+the first turn.
 
 ### Two wire protocols, and skipping the proxy
 
@@ -681,6 +693,9 @@ proxy's own config for the upstream URL and model ids and connects there, and
 the same happens at launch, so a session started on `:4002` moves to
 `api.iteracompute.com/v1` before the first turn. `proxy` after the command
 brings the hop back for the times it earns its keep: `/zim-iteracompute proxy`.
+Token Juice never had a hop to bring back: its route is declared in
+`sources.py`, there is no proxy file in the tree, and `/zim-tokenjuice` always
+lands on `api.tokenjuice.ai/v1`.
 
 Point at any other Chat Completions host with:
 
@@ -1231,7 +1246,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/shodan-search <query>` | run any Shodan query verbatim — then analyse |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
 | `/zim-logfare` | switch upstream to Logfare (`:4001`) — bundled proxy, all chat models |
-| `/zim-tokenjuice` | Token Juice (`:4000`) — under construction |
+| `/zim-tokenjuice` | switch upstream to Token Juice — direct, no proxy |
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |

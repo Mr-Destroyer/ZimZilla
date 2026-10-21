@@ -1,20 +1,25 @@
-"""Upstream "sources" — the LiteLLM proxies ZimZilla can talk through.
+"""Upstream "sources" — where ZimZilla can point a session, and how.
 
 ZimZilla speaks the Anthropic Messages protocol to whatever ``ANTHROPIC_BASE_URL``
 points at. That is the default, not the only option: an endpoint that serves
 Chat Completions can be reached directly instead, with no proxy in between —
 see :mod:`zimzilla.openai_compat`, ``/openai-endpoint`` and the ``protocol``
-field on :class:`zimzilla.config.Config`. A source is still the *proxy* route —
-port, profile, service — because that is what is discoverable and startable; its
-direct route is not a second Source but a property read out of the same config
-(:func:`direct_route`), and switching prefers it.
+field on :class:`zimzilla.config.Config`. A source is the *route*: port,
+profile, service for one that runs a local proxy; a profile alone for one that
+is reached directly. A proxy route's direct endpoint is not a second Source but
+a property read out of the same config (:func:`direct_route`), and switching
+prefers it.
 
 Three local LiteLLM proxies front three different upstreams:
 
     logfare       :4001  →  logfare.ai         (the default, shipped with the repo)
-    tokenjuice    :4000  →  api.tokenjuice.ai  (deepseek-claude's endpoint)
     iteracompute  :4002  →  api.iteracompute.com (OpenAI-only; free Qwen tier)
     infronai      :4003  →  llm.onerouter.pro  (OpenAI-only; free model tier)
+
+Token Juice has no proxy at all: its upstream serves Chat Completions, the
+harness speaks it, so the route is declared here and reached directly —
+``api.tokenjuice.ai/v1``, keyed by the same profile ``/zim-tokenjuice`` always
+read.
 
 Logfare is a full route, not just the starting point: the shipped profile makes
 a fresh clone run with no signup, and ``/zim-logfare`` switches back to it at
@@ -31,8 +36,9 @@ InfronAI does serve Messages natively, but its free models are listed
 Its free tier needs a funded balance ($5) and allows 1000 requests per day
 across all free models; ``/infronai-api-setup`` stores the key.
 
-Token Juice stays parked (see UNDER_CONSTRUCTION) because its upstream keeps
-renaming its model id.
+Token Juice used to be the fourth proxy. It is now a declared direct route
+(see ``TOKENJUICE_DIRECT`` and ``DIRECT_ONLY``): the upstream answers Chat
+Completions itself, so there is nothing to translate and nothing to start.
 
 The other upstreams (TokenHarbour, OpenRouter, UnoRouter, AIHubMix, BeatAPI,
 AntSeed) are remote or operator-started, and live in their own modules; this one
@@ -71,20 +77,34 @@ class Source:
 
     key: str            # "logfare" | "tokenjuice" | "iteracompute"
     label: str          # human name, for the transcript
-    port: int
+    port: int           # 0 for a source with no proxy
     profile: Path       # shell profile to source (holds the key; mode 600)
-    service: Path       # start-litellm.sh-compatible manager
-    config: Path        # the litellm yaml
     model: str          # default model name for this upstream
     root: Path          # checkout the service manager is started from
+    service: Path | None = None    # start-litellm.sh-compatible manager
+    config: Path | None = None     # the litellm yaml
     models: tuple[str, ...] = ()   # declared fallback list; the live one is fetched
+    #: The route, when it is declared here rather than read from a proxy config.
+    #: Set for a source that has no proxy at all — see DIRECT_ONLY.
+    direct: "DirectRoute | None" = None
     #: Non-None while the route is deliberately not usable — the reason to print.
     #: See UNDER_CONSTRUCTION.
     under_construction: str | None = None
 
     @property
     def base_url(self) -> str:
+        """The proxy's address. Meaningless for a source that has no proxy."""
         return f"http://localhost:{self.port}"
+
+    @property
+    def is_direct_only(self) -> bool:
+        """Whether this route is reached directly and *only* directly.
+
+        True for a source whose upstream speaks Chat Completions and which has
+        no LiteLLM proxy in front of it: there is no port to start, no health
+        check to make, and no `proxy` argument that could do anything.
+        """
+        return self.service is None and self.direct is not None
 
 
 @dataclass(frozen=True)
@@ -102,6 +122,9 @@ class DirectRoute:
     started with, so there is one copy of the truth. A model added there is
     reachable directly with no second edit, and an alias that points somewhere
     unexpected is forwarded as written rather than guessed at.
+
+    A source with no proxy has no config to read, so its route is declared in
+    this module instead (:data:`TOKENJUICE_DIRECT`) — same shape, same rules.
     """
 
     base_url: str
@@ -111,11 +134,34 @@ class DirectRoute:
     def upstream_model(self, alias: str) -> str:
         """The id to send upstream for *alias* — itself when it is unmapped.
 
-        Token Juice is why this exists: the proxy serves it as
+        Token Juice is why this exists: the proxy served it as
         ``deepseek-v4.1-flash`` while the upstream only answers to
         ``deepseek-ai/DeepSeek-V4.1-Flash-1017``.
         """
         return self.models.get(alias, alias)
+
+
+#: Token Juice's route, declared rather than read from a proxy config.
+#:
+#: The upstream serves Chat Completions itself, so there is no LiteLLM hop to
+#: take the base URL from. The alias is kept because the profile written by an
+#: older install still names it, and because it is the stable half of the id:
+#: the upstream rotates the ``-1017`` snapshot suffix, and a switch re-reads the
+#: live catalog and replaces a retired name rather than 404ing on it.
+TOKENJUICE_DIRECT = DirectRoute(
+    base_url="https://api.tokenjuice.ai/v1",
+    models={"deepseek-v4.1-flash": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
+)
+
+#: Sources with no proxy at all. Their credential profile is the only file that
+#: has to exist; service and config are absent by design, and ``direct`` says
+#: where they go.
+DIRECT_ONLY: frozenset[str] = frozenset({"tokenjuice"})
+
+#: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
+DECLARED_ROUTES: dict[str, DirectRoute] = {
+    "tokenjuice": TOKENJUICE_DIRECT,
+}
 
 
 #: Parsed routes, keyed by config path and mtime so an edited config is re-read.
@@ -129,8 +175,15 @@ def direct_route(src: Source | None) -> DirectRoute | None:
     ``api_base`` (AntSeed's local buyer has no upstream URL at all), or whose
     deployments are not ``openai/`` providers. In each of those the proxy is the
     only route, and the caller keeps using it.
+
+    A direct-only source has no config: its route is declared, and that is what
+    comes back first.
     """
-    if src is None or yaml is None:
+    if src is None:
+        return None
+    if src.direct is not None:
+        return src.direct
+    if src.config is None or yaml is None:
         return None
     try:
         mtime = src.config.stat().st_mtime
@@ -220,12 +273,11 @@ def _host_of(url: str) -> str:
 # at all. Its budget is per account and exhausting it answers 429 with a
 # Retry-After; that is a runtime condition to report, not a reason to hide the
 # route.
-UNDER_CONSTRUCTION: dict[str, str] = {
-    "tokenjuice": (
-        "the upstream keeps renaming its model id, and the last rename took "
-        "the alias with it"
-    ),
-}
+#
+# Nothing is parked right now. Token Juice was the only entry, and it is a
+# working direct route again; the mechanism is kept because parking is how a
+# route is turned off without also hiding that it exists.
+UNDER_CONSTRUCTION: dict[str, str] = {}
 
 
 # The *fallback* list for each upstream — what to show when the live catalog
@@ -247,13 +299,6 @@ UNDER_CONSTRUCTION: dict[str, str] = {
 # Logfare's catalog also lists image/TTS/STT models (flux-*, sdxl-lightning,
 # whisper-large-v3-turbo, aura-2-en, nova-3, phoenix-1.0, lucid-origin); they
 # reject chat completions, so they are omitted here.
-#
-# Token Juice is deliberately a single entry: its whole catalog is one model,
-# exposed upstream as a snapshot-suffixed `deepseek-ai/DeepSeek-V4.1-Flash-<n>`
-# id and aliased to `deepseek-v4.1-flash` by its litellm config. It publishes no
-# status API, so this list is all there is for it. The alias is stable; the
-# upstream id is not — packaging/tokenjuice/litellm-config.yaml is the only
-# place that name belongs.
 LOGFARE_MODELS: tuple[str, ...] = (
     "deepseek-v4.1-flash",
     "deepseek-v4-pro-0813",
@@ -266,8 +311,12 @@ LOGFARE_MODELS: tuple[str, ...] = (
     "qwen-3.8-27b",
 )
 
+#: Token Juice's whole catalog is one model, and it is reached directly, so the
+#: entry is the id the upstream itself serves — snapshot suffix included,
+#: because that is what goes on the wire. It publishes no status API; a switch
+#: probes the Models route and ``models_for`` prefers what that found.
 TOKENJUICE_MODELS: tuple[str, ...] = (
-    "deepseek-v4.1-flash",
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
 )
 
 #: IteraCompute's declared fallback. Its real catalog is fetched from the public
@@ -332,6 +381,12 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import openai_compat as oa_mod
         probed = oa_mod.cached_ids(base_url)
         return probed or None
+    if key in DIRECT_ONLY:
+        # Declared, not fetched — but a switch probes the Models route, and what
+        # the upstream actually answered is better than the declared fallback.
+        from . import openai_compat as oa_mod
+        probed = oa_mod.cached_ids(DECLARED_ROUTES[key].base_url)
+        return tuple(probed) if probed else (MODELS_BY_KEY.get(key) or None)
     if key == "logfare":
         from . import logfare as lf_mod
         cached = lf_mod.cached_ids()
@@ -530,10 +585,10 @@ def _service_candidates(key: str) -> list[Path]:
             ZIMZILLA_HOME / "infronai" / "start-litellm.sh",
             DEFAULT_ROOT / "packaging" / "infronai" / "start-litellm.sh",
         ]
-    return [
-        ZIMZILLA_HOME / "tokenjuice" / "start-litellm.sh",
-        DEFAULT_HOME / "start-litellm.sh",
-    ]
+    # Token Juice has no proxy, so there is no manager to find. A copy left in
+    # ~/.zimzilla by an older install is deliberately ignored rather than
+    # started: the direct route is the only one that exists now.
+    return []
 
 
 def _config_candidates(key: str) -> list[Path]:
@@ -552,10 +607,9 @@ def _config_candidates(key: str) -> list[Path]:
             ZIMZILLA_HOME / "infronai" / "litellm-config.yaml",
             DEFAULT_ROOT / "packaging" / "infronai" / "litellm-config.yaml",
         ]
-    return [
-        ZIMZILLA_HOME / "tokenjuice" / "litellm-config.yaml",
-        DEFAULT_HOME / "litellm-config.yaml",
-    ]
+    # Same reasoning as _service_candidates: Token Juice's route is declared in
+    # DECLARED_ROUTES, not read from a proxy config.
+    return []
 
 
 def _profile_candidates(key: str) -> list[Path]:
@@ -586,23 +640,35 @@ def _build(key: str, label: str, port: int, model: str) -> Source | None:
     profile = _first(_profile_candidates(key))
     service = _first(_service_candidates(key))
     config = _first(_config_candidates(key))
-    if profile is None or service is None or config is None:
+    if profile is None:
+        return None
+    # A direct-only source needs no proxy files; every other one needs all
+    # three, because the proxy is what the route *is*.
+    if key not in DIRECT_ONLY and (service is None or config is None):
         return None
     return Source(
         key=key, label=label, port=port, profile=profile,
         service=service, config=config, model=model, root=DEFAULT_ROOT,
         models=MODELS_BY_KEY.get(key, ()),
+        direct=DECLARED_ROUTES.get(key),
         under_construction=UNDER_CONSTRUCTION.get(key),
     )
 
 
 def discover() -> dict[str, Source]:
-    """Every source whose profile, service and config are actually present."""
+    """Every source this machine can switch to, keyed by name.
+
+    A proxy route is present when its profile, service and config are all
+    there; a direct-only one (Token Juice) when its profile is.
+    """
     found: dict[str, Source] = {}
     logfare = _build("logfare", "Logfare", 4001, "deepseek-v4.1-flash")
     if logfare:
         found["logfare"] = logfare
-    tokenjuice = _build("tokenjuice", "Token Juice", 4000, "deepseek-v4.1-flash")
+    # No proxy and no port: the profile is the whole install, and its absence
+    # means "no key", which is a route that cannot answer rather than one that
+    # is broken.
+    tokenjuice = _build("tokenjuice", "Token Juice", 0, "deepseek-v4.1-flash")
     if tokenjuice:
         found["tokenjuice"] = tokenjuice
     # The service and config ship in the tree, so this is discovered on every
@@ -622,6 +688,10 @@ def discover() -> dict[str, Source]:
 
 def source_for_port(port: int) -> str | None:
     """Which source key owns a given proxy port, if any."""
+    if port <= 0:
+        # A direct-only source has no port to match on — it is identified by
+        # the host of its declared route instead (see ``active_key``).
+        return None
     for key, src in discover().items():
         if src.port == port:
             return key
@@ -652,7 +722,7 @@ def switchable(exclude: str | None = None) -> list[str]:
     out: list[str] = []
     for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
                 "tokenharbour", "infronai", "iteracompute", "antseed",
-                "logfare"):
+                "tokenjuice", "logfare"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -697,68 +767,46 @@ def _gateway_module(key: str):
     }.get(key)
 
 
-#: Memo for ``_upstream_id``: (config path, mtime) -> upstream model id. The
-#: config is read on the render path, so it is parsed once per change rather
-#: than once per frame.
-_UPSTREAM_ID_CACHE: dict[tuple[str, float], str] = {}
-
-
-def _upstream_id(config: Path) -> str:
-    """The upstream model id a LiteLLM config forwards to, or ``""``.
-
-    Read from the config rather than declared here, for the same reason the
-    alias is: that file is the one place the upstream name belongs, and the
-    snapshot suffix in it rotates. Deriving the display name from it means the
-    suffix cannot go stale in a second location.
-    """
-    try:
-        mtime = config.stat().st_mtime
-    except OSError:
-        return ""
-    key = (str(config), mtime)
-    if key in _UPSTREAM_ID_CACHE:
-        return _UPSTREAM_ID_CACHE[key]
-    try:
-        text = config.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    m = re.search(r"^\s*model:\s*openai/(\S+)", text, re.MULTILINE)
-    found = m.group(1) if m else ""
-    _UPSTREAM_ID_CACHE[key] = found
-    return found
-
-
 def display_model(base_url: str, model: str) -> str:
     """The model name to SHOW for *model* on this endpoint.
 
     The name sent and the name worth showing are not always the same string.
-    Token Juice's LiteLLM config registers a stable alias
-    (``deepseek-v4.1-flash``) and forwards it upstream as a snapshot-suffixed id
-    (``deepseek-ai/DeepSeek-V4.1-Flash-1017``). The alias is what must go on the
-    wire — it is the only name the proxy knows — but it is also the one name
-    that does not say which snapshot is actually answering.
+    Token Juice's upstream serves ``deepseek-ai/DeepSeek-V4.1-Flash-1017`` — a
+    snapshot-suffixed id whose suffix rotates — while the stable alias
+    ``deepseek-v4.1-flash`` is what a profile written against the old proxy
+    still names. Either can be the current model, and neither is the name worth
+    reading: the alias hides which snapshot is answering, and the full id buries
+    it in a vendor prefix.
 
-    So the display name is the alias with the upstream snapshot suffix
-    appended, lifted from the config rather than hardcoded: the suffix rotates,
-    and a literal here would be wrong the next time it does.
+    So the display name is the alias with the upstream snapshot suffix appended
+    (``deepseek-v4.1-flash-1017``), derived from the route's own alias map
+    rather than hardcoded: the suffix rotates, and a literal here would be
+    wrong the next time it does.
 
-    Falls back to *model* unchanged when the endpoint is not Token Juice, the
-    config cannot be read, or the upstream id is not simply the alias plus a
-    suffix — a different model entirely is shown as-is rather than mangled.
-    Never fetches: this is called on the render path.
+    Falls back to *model* unchanged when the endpoint is not a known source, the
+    name is not part of an alias pair, or the upstream id is not simply the
+    alias plus a suffix — a different model entirely is shown as-is rather than
+    mangled. Never fetches: this is called on the render path.
     """
-    if active_key(base_url) != "tokenjuice":
+    key = active_key(base_url)
+    if key is None:
         return model
-    src = discover().get("tokenjuice")
-    if src is None:
+    route = direct_route(discover().get(key))
+    if route is None:
         return model
-    upstream = _upstream_id(src.config)
-    if not upstream:
-        return model
-    # `deepseek-ai/DeepSeek-V4.1-Flash-1017` -> `deepseek-v4.1-flash-1017`
-    leaf = upstream.rsplit("/", 1)[-1].lower()
-    if leaf.startswith(model) and leaf != model:
-        return leaf
+    upstream = route.models.get(model)
+    if upstream is None:
+        # `model` may already be the upstream id — that is what a direct switch
+        # stores — so look for the alias it belongs to instead.
+        upstream = model
+        aliases = [a for a, u in route.models.items() if u == model]
+    else:
+        aliases = [model]
+    for alias in aliases:
+        # `deepseek-ai/DeepSeek-V4.1-Flash-1017` -> `deepseek-v4.1-flash-1017`
+        leaf = upstream.rsplit("/", 1)[-1].lower()
+        if leaf.startswith(alias) and leaf != alias:
+            return leaf
     return model
 
 
@@ -961,6 +1009,10 @@ def _run_service(src: Source, action: str, timeout: float) -> tuple[bool, str]:
 
 def start_proxy(src: Source, timeout: float = 180.0) -> tuple[bool, str]:
     """Start the source's proxy if it is not already answering. Blocking."""
+    if src.is_direct_only or src.service is None:
+        # Nothing to start: the upstream is reached directly, and a key saved
+        # to the profile is live on the next request.
+        return False, f"{src.label} has no local proxy — it is reached directly"
     if proxy_healthy(src.port):
         return True, "already running"
     if not src.service.is_file():
@@ -968,7 +1020,7 @@ def start_proxy(src: Source, timeout: float = 180.0) -> tuple[bool, str]:
 
     # Do not wrap this in flock. The launcher already serialises its own
     # cold-start, and wrapping here is how a leaked lock (LiteLLM inheriting
-    # the launcher's lock fd) made /zim-tokenjuice hang until timeout while
+    # the launcher's lock fd) made the in-TUI switch hang until timeout while
     # a manual start of the same script finished in seconds. Two sources
     # live on different ports, so they can come up independently.
     return _run_service(src, "start", timeout)
@@ -983,6 +1035,8 @@ def restart_proxy(src: Source, timeout: float = 180.0) -> tuple[bool, str]:
     client, and the upstream key it sends. Same no-flock reasoning as
     :func:`start_proxy`. Blocking; callers run it off the UI thread.
     """
+    if src.is_direct_only or src.service is None:
+        return False, f"{src.label} has no local proxy — it is reached directly"
     if not src.service.is_file():
         return False, f"no service manager at {src.service}"
     return _run_service(src, "restart", timeout)

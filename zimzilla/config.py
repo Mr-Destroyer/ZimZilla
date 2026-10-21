@@ -319,12 +319,12 @@ class Config:
     def display_model(self) -> str:
         """The model name to SHOW, which is not always the one sent.
 
-        ``model`` is the alias that goes on the wire — the only name the local
-        LiteLLM proxy registers, so it is what every request must carry. It is
-        not the name worth reading: Token Juice forwards that alias upstream as
-        a snapshot-suffixed id, and showing the alias hides which snapshot is
-        answering, which is the one fact that explains a 404 once the suffix
-        rotates again.
+        ``model`` is the id that goes on the wire. It is not always the name
+        worth reading: Token Juice's upstream answers to a snapshot-suffixed id
+        (``deepseek-ai/DeepSeek-V4.1-Flash-1017``) whose suffix rotates, and the
+        stable alias a profile may still name hides which snapshot is
+        answering. The route's own alias map is what says the two are the same
+        model.
 
         Derived rather than stored, so switching route (``/zim-logfare``,
         ``/zim-tokenjuice``, a hosted gateway) or a rotated suffix is reflected

@@ -1,9 +1,9 @@
 """TokenHarbour — a hosted Anthropic-protocol gateway, as a ZimZilla source.
 
-TokenHarbour is not a local LiteLLM proxy like Logfare and Token Juice: it is a
-remote endpoint (``https://tokenharbor.ai``) that speaks the same Anthropic
-Messages protocol, so ZimZilla can talk to it with no proxy in between. Two
-things make it different enough to live in its own module:
+TokenHarbour is not a local LiteLLM proxy like Logfare: it is a remote endpoint
+(``https://tokenharbor.ai``) that speaks the same Anthropic Messages protocol,
+so ZimZilla can talk to it with no proxy in between. Two things make it
+different enough to live in its own module:
 
 * **The credential is set, not discovered.** There is no shipped profile — the
   operator supplies their own key with ``/tokenharbour-api-setup``. It is kept

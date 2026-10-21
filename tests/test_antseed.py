@@ -636,14 +636,17 @@ def test_is_antseed_by_port_not_name() -> None:
 
 
 def test_active_key_does_not_confuse_sources(tmp: Path) -> None:
-    """sources.active_key must route each port to the right provider.
+    """sources.active_key must route each endpoint to the right provider.
 
-    ``active_key`` resolves a port through ``discover()``, which only returns a
-    source whose profile, service and config are all present on disk. The two
-    LiteLLM proxies are therefore laid out in the temp home rather than assumed
-    from the machine running the test: without that, the result depends on
-    whether the operator happens to have Token Juice installed, and a missing
-    install reads as a routing bug in the code under test.
+    ``active_key`` resolves a proxy port through ``discover()``, which only
+    returns a source whose files are present on disk. Logfare's proxy is
+    therefore laid out in the temp home rather than assumed from the machine
+    running the test: without that, the result depends on whether the operator
+    happens to have it installed, and a missing install reads as a routing bug
+    in the code under test.
+
+    Token Juice is the other shape: no proxy and no port, so it is recognised
+    by the host of its declared upstream instead.
     """
     from unittest import mock
 
@@ -651,11 +654,14 @@ def test_active_key_does_not_confuse_sources(tmp: Path) -> None:
 
     home = tmp / "active-key-home"
     zhome = tmp / "active-key-zimzilla"
-    for route in ("logfare", "tokenjuice"):
-        for name in ("source", "start-litellm.sh", "litellm-config.yaml"):
-            path = zhome / route / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# test\n", encoding="utf-8")
+    for name in ("source", "start-litellm.sh", "litellm-config.yaml"):
+        path = zhome / "logfare" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# test\n", encoding="utf-8")
+    # A direct-only source needs nothing but its profile.
+    tj = zhome / "tokenjuice" / "source"
+    tj.parent.mkdir(parents=True, exist_ok=True)
+    tj.write_text("# test\n", encoding="utf-8")
 
     with mock.patch.object(s, "DEFAULT_HOME", home), \
          mock.patch.object(s, "ZIMZILLA_HOME", zhome):
@@ -663,8 +669,11 @@ def test_active_key_does_not_confuse_sources(tmp: Path) -> None:
               s.active_key("http://localhost:8377") == "antseed")
         check("sources: 4001 is logfare",
               s.active_key("http://localhost:4001") == "logfare")
-        check("sources: 4000 is tokenjuice",
-              s.active_key("http://localhost:4000") == "tokenjuice")
+        check("sources: tokenjuice is identified by its upstream host",
+              s.active_key("https://api.tokenjuice.ai/v1") == "tokenjuice")
+        check("sources: 4000 is no longer anyone's proxy",
+              s.active_key("http://localhost:4000") is None,
+              str(s.active_key("http://localhost:4000")))
     check("sources: antseed is a builtin key, so a selection survives",
           "antseed" in s.BUILTIN_KEYS)
     check("sources: models_for returns None on a cold cache",
