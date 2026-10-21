@@ -147,7 +147,7 @@ waiting for a ZimZilla release.
 
 Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-tokenharbour`,
 `/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` and
-`/zim-antseed`, each with your own credential or none at all.
+`/zim-antseed`, each with your own credential, a shared one, or none at all.
 
 To configure setup yourself later, or to install somewhere other than the
 default:
@@ -639,7 +639,7 @@ up:
 | Source | Endpoint | Key | How it starts |
 |---|---|---|---|
 | **Logfare** | `:4001` | yours | the bundled proxy — the default, all chat models |
-| **Token Juice** | `api.tokenjuice.ai` | yours | direct, no proxy — one model, Chat Completions |
+| **Token Juice** | `api.tokenjuice.ai` | **shared** — ships, no signup | direct, no proxy — one model, Chat Completions |
 | **IteraCompute** | `:4002` | yours | direct (proxy on `:4002` if asked) — free Qwen tier |
 | **InfronAI** | `:4003` | yours | direct (proxy on `:4003` if asked) — free tier, $5 balance required |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
@@ -675,6 +675,16 @@ Its whole catalog is one model, `deepseek-ai/DeepSeek-V4.1-Flash-1017`, and
 every switch re-reads that catalog — the upstream rotates the snapshot suffix,
 and a retired id is replaced with the one it is serving rather than 404ing on
 the first turn.
+
+It is also the one route that needs nothing from you. A **shared key ships in
+the tree** (`packaging/tokenjuice/source`), so `/zim-tokenjuice` works on a
+fresh clone with no signup and no `/zim-tokenjuice <key>` on first run. Every
+install spends the same key — treat it as public. Your own key still wins:
+`/zim-tokenjuice <tj_ key>` writes it to `~/.zimzilla/tokenjuice/source` (mode
+600), which is read before the shipped copy, so replacing the shared key
+locally never touches the repository. If the shared key is ever rotated
+upstream, a `401` says so and names that command rather than reporting a
+generic auth failure.
 
 ### Two wire protocols, and skipping the proxy
 
