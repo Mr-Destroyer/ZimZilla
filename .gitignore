@@ -11,11 +11,13 @@ dist/
 .venv/
 venv/
 
-# Credential profiles. Token Juice's is personal and must never be committed;
-# its `*.example` beside it is the committable template. Logfare's is the
-# deliberate exception — a shared key shipped so a fresh clone can start, and
-# re-included below — because the whole point of it is that every new install
-# has one.
+# Credential profiles. A per-user profile is personal and must never be
+# committed; its `*.example` beside it is the committable template. Two are
+# deliberate exceptions — a shared key shipped so a fresh clone can start:
+# Logfare's (a template with a placeholder, because its key is budgeted) and
+# Token Juice's (a real shared key, because the route is meant to work with no
+# signup at all).
 packaging/*/source
 !packaging/logfare/source
+!packaging/tokenjuice/source
 

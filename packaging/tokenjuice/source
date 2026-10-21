@@ -1,0 +1,27 @@
+# ZimZilla — Token Juice profile (shared).
+#
+# This is the SHARED key, deliberately committed. Unlike Logfare's template,
+# it carries a working token because Token Juice is meant to work on a fresh
+# clone with no signup. Everyone using ZimZilla spends the same key, and the
+# upstream has no per-user budget, so treat it as public.
+#
+# Your own key still wins: write it to ~/.zimzilla/tokenjuice/source (mode
+# 600) with `/zim-tokenjuice <tj_ key>`, or export ANTHROPIC_AUTH_TOKEN.
+# That file is read before this one, so replacing the shared key locally does
+# not touch the repository.
+#
+# Token Juice serves Chat Completions itself, so there is no proxy on this
+# route: the URL below is the upstream, not a localhost port.
+
+export ANTHROPIC_BASE_URL="https://api.tokenjuice.ai/v1"
+export ANTHROPIC_AUTH_TOKEN="tj_QKaFlDpyNV5VeSsuwpGeaNvM58POZ1lOe7ZBHjZpW5k"
+# The id the upstream serves. The snapshot suffix rotates; /zim-tokenjuice
+# re-reads the live catalog on every switch and moves to the current one.
+export ANTHROPIC_MODEL="deepseek-ai/DeepSeek-V4.1-Flash-1017"
+
+# Load-bearing: an empty string keeps ANTHROPIC_AUTH_TOKEN authoritative and
+# clears any real API key inherited from the shell.
+export ANTHROPIC_API_KEY=""
+
+# Token Juice serves exactly one chat model, so there is nothing to alias.
+export MODEL_DEFAULT="deepseek-ai/DeepSeek-V4.1-Flash-1017"

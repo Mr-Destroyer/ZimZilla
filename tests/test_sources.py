@@ -14,6 +14,7 @@ script finished in seconds.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -109,6 +110,67 @@ def test_tokenjuice_falls_back_to_home_layout() -> None:
               f"{tj.is_direct_only} {tj.port}")
 
 
+def test_tokenjuice_ships_a_shared_key() -> None:
+    """The route works on a fresh clone: the key ships in the tree.
+
+    That is the whole point of the shared profile — no signup, and no
+    ``/zim-tokenjuice <key>`` on first run. It is committed on purpose, so the
+    checks are that it is *there*, that gitignore does not swallow it (an
+    ignored file sits in one checkout and vanishes from everyone else's clone),
+    and that it carries a real ``tj_`` key rather than the template's
+    placeholder.
+    """
+    shipped = ROOT / "packaging" / "tokenjuice" / "source"
+    check("tokenjuice: the shared profile ships in the tree",
+          shipped.is_file(), str(shipped))
+    if not shipped.is_file():
+        return
+    text = shipped.read_text(encoding="utf-8")
+    check("tokenjuice: the shared profile carries a tj_ token",
+          'ANTHROPIC_AUTH_TOKEN="tj_' in text)
+    check("tokenjuice: the token is not the template placeholder",
+          "tj_REPLACE_ME" not in text)
+    check("tokenjuice: the shared profile points at the upstream",
+          'ANTHROPIC_BASE_URL="https://api.tokenjuice.ai/v1"' in text)
+
+    # Committed, not merely present. `check-ignore` exits 1 when the path is
+    # not ignored, which is the answer wanted here. Skipped where git or a
+    # checkout is absent: that is about the repository, not the code.
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "check-ignore", "-q",
+             "packaging/tokenjuice/source"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        check("tokenjuice: gitignore does not swallow the shared profile", True,
+              "skipped (no git)")
+    else:
+        check("tokenjuice: gitignore does not swallow the shared profile",
+              proc.returncode == 1, f"check-ignore exit {proc.returncode}")
+
+    # And it is discovered with no per-user profile anywhere — the fresh-clone
+    # case, where the tree copy is the only one there is.
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td) / "home"
+        zhome = Path(td) / "zimzilla"
+        home.mkdir()
+        zhome.mkdir()
+        with mock.patch.object(sources, "DEFAULT_HOME", home), \
+             mock.patch.object(sources, "ZIMZILLA_HOME", zhome):
+            found = sources.discover()
+        tj = found.get("tokenjuice")
+        check("tokenjuice: discovered with no profile of its own",
+              tj is not None, str(sorted(found)))
+        if tj is None:
+            return
+        check("tokenjuice: and the profile it found is the shared one",
+              tj.profile == shipped, str(tj.profile))
+        profile = sources.load_profile(tj)
+        check("tokenjuice: the shared profile parses to a usable key",
+              sources.is_tokenjuice_key(profile.get("ANTHROPIC_AUTH_TOKEN")),
+              str(sorted(profile)))
+
+
 def test_start_proxy_does_not_flock() -> None:
     with tempfile.TemporaryDirectory() as td:
         svc = _touch(Path(td) / "start-litellm.sh", 0o755)
@@ -199,8 +261,14 @@ def test_builtin_keys_survive_a_restart() -> None:
         # for a reason that has nothing to do with the code under test.
         empty_home = Path(td) / "home"
         empty_home.mkdir()
+        # The checkout is pinned away for the same reason: the shared Token
+        # Juice profile ships in the tree, so a real DEFAULT_ROOT would
+        # discover the route on any machine and make the same check vacuous.
+        empty_root = Path(td) / "root"
+        empty_root.mkdir()
         with mock.patch.object(sources, "ZIMZILLA_HOME", zhome), \
-             mock.patch.object(sources, "DEFAULT_HOME", empty_home):
+             mock.patch.object(sources, "DEFAULT_HOME", empty_home), \
+             mock.patch.object(sources, "DEFAULT_ROOT", empty_root):
             for key in ("tokenharbour", "openrouter"):
                 sources.set_current(key)
                 check(f"builtin: {key} survives a restart",
@@ -259,6 +327,12 @@ def test_logfare_is_a_switchable_route() -> None:
         zhome.mkdir()
         empty_home = Path(td) / "home"
         empty_home.mkdir()
+        # Same as above: the shared profile in the checkout would otherwise be
+        # found, and this check is about an *undiscovered* local source. Only
+        # the tokenjuice check is wrapped in it — logfare's own files live in
+        # DEFAULT_ROOT, so pinning it away would break the check above.
+        empty_root = Path(td) / "root"
+        empty_root.mkdir()
         with mock.patch.object(sources, "ZIMZILLA_HOME", zhome), \
              mock.patch.object(sources, "DEFAULT_HOME", empty_home):
             sources.set_current("logfare")
@@ -269,8 +343,9 @@ def test_logfare_is_a_switchable_route() -> None:
             # profile on this machine it is simply not discovered, and an
             # undiscovered local source is still dropped.
             sources.set_current("tokenjuice")
-            check("logfare: token juice without a profile is still dropped",
-                  sources.current_key() is None, str(sources.current_key()))
+            with mock.patch.object(sources, "DEFAULT_ROOT", empty_root):
+                check("logfare: token juice without a profile is still dropped",
+                      sources.current_key() is None, str(sources.current_key()))
 
     # The shipped profile is what makes the route work out of the box, so it
     # has to be in the tree — not gitignored, and carrying a usable key.
@@ -453,6 +528,7 @@ def test_switchable_names_only_what_would_work() -> None:
 def main() -> int:
     test_tokenjuice_prefers_installed_route()
     test_tokenjuice_falls_back_to_home_layout()
+    test_tokenjuice_ships_a_shared_key()
     test_start_proxy_does_not_flock()
     test_remote_gateways_are_identified_by_host()
     test_builtin_keys_survive_a_restart()

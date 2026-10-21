@@ -633,6 +633,11 @@ def _profile_candidates(key: str) -> list[Path]:
     return [
         ZIMZILLA_HOME / "tokenjuice" / "source",
         DEFAULT_HOME / "claude-source" / "deepseek-claude",
+        # The shared key, last. A personal profile or the older home layout
+        # always wins, so a shipped key can be replaced locally without a
+        # repository change — and every install gets a working route with no
+        # signup.
+        DEFAULT_ROOT / "packaging" / "tokenjuice" / "source",
     ]
 
 
@@ -964,6 +969,73 @@ def load_profile(src: Source) -> dict[str, str]:
     if lf_mod.is_placeholder_token(out.get("ANTHROPIC_AUTH_TOKEN", "")):
         out.pop("ANTHROPIC_AUTH_TOKEN", None)
     return out
+
+
+#: The profile `/zim-tokenjuice <key>` writes. The shared profile in the tree is
+#: a read-only fallback, so a personal key always goes to the operator's own
+#: file — never into the checkout.
+def tokenjuice_profile() -> Path:
+    return ZIMZILLA_HOME / "tokenjuice" / "source"
+
+
+def is_tokenjuice_key(value: str | None) -> bool:
+    """Whether *value* looks like a Token Juice key rather than a command arg.
+
+    A hint, not a gate: the upstream is the authority. It exists so
+    ``/zim-tokenjuice tj_…`` can be told apart from ``/zim-tokenjuice proxy``.
+    """
+    value = (value or "").strip()
+    return value.startswith("tj_") and 16 <= len(value) <= 200
+
+
+def save_token(token: str) -> Path:
+    """Write *token* to the operator's Token Juice profile, mode 600.
+
+    Rewritten rather than appended, so setting a key twice cannot leave two
+    ``ANTHROPIC_AUTH_TOKEN`` lines for the shell to disagree about. The shipped
+    profile is the template when this is the first key: it already carries the
+    upstream URL, the model id, and the empty ``ANTHROPIC_API_KEY`` that keeps
+    the token authoritative.
+    """
+    token = (token or "").strip()
+    profile = tokenjuice_profile()
+    lines: list[str] = []
+    for source in (profile, DEFAULT_ROOT / "packaging" / "tokenjuice" / "source"):
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+            break
+        except OSError:
+            continue
+    if not lines:
+        lines = [
+            "# ZimZilla — Token Juice profile (written by /zim-tokenjuice)",
+            "# Treat this file as a credential. Never commit it.",
+            "",
+            'export ANTHROPIC_BASE_URL="https://api.tokenjuice.ai/v1"',
+            'export ANTHROPIC_MODEL="deepseek-ai/DeepSeek-V4.1-Flash-1017"',
+            'export ANTHROPIC_API_KEY=""',
+        ]
+
+    out: list[str] = []
+    seen = False
+    for line in lines:
+        if line.strip().startswith("export ANTHROPIC_AUTH_TOKEN="):
+            out.append(f'export ANTHROPIC_AUTH_TOKEN="{token}"')
+            seen = True
+        else:
+            out.append(line)
+    if not seen:
+        out.append(f'export ANTHROPIC_AUTH_TOKEN="{token}"')
+    if not any(ln.strip().startswith("export ANTHROPIC_API_KEY=") for ln in out):
+        # Load-bearing: an empty string is what stops a real API key inherited
+        # from the shell from taking precedence over the token above.
+        out.append('export ANTHROPIC_API_KEY=""')
+
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(profile.parent, 0o700)
+    profile.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    os.chmod(profile, 0o600)
+    return profile
 
 
 def proxy_healthy(port: int, timeout: float = 2.0) -> bool:

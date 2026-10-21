@@ -2897,6 +2897,24 @@ class ZimZillaApp(App):
         found = sources_mod.discover()
         use_proxy = any(str(a).strip().lower() == "proxy" for a in (args or []))
 
+        # /zim-tokenjuice <tj_ key> replaces the key before switching. The
+        # shared profile in the tree makes the route work out of the box, but a
+        # rotated or mistyped key has to be replaceable without editing a file
+        # by hand — and the personal profile always wins over the shared one.
+        if key == "tokenjuice":
+            token_arg = next((str(a).strip() for a in (args or [])
+                              if sources_mod.is_tokenjuice_key(str(a))), None)
+            if token_arg:
+                try:
+                    path = sources_mod.save_token(token_arg)
+                except OSError as e:
+                    self._sys_line(
+                        f"could not save the Token Juice key: {e}", warn=True)
+                    return
+                self._sys_line(f"Token Juice key saved to {path} (mode 600)",
+                               ok=True)
+                found = sources_mod.discover()
+
         if key is None:
             # Bare /zim-source: just show what is available and which is live.
             active = sources_mod.active_key(self.cfg.base_url)
@@ -3213,6 +3231,15 @@ class ZimZillaApp(App):
                 f"{replaced} is no longer served by {src.label} — "
                 f"using {chosen}", warn=True)
         if not ok:
+            # A rejected key is not a reason to switch: the current route still
+            # works, and moving the session onto one that answers 401 would
+            # turn a failed check into a failed turn.
+            if "HTTP 401" in detail:
+                self._sys_line(
+                    f"{src.label} rejected the key (401) — staying on the "
+                    f"current route. Replace it with /zim-tokenjuice <tj_ key>.",
+                    warn=True)
+                return
             # An unreachable catalog is not evidence that the model was retired,
             # and refusing to switch on it would be worse than the 404 it is
             # trying to prevent.

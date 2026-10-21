@@ -161,6 +161,9 @@ if [[ "$_current_source" == "tokenjuice" ]]; then
   # ZimZilla was installed.
   _tj_profile="$ZIMZILLA_HOME/tokenjuice/source"
   [[ -r "$_tj_profile" ]] || _tj_profile="$HOME/claude-source/deepseek-claude"
+  # The shared profile ships in the tree, so a fresh clone has a working route
+  # with no signup. A personal profile or the older home layout always wins.
+  [[ -r "$_tj_profile" ]] || _tj_profile="$ZIMZILLA_ROOT/packaging/tokenjuice/source"
   # Only switch if a profile is actually there; otherwise fall through to
   # Logfare rather than dying fail-closed on a route that has no key.
   if [[ -r "$_tj_profile" ]]; then

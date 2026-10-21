@@ -200,12 +200,11 @@ sync_shipped "$SELF/packaging/logfare/start-litellm.sh"     "$SERVICE" 755
 # Completions itself, so there is no proxy to install, start or keep healthy:
 # ZimZilla talks to api.tokenjuice.ai directly and this file carries the key.
 #
-# No credential ships in the tree. `source` was committed here once, holding a
-# live key; that is a leak on a public repo and it is not coming back. The
-# route is seeded from, in order: an existing ~/.zimzilla profile (left alone),
-# a $ANTHROPIC_AUTH_TOKEN that already looks like a Token Juice key, or nothing
-# — and in that last case it is simply not discovered, so /zim-tokenjuice
-# reports the route as unavailable instead of failing later at request time.
+# A shared key ships in the tree (packaging/tokenjuice/source), so the route
+# works on a fresh clone with no signup. A personal profile always wins: an
+# existing ~/.zimzilla profile is left alone, and a $ANTHROPIC_AUTH_TOKEN that
+# already looks like a Token Juice key is written to one. That is what
+# `/zim-tokenjuice <key>` does in the TUI as well.
 TJ_DIR="$ZIMZILLA_HOME/tokenjuice"
 if [[ -d "$SELF/packaging/tokenjuice" ]]; then
   mkdir -p "$TJ_DIR"
@@ -260,8 +259,13 @@ if [[ -d "$SELF/packaging/tokenjuice" ]]; then
     )
     chmod 600 "$TJ_DIR/source"
     ok "tokenjuice profile written from \$ANTHROPIC_AUTH_TOKEN"
+  elif [[ -f "$SELF/packaging/tokenjuice/source" ]]; then
+    # Nothing to copy. The shared profile is read straight from the checkout,
+    # so a rotated key arrives with the next update instead of sitting frozen
+    # in a per-user file. A personal profile, if written later, wins over it.
+    ok "tokenjuice: using the shared profile shipped in the checkout"
   else
-    warn "no Token Juice credential — /zim-tokenjuice will not be discovered"
+    warn "no Token Juice credential — the shared profile is missing from this checkout"
     note "to enable it, write your tj_ key to:"
     note "  $TJ_DIR/source   (mode 600)"
     note "the format is in $TJ_DIR/source.example"

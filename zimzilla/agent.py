@@ -1435,6 +1435,12 @@ class Agent:
         import anthropic
 
         if isinstance(e, anthropic.AuthenticationError):
+            if base_url and "tokenjuice.ai" in base_url:
+                return (
+                    "Token Juice rejected the key (401). The shared key may have "
+                    "been rotated, or the profile still holds a placeholder — "
+                    "replace it with `/zim-tokenjuice <tj_ key>`."
+                )
             return ("authentication failed — check ANTHROPIC_AUTH_TOKEN / "
                     "ANTHROPIC_API_KEY (or OPENAI_API_KEY).")
         if isinstance(e, anthropic.NotFoundError):
