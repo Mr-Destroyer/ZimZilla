@@ -47,6 +47,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
     ("/zim-iteracompute", "switch upstream to IteraCompute (local proxy, free models)"),
     ("/zim-infronai", "switch upstream to InfronAI (local proxy, free models)"),
+    ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
     ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
@@ -61,6 +62,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/iteracompute-models", "the live free catalog — what is free and usable"),
     ("/infronai-api-setup", "store your InfronAI API key"),
     ("/infronai-models", "the live free catalog — what is free and usable"),
+    ("/nvidia-api-setup", "store your NVIDIA API key (free developer tier)"),
+    ("/nvidia-models", "the live catalog — what this harness can drive"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
     ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
     ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
@@ -361,7 +364,7 @@ class CompletionPopup(VerticalScroll):
                     # /models accepts.
                     "models": ["logfare", "tokenjuice", "tokenharbour",
                                "openrouter", "unorouter", "antseed", "aihubmix",
-                               "beatapi", "iteracompute", "infronai"],
+                               "beatapi", "iteracompute", "infronai", "nvidia"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

@@ -35,6 +35,7 @@ from .. import infronai as inf_mod
 from .. import iteracompute as ic_mod
 from .. import ldxhub as ldx_mod
 from .. import logfare as lf_mod
+from .. import nvidia as nv_mod
 from .. import opencode as oc_mod
 from .. import osint as osint_mod
 from .. import openrouter as or_mod
@@ -1217,6 +1218,11 @@ class ZimZillaApp(App):
         # lineup that changes over time.
         elif sources_mod.active_key(self.cfg.base_url) == "infronai":
             self._warm_infronai_catalog()
+        # And again for NVIDIA. Its catalog is public and every id is
+        # `provider/model`, so a cold cache would offer the five measured ids
+        # instead of the ~57 chat entries the endpoint actually lists.
+        elif sources_mod.active_key(self.cfg.base_url) == "nvidia":
+            self._warm_nvidia_catalog()
         # Replay anything the user typed while the boot animation was running.
         text = "".join(typed or [])
         inp.focus()
@@ -2010,6 +2016,7 @@ class ZimZillaApp(App):
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
         "iteracompute-api-setup", "iteracompute-models", "zim-iteracompute",
         "infronai-api-setup", "infronai-models", "zim-infronai",
+        "nvidia-api-setup", "nvidia-models", "zim-nvidia",
         "zim-antseed", "antseed-models",
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
@@ -2116,6 +2123,9 @@ class ZimZillaApp(App):
             "infronai-api-setup": lambda a: self._cmd_gateway_key(
                 "infronai", a),
             "infronai-models": lambda a: self._cmd_models(["infronai"]),
+            "zim-nvidia": lambda a: self._cmd_zim_source("nvidia", a),
+            "nvidia-api-setup": lambda a: self._cmd_gateway_key("nvidia", a),
+            "nvidia-models": lambda a: self._cmd_models(["nvidia"]),
             "protocol": lambda a: self._cmd_protocol(a),
             "openai-endpoint": lambda a: self._cmd_openai_endpoint(a),
             "antseed-models": lambda a: self._cmd_models(["antseed"]),
@@ -2159,6 +2169,7 @@ class ZimZillaApp(App):
             ("/zim-beatapi", "switch upstream to BeatAPI      (hosted, free models)"),
             ("/zim-iteracompute [proxy]", "switch upstream to IteraCompute (direct; `proxy` to go via :4002)"),
             ("/zim-infronai [proxy]", "switch upstream to InfronAI (direct; `proxy` to go via :4003)"),
+            ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
             ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
             ("/zim-source", "show upstream sources and their status"),
             ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
@@ -2176,6 +2187,8 @@ class ZimZillaApp(App):
             ("/iteracompute-models", "the live free catalog — what is free and usable"),
             ("/infronai-api-setup [key]", "store your InfronAI API key"),
             ("/infronai-models", "the live free catalog — what is free and usable"),
+            ("/nvidia-api-setup [key]", "store your NVIDIA API key (free developer tier)"),
+            ("/nvidia-models", "the live catalog — what this harness can drive"),
             ("/antseed-models", "AntSeed's free models, and the peer to pin"),
             ("/models", "free models of an upstream — /models [source]"),
             ("/logfare-api-setup [key]", "use your own Logfare key (the shipped one is shared)"),
@@ -2351,6 +2364,11 @@ class ZimZillaApp(App):
         # InfronAI's, on the same terms.
         inf_catalog = (inf_mod.cached_models()
                        if active == "infronai" else None)
+        # NVIDIA's too. Every entry is free on the developer tier and the
+        # catalog publishes no price, so this is what makes /model say "free"
+        # instead of billing a model at DEFAULT_PRICE.
+        nv_catalog = (nv_mod.cached_models()
+                      if active == "nvidia" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -2375,7 +2393,7 @@ class ZimZillaApp(App):
             order = self._model_display_order(
                 models,
                 th_catalog or as_catalog or uno_catalog or ah_catalog
-                or bp_catalog or ic_catalog or inf_catalog)
+                or bp_catalog or ic_catalog or inf_catalog or nv_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -2391,7 +2409,7 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {shown:<26}", style=style)
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
-                                        inf_catalog)
+                                        inf_catalog, nv_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -2450,6 +2468,13 @@ class ZimZillaApp(App):
                     "  :free suffix, and a free account still needs a $5 "
                     "balance\n",
                     style=p.dim)
+            elif active == "nvidia":
+                t.append(
+                    f"  catalog {_catalog_clause(nv_mod.catalog_age(), nv_mod.CACHE_TTL)}"
+                    " — /nvidia-models shows the\nchat models; free means the "
+                    "developer tier, not a per-model\n"
+                    "  price. The catalog lists more than the account can call\n",
+                    style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -2485,7 +2510,7 @@ class ZimZillaApp(App):
         # wrong answer was the common case rather than the corner.
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi",
-                      "iteracompute", "infronai") and (
+                      "iteracompute", "infronai", "nvidia") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -2550,6 +2575,16 @@ class ZimZillaApp(App):
                     fetched, _ = inf_mod.fetch_models(creds[0] if creds else "")
                 else:
                     fetched = list(inf_catalog)
+            elif active == "nvidia":
+                # Keyless as well, and filtered to chat entries: the raw Models
+                # route carries embeddings, guards and parsers too, and offering
+                # those as model choices would be offering a 400.
+                if nv_catalog is None:
+                    creds = nv_mod.load_credentials()
+                    got, _ = nv_mod.fetch_models(creds[0] if creds else "")
+                    fetched = [m for m in (got or []) if m.chat] or None
+                else:
+                    fetched = list(nv_catalog)
             elif active == "logfare":
                 if lf_catalog is None:
                     # The status API is public — no key, so this works before
@@ -2572,6 +2607,8 @@ class ZimZillaApp(App):
                     ic_catalog = fetched
                 elif active == "infronai":
                     inf_catalog = fetched
+                elif active == "nvidia":
+                    nv_catalog = fetched
                 elif active == "logfare":
                     lf_catalog = fetched
                 models = tuple(m.id for m in fetched)
@@ -2628,7 +2665,8 @@ class ZimZillaApp(App):
 
     def _model_note(self, name: str, catalog, lf_catalog=None,
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
-                    ic_catalog=None, inf_catalog=None) -> str:
+                    ic_catalog=None, inf_catalog=None,
+                    nv_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -2663,11 +2701,19 @@ class ZimZillaApp(App):
             live = ic_mod.price_for(name, ic_catalog)
         if live is None:
             live = inf_mod.price_for(name, inf_catalog)
+        if live is None:
+            live = nv_mod.price_for(name, nv_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
                 else f"${pin:g}/${pout:g} per Mtok"
             return note + self._uno_upstream_clause(name, uno_catalog)
+        if nv_mod.is_nvidia(self.cfg.base_url):
+            # The catalog is cold, but the tier is not a guess: NVIDIA's hosted
+            # catalog draws on the account's developer allowance and publishes
+            # no per-model price. Falling through to the estimate table would
+            # print $1.00/$3.00 beside a model that costs nothing.
+            return "free (dev tier)"
         pin, pout = price_for(name)
         note = f"${pin:.2f}/${pout:.2f} per Mtok"
         health = lf_mod.health_for(name) if lf_catalog else None
@@ -2970,6 +3016,7 @@ class ZimZillaApp(App):
                 ("iteracompute", ic_mod, "IteraCompute",
                  "/iteracompute-api-setup"),
                 ("infronai", inf_mod, "InfronAI", "/infronai-api-setup"),
+                ("nvidia", nv_mod, "NVIDIA NIM", "/nvidia-api-setup"),
             ):
                 # IteraCompute and InfronAI have local proxies, so when their
                 # profiles exist they are already listed above by discover() —
@@ -2987,6 +3034,11 @@ class ZimZillaApp(App):
                     # missing, so the port is the honest detail to show.
                     t.append(f":{_mod.PROXY_PORT}  {_label:<12} ",
                              style=p.primary)
+                elif _kind == "nvidia":
+                    # Neither hosted-by-us nor proxied: the upstream is reached
+                    # directly, so the row says so the way Token Juice's does.
+                    # There is no port, and "proxy down" would be a lie.
+                    t.append(f"{'direct':<7}{_label:<12} ", style=p.primary)
                 else:
                     t.append(f"      hosted  {_label:<12} ", style=p.primary)
                 if creds is None:
@@ -3027,7 +3079,8 @@ class ZimZillaApp(App):
                      "                 /zim-tokenharbour,  /zim-openrouter,\n"
                      "                 /zim-unorouter,  /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
-                     "                 /zim-infronai,  or  /zim-antseed\n",
+                     "                 /zim-infronai,  /zim-nvidia,\n"
+                     "                 or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
             # list above and this hint agree about what is actually reachable.
@@ -3056,6 +3109,14 @@ class ZimZillaApp(App):
                     "Token Juice is not set up on this machine — write your "
                     "tj_ key to ~/.zimzilla/tokenjuice/source (mode 600); the "
                     "format is in source.example beside it", warn=True)
+                return
+            if key == "nvidia":
+                # Same shape as Token Juice — the profile IS the install — but
+                # there is no shipped fallback, so the next step is the command
+                # that writes one rather than a file path.
+                self._sys_line(
+                    "NVIDIA is not set up on this machine — set your key with "
+                    "/nvidia-api-setup <key> (free at build.nvidia.com)", warn=True)
                 return
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
@@ -3237,7 +3298,7 @@ class ZimZillaApp(App):
             if "HTTP 401" in detail:
                 self._sys_line(
                     f"{src.label} rejected the key (401) — staying on the "
-                    f"current route. Replace it with /zim-tokenjuice <tj_ key>.",
+                    f"current route. Replace it with {self._replace_key_hint(src)}.",
                     warn=True)
                 return
             # An unreachable catalog is not evidence that the model was retired,
@@ -3248,6 +3309,20 @@ class ZimZillaApp(App):
         self._refresh_after_source_change(
             src.label, f"direct, no proxy · {route.base_url}")
 
+    @staticmethod
+    def _replace_key_hint(src) -> str:
+        """The command that replaces this source's key, for a 401 message.
+
+        Parameterised because the message used to name ``/zim-tokenjuice``
+        whatever source had refused: an operator on any other route was told to
+        replace a key they were not using.
+        """
+        if src.key == "tokenjuice":
+            return "/zim-tokenjuice <tj_ key>"
+        if src.key == "nvidia":
+            return "/nvidia-api-setup <nvapi- key>"
+        return f"/{src.key}-api-setup <key>"
+
     def _probe_direct(self, src, route, chosen: str, token: str | None):
         """``(model, replaced, ok, detail)`` for a direct route. Blocking.
 
@@ -3257,8 +3332,19 @@ class ZimZillaApp(App):
         """
         from .. import openai_compat as oa_mod
 
-        ok, detail = oa_mod.probe(route.base_url, token)
-        ids = oa_mod.cached_ids(route.base_url)
+        if src.key == "nvidia":
+            # NVIDIA's Models route is PUBLIC — it answers 200 with no key and
+            # with a wrong one — so probing it would call a rejected key
+            # healthy and let the switch land on a route that 401s on the first
+            # turn. verify_key makes one tiny real call instead, which is the
+            # only thing that proves the credential. Its catalog is read from
+            # this module's own cache for the same reason /model is: the ids
+            # offered must be the chat-capable ones, not the raw 83.
+            ok, detail = nv_mod.verify_key(token or "", chosen)
+            ids = list(nv_mod.model_ids(token or "")[0] or [])
+        else:
+            ok, detail = oa_mod.probe(route.base_url, token)
+            ids = list(oa_mod.cached_ids(route.base_url))
         if not ids or chosen in ids:
             return chosen, None, ok, detail
         declared = route.upstream_model(src.model)
@@ -3267,7 +3353,8 @@ class ZimZillaApp(App):
         # Neither the stored name nor the declared default survives: the lineup
         # moved. Prefer whatever is free right now over leaving a paid name in
         # place that the account may not be funded for.
-        mod = {"iteracompute": ic_mod, "infronai": inf_mod}.get(src.key)
+        mod = {"iteracompute": ic_mod, "infronai": inf_mod,
+               "nvidia": nv_mod}.get(src.key)
         if mod is not None:
             try:
                 fresh = mod.default_free_model()
@@ -3486,6 +3573,18 @@ class ZimZillaApp(App):
         creds = inf_mod.load_credentials()
         inf_mod.fetch_models(creds[0] if creds else "")
 
+    @work(exclusive=True, thread=True)
+    def _warm_nvidia_catalog(self) -> None:
+        """Fetch NVIDIA's catalog once at startup, silently.
+
+        Silent for the same reason the other warm-ups are: a launch that cannot
+        reach the public catalog is still a working launch, /model falls back to
+        the declared list, and /nvidia-models reports the failure on demand. A
+        catalog that is merely fresh is not news.
+        """
+        creds = nv_mod.load_credentials()
+        nv_mod.fetch_models(creds[0] if creds else "")
+
     def _show_logfare_models(self, models, err: str) -> None:
         p = self.palette
         if models is None:
@@ -3601,6 +3700,12 @@ class ZimZillaApp(App):
         # `_cmd_zim_source`. Listed here for the key command alone.
         if kind == "infronai":
             return inf_mod, "InfronAI"
+        # Direct-only, like Token Juice: reached over Chat Completions with no
+        # proxy, so `/zim-nvidia` goes through `_cmd_zim_source`. Listed here so
+        # `/nvidia-api-setup` shares the key-handling code — the same read/write
+        # against a mode-600 profile.
+        if kind == "nvidia":
+            return nv_mod, "NVIDIA NIM"
         if kind == "antseed":
             return as_mod, "AntSeed"
         return None
@@ -3763,7 +3868,7 @@ class ZimZillaApp(App):
             t.append("  set it with  ", style=p.dim)
             t.append(f"/{kind}-api-setup <key>\n", style=f"bold {p.primary}")
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
-                        "iteracompute", "infronai"):
+                        "iteracompute", "infronai", "nvidia"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -3773,6 +3878,12 @@ class ZimZillaApp(App):
                     "A key is needed to send.\n",
                     style=p.dim,
                 )
+            if kind == "nvidia":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://build.nvidia.com\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{mod.KEY_PREFIX}  · free developer tier, ~40 req/min\n",
+                         style=p.dim)
             t.append(f"  stored in     {mod.PROFILE}\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
@@ -3790,6 +3901,16 @@ class ZimZillaApp(App):
         path = mod.save_key(key, current)
         mod.clear_cache()             # a new key invalidates the old catalog
         self._sys_line(f"{label} key saved (…{key[-4:]}) to {path}", ok=True)
+        if kind == "nvidia" and nv_mod.is_nvidia(self.cfg.base_url):
+            # The route is direct and the client already holds the *old* token,
+            # which it read from the profile at switch time. Without this the
+            # new key is on disk and nowhere else until the next launch — the
+            # "saved but not in force" failure TokenHarbour's command documents.
+            self.cfg.auth_token = key
+            self.cfg.api_key = ""
+            self.agent._client = None
+            self._sys_line("applied to this session — no restart", ok=True)
+            return
         self._sys_line(f"switch to it with /zim-{kind}")
 
     def _cmd_ldxhub_key(self, args) -> None:
@@ -4124,7 +4245,7 @@ class ZimZillaApp(App):
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",
-                 "iteracompute", "infronai"}
+                 "iteracompute", "infronai", "nvidia"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -4206,6 +4327,15 @@ class ZimZillaApp(App):
             # matches this account's reachable models.
             creds = inf_mod.load_credentials()
             return inf_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "nvidia":
+            # Keyless as well: /v1/models is public. Sent when present so the
+            # listing is made with the credential the turns will use. The
+            # catalog lists models this account cannot call — a 404 "Function
+            # not found for account" that the Models route does not disclose —
+            # so the list is what exists, not what works; /nvidia-models says
+            # so rather than pretending otherwise.
+            creds = nv_mod.load_credentials()
+            return nv_mod.chat_models(creds[0] if creds else "")
         if kind == "tokenharbour":
             creds = th_mod.load_credentials()
             if creds is None:
@@ -4237,6 +4367,7 @@ class ZimZillaApp(App):
                  "aihubmix": "AIHUBMIX", "beatapi": "BEATAPI",
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
+                 "nvidia": "NVIDIA NIM",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
         t = Text()
@@ -4275,6 +4406,14 @@ class ZimZillaApp(App):
                     "requests/day across all free models, so\n  an empty list "
                     "means none is offered right now — not that the source\n"
                     "  is broken)\n", style=p.dim)
+            if kind == "nvidia":
+                t.append(
+                    "  (the catalog is public and live. 'free' here is the "
+                    "developer tier:\n  calls draw on the account's trial "
+                    "allowance, not a per-model price,\n  because the catalog "
+                    "publishes none. An empty list means the endpoint\n"
+                    "  answered with no chat-capable entries — not that the "
+                    "key is wrong)\n", style=p.dim)
         else:
             for m in models:
                 mark = "◉" if m.id == self.cfg.model else "○"
@@ -4401,6 +4540,22 @@ class ZimZillaApp(App):
                 "  text output only · tool support is shown but never used to "
                 "hide a\n  model, because the catalog under-reports it\n",
                 style=p.dim)
+        if kind == "nvidia":
+            # The three things a reader of this list would otherwise get wrong,
+            # all of them measured against the live endpoint on 2026-10-22.
+            t.append(
+                "  free = the developer tier, not a per-model price: calls draw "
+                "on the\n  account's trial allowance (~40 req/min). The catalog "
+                "publishes no\n  pricing, so nothing here is billed per token\n",
+                style=p.dim)
+            t.append(
+                "  the catalog lists models this account cannot call — those "
+                "answer 404\n  \"not found for account\"; a retired one answers "
+                "410; a busy one 503.\n  If a model refuses, that is why, and "
+                "the message says which\n", style=p.dim)
+            t.append(
+                "  ids are provider/model and go on the wire unchanged — no "
+                "prefix to add\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
         self._refresh_model_choices()
 
@@ -7498,6 +7653,11 @@ class ZimZillaApp(App):
              "infronai-api-setup"),
             ("/infronai-models", "the live free catalog — what is free and usable",
              "infronai-models"),
+            ("/zim-nvidia", "switch upstream to NVIDIA NIM", "zim-nvidia"),
+            ("/nvidia-api-setup", "store your NVIDIA API key (free dev tier)",
+             "nvidia-api-setup"),
+            ("/nvidia-models", "the live catalog — what this harness can drive",
+             "nvidia-models"),
             ("/models", "free models of an upstream — /models [source]", "models"),
             ("/logfare-api-setup", "use your own Logfare key (the shipped one is shared)",
              "logfare-api-setup"),

@@ -145,9 +145,10 @@ up right now, with uptime, and `/model` offers the same list. The proxy config
 also carries a wildcard route, so a model Logfare adds later works without
 waiting for a ZimZilla release.
 
-Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-tokenharbour`,
-`/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` and
-`/zim-antseed`, each with your own credential, a shared one, or none at all.
+Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-nvidia`,
+`/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`,
+`/zim-beatapi` and `/zim-antseed`, each with your own credential, a shared one,
+or none at all.
 
 To configure setup yourself later, or to install somewhere other than the
 default:
@@ -633,7 +634,7 @@ or a colour diff of the change, and three keys:
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, so it can run against a local LiteLLM proxy, a hosted gateway or a
-peer-to-peer marketplace without any code caring which. Ten sources are wired
+peer-to-peer marketplace without any code caring which. Eleven sources are wired
 up:
 
 | Source | Endpoint | Key | How it starts |
@@ -642,6 +643,7 @@ up:
 | **Token Juice** | `api.tokenjuice.ai` | **shared** — ships, no signup | direct, no proxy — one model, Chat Completions |
 | **IteraCompute** | `:4002` | yours | direct (proxy on `:4002` if asked) — free Qwen tier |
 | **InfronAI** | `:4003` | yours | direct (proxy on `:4003` if asked) — free tier, $5 balance required |
+| **NVIDIA NIM** | `integrate.api.nvidia.com` | yours (`nvapi-…`) | direct, no proxy — free developer tier, 57 chat models |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
 | **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
 | **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
@@ -650,9 +652,9 @@ up:
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
-`/zim-infronai`, `/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`,
-`/zim-aihubmix`, `/zim-beatapi` or `/zim-antseed`; the choice is remembered, so
-the next launch comes back to the one that was working.
+`/zim-infronai`, `/zim-nvidia`, `/zim-tokenharbour`, `/zim-openrouter`,
+`/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` or `/zim-antseed`; the choice
+is remembered, so the next launch comes back to the one that was working.
 
 The three routes with a local proxy are reached **directly** by default — the
 proxy is a translation shim, and the harness speaks both protocols now. Add
@@ -685,6 +687,51 @@ install spends the same key — treat it as public. Your own key still wins:
 locally never touches the repository. If the shared key is ever rotated
 upstream, a `401` says so and names that command rather than reporting a
 generic auth failure.
+
+### NVIDIA NIM, and a catalog that lists more than you can call
+
+`/nvidia-api-setup <nvapi-… key>` writes `~/.zimzilla/nvidia/source` (mode 600)
+and applies it to the session you are in — no restart. Keys come from
+https://build.nvidia.com; the developer tier is free and rate-limited to roughly
+40 requests/minute, so a `429` is a queue, not a bill. `/zim-nvidia` switches
+onto `https://integrate.api.nvidia.com/v1`.
+
+Like Token Juice, this route is direct and has no proxy: the upstream serves Chat
+Completions itself, so `/zim-source` shows `direct` where the others show a port,
+and `proxy` after `/zim-nvidia` has nothing to turn on. Model ids are already
+`provider/model` (`openai/gpt-oss-20b`, `nvidia/nemotron-3.5-lightning-30b-a3b`)
+and go on the wire unchanged.
+
+The catalog is **public**, so `/nvidia-models` and the `/model` picker answer
+before any key is set. It is also thinner than it looks, in three ways worth
+knowing:
+
+- It publishes **no price and no context window**. Free here means the developer
+  tier, not a per-model rate — the account's trial allowance is what a call
+  draws on. So `/cost` reads `free`, and the context figure comes from NVIDIA's
+  own model page where one was looked up, else 128K. Never the harness's 1M
+  fallback: guessing high against a 128K model is an overflow you meet mid-task.
+- It lists **models your account cannot call**. Of 18 sampled on 2026-10-22,
+  seven answered `404 "Not found for account"` and two were retired. The Models
+  route discloses none of that, so `/nvidia-models` says what exists, not what
+  works.
+- The failures are **shaped differently and mean different things**: `404` = not
+  enabled for this account, `410` = retired, `503 ResourceExhausted` = the worker
+  is busy. ZimZilla explains which one you hit and picks no model for you.
+
+Because `/v1/models` answers `200` with no credential *and* with a wrong one,
+`/nvidia-api-setup` proves a key with one real, tiny Chat Completions call
+instead. A `404`, `410` or `503` on that probe still counts as a working key —
+those say something about the model, never about the credential. Only `401`/`403`
+fails it.
+
+The default is `nvidia/nemotron-3.5-lightning-30b-a3b`: measured fastest of the
+five ids that returned valid tool-call JSON (2.2s), with a 1M context. It is a
+heavy reasoner, and that reasoning is billed against `max_tokens` — a 120-token
+budget came back as 104 thinking frames and no answer at all. The harness's
+default ceiling (32768) has room, and it doubles the budget once when a reply is
+spent entirely on thinking, so you only meet this if you lower `max_tokens`
+yourself.
 
 ### Two wire protocols, and skipping the proxy
 

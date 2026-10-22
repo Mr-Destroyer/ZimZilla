@@ -172,6 +172,22 @@ if [[ "$_current_source" == "tokenjuice" ]]; then
   fi
 fi
 
+if [[ "$_current_source" == "nvidia" ]]; then
+  # Direct route on the same terms as Token Juice, with one difference that
+  # matters: nothing ships. The key is the operator's own developer key, written
+  # by /nvidia-api-setup, so there is no fallback profile to reach for — and
+  # when the profile is missing this falls through to Logfare rather than dying
+  # fail-closed on a route that was never finished setting up. Without this
+  # branch at all, a remembered NVIDIA selection would take the Logfare path,
+  # start LiteLLM for a session that will never use it, and on a machine with no
+  # Logfare profile die with "profile not found" for a reason that is not true.
+  _nv_profile="$ZIMZILLA_HOME/nvidia/source"
+  if [[ -r "$_nv_profile" ]]; then
+    LITELLM_ENV_FILE="${_env_override:-$_nv_profile}"
+    ZIMZILLA_NO_PROXY=1
+  fi
+fi
+
 LITELLM_ENV_FILE="${LITELLM_ENV_FILE:-$ZIMZILLA_HOME/logfare/source}"
 LITELLM_PORT="${LITELLM_PORT:-4001}"
 LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"

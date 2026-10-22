@@ -40,6 +40,12 @@ Token Juice used to be the fourth proxy. It is now a declared direct route
 (see ``TOKENJUICE_DIRECT`` and ``DIRECT_ONLY``): the upstream answers Chat
 Completions itself, so there is nothing to translate and nothing to start.
 
+NVIDIA NIM is the same shape and has never had a proxy: its hosted catalog at
+``integrate.api.nvidia.com/v1`` speaks Chat Completions, so ``/zim-nvidia``
+points the session straight at it. Its key is the operator's own developer key
+(``/nvidia-api-setup``), never shipped, and its catalog is public — see
+:mod:`zimzilla.nvidia` for what that catalog does and does not say.
+
 The other upstreams (TokenHarbour, OpenRouter, UnoRouter, AIHubMix, BeatAPI,
 AntSeed) are remote or operator-started, and live in their own modules; this one
 is the local proxy plumbing and the selection record
@@ -93,7 +99,17 @@ class Source:
 
     @property
     def base_url(self) -> str:
-        """The proxy's address. Meaningless for a source that has no proxy."""
+        """Where the session is pointed for this source.
+
+        The proxy's address when there is a proxy, and the declared upstream
+        when there is not. A direct-only source has no port — it is discovered
+        with port 0 — so ``http://localhost:0`` would be the literal answer,
+        and a caller that believed it would point the session at nothing. The
+        switch path uses ``DirectRoute.base_url`` directly, so this only ever
+        mattered as a trap; it is answered here instead.
+        """
+        if self.direct is not None and self.is_direct_only:
+            return self.direct.base_url
         return f"http://localhost:{self.port}"
 
     @property
@@ -153,14 +169,24 @@ TOKENJUICE_DIRECT = DirectRoute(
     models={"deepseek-v4.1-flash": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
 )
 
+#: NVIDIA NIM's route, declared rather than read from a proxy config.
+#:
+#: ``integrate.api.nvidia.com/v1`` speaks Chat Completions itself, so — like
+#: Token Juice — there is no LiteLLM hop and nothing to start. The alias map is
+#: empty on purpose: the catalog's ids are already the ids that go on the wire
+#: (``openai/gpt-oss-20b``, ``nvidia/nemotron-3.5-lightning-30b-a3b``), so
+#: there is no proxy name to translate. See :mod:`zimzilla.nvidia`.
+NVIDIA_DIRECT = DirectRoute(base_url="https://integrate.api.nvidia.com/v1")
+
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
 #: where they go.
-DIRECT_ONLY: frozenset[str] = frozenset({"tokenjuice"})
+DIRECT_ONLY: frozenset[str] = frozenset({"tokenjuice", "nvidia"})
 
 #: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
 DECLARED_ROUTES: dict[str, DirectRoute] = {
     "tokenjuice": TOKENJUICE_DIRECT,
+    "nvidia": NVIDIA_DIRECT,
 }
 
 
@@ -340,11 +366,28 @@ INFRONAI_MODELS: tuple[str, ...] = (
     "qwen/qwen3.8-27b-abliterated-cyber:free",
 )
 
+#: NVIDIA's declared fallback — the ids that were **measured to answer a
+#: tool-calling turn**, in the order they were measured fastest first. This is
+#: deliberately not the catalog: ``/v1/models`` lists 83 entries and 57 of them
+#: are chat-shaped, but seven of the eighteen sampled on 2026-10-22 answered
+#: ``404 Not found for account`` and two more were retired. A picker that
+#: offered the catalog would hand the operator models this account cannot call.
+#: The live catalog still wins once fetched (see ``models_for``); this is what
+#: ``/model`` shows on a cold cache, and every entry here is known to work.
+NVIDIA_MODELS: tuple[str, ...] = (
+    "nvidia/nemotron-3.5-lightning-30b-a3b",   # 2.2s with tools, 1M ctx
+    "openai/gpt-oss-20b",                      # 7.0s with tools, 128K ctx
+    "stepfun-ai/step-5-preview",               # 1.9s with tools
+    "poolside/laguna-xs-2.1",                  # 44s with tools — slow but works
+    "meta/muse-glimmer-30b",                   # 14.5s with tools
+)
+
 MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "logfare": LOGFARE_MODELS,
     "tokenjuice": TOKENJUICE_MODELS,
     "iteracompute": ITERACOMPUTE_MODELS,
     "infronai": INFRONAI_MODELS,
+    "nvidia": NVIDIA_MODELS,
 }
 
 
@@ -381,6 +424,15 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import openai_compat as oa_mod
         probed = oa_mod.cached_ids(base_url)
         return probed or None
+    if key == "nvidia":
+        # Checked before the generic DIRECT_ONLY branch: NVIDIA has its own
+        # module cache (it filters the catalog to chat models and knows about
+        # ids the endpoint lists but the account cannot call), and that is the
+        # list `/model` should offer — not the raw Models route the generic
+        # branch would read.
+        from . import nvidia as nv_mod
+        cached = nv_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     if key in DIRECT_ONLY:
         # Declared, not fetched — but a switch probes the Models route, and what
         # the upstream actually answered is better than the declared fallback.
@@ -458,6 +510,9 @@ def catalog_models(key: str) -> list | None:
     if key == "infronai":
         from . import infronai as inf_mod
         return inf_mod.cached_models()
+    if key == "nvidia":
+        from . import nvidia as nv_mod
+        return nv_mod.cached_models()
     return None
 
 
@@ -510,6 +565,14 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
     key = active_key(base_url)
     if key is None:
         return None
+    if key == "nvidia" and not catalog_models(key):
+        # A cold cache is not "cannot say" for NVIDIA. Its hosted catalog is
+        # billed against the account's developer allowance rather than per
+        # token, and it publishes no price at all — so the answer is the same
+        # warm or cold. Returning None here would fall through to the estimate
+        # table and bill a free model at DEFAULT_PRICE, which is the exact
+        # discrepancy this function exists to prevent.
+        return (0.0, 0.0)
     cached = catalog_models(key)
     if not cached:
         return None
@@ -630,6 +693,14 @@ def _profile_candidates(key: str) -> list[Path]:
         return [
             ZIMZILLA_HOME / "infronai" / "source",
         ]
+    if key == "nvidia":
+        # No credential ships either, and none could: an NVIDIA key is the
+        # operator's own developer key. Until /nvidia-api-setup writes this
+        # file the source is not discovered, which is what makes /zim-nvidia
+        # name the setup command instead of failing at request time.
+        return [
+            ZIMZILLA_HOME / "nvidia" / "source",
+        ]
     return [
         ZIMZILLA_HOME / "tokenjuice" / "source",
         DEFAULT_HOME / "claude-source" / "deepseek-claude",
@@ -688,6 +759,13 @@ def discover() -> dict[str, Source]:
                       "deepseek/deepseek-v4.1-flash:free")
     if infronai:
         found["infronai"] = infronai
+    # Direct-only, like Token Juice: no port and no proxy files, so the profile
+    # is the whole install. Absent until /nvidia-api-setup has run, which is
+    # the honest state — a route with no key cannot answer.
+    nvidia = _build("nvidia", "NVIDIA NIM", 0,
+                    "nvidia/nemotron-3.5-lightning-30b-a3b")
+    if nvidia:
+        found["nvidia"] = nvidia
     return found
 
 
@@ -727,7 +805,7 @@ def switchable(exclude: str | None = None) -> list[str]:
     out: list[str] = []
     for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
                 "tokenharbour", "infronai", "iteracompute", "antseed",
-                "tokenjuice", "logfare"):
+                "nvidia", "tokenjuice", "logfare"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -885,6 +963,7 @@ def active_key(base_url: str) -> str | None:
     from . import beatapi as bp_mod
     from . import infronai as inf_mod
     from . import iteracompute as ic_mod
+    from . import nvidia as nv_mod
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
@@ -908,6 +987,12 @@ def active_key(base_url: str) -> str | None:
     # predicate, so the port lives in one module rather than being spelled here.
     if inf_mod.is_infronai(base_url):
         return "infronai"
+    # NVIDIA is identified by host, not port: it is reached directly and has no
+    # proxy to match on. Checked before the generic host loop below so a
+    # session launched from an environment profile — with no file for
+    # discover() to find — is still recognised as being on this source.
+    if nv_mod.is_nvidia(base_url):
+        return "nvidia"
     # Checked before the port match, and by port rather than by name: the buyer
     # hands out a plain http://localhost:8377 with no "antseed" in it, and the
     # regex below would otherwise find port 8377, miss it in source_for_port()
