@@ -238,6 +238,18 @@ class ChatPane(Vertical):
     ChatPane #card.hidden {
         display: none;
     }
+    /* The compaction animation. Nine rows is the whole panel (header, rule,
+       four cascade rows, rule, footer) — anything more and it would push the
+       transcript it is describing off the screen. */
+    ChatPane #compact {
+        height: auto;
+        max-height: 10;
+        padding: 0 1;
+        background: transparent;
+    }
+    ChatPane #compact.hidden {
+        display: none;
+    }
     ChatPane #spinner {
         height: auto;
         padding: 0 1;
@@ -256,6 +268,8 @@ class ChatPane(Vertical):
         #: The tool call currently in flight, or None. Set by card_begin and
         #: cleared by card_finish — this is the whole card lifecycle.
         self._card: dict | None = None
+        #: Live compaction animation state, or None when nothing is compacting.
+        self._compact: dict | None = None
 
     def compose(self):
         # min_width=1 because RichLog's default of 78 clamps the render width
@@ -275,6 +289,12 @@ class ChatPane(Vertical):
         yield thought
         stream = Static(id="stream", classes="hidden")
         yield stream
+        # The compaction animation owns its own slot rather than borrowing the
+        # tool card: the card is a tool's lifecycle, and a compaction that
+        # overwrote a running tool's panel (or vice versa) would be a lie about
+        # which of the two is happening.
+        compact = Static(id="compact", classes="hidden")
+        yield compact
         card = Static(id="card", classes="hidden")
         yield card
         # A slot for a line that changes several times a second. It cannot be
@@ -313,6 +333,7 @@ class ChatPane(Vertical):
         self.clear_stream()
         self.clear_reasoning()
         self.card_finish()
+        self.compact_finish()
 
     # ---- live tool card ---------------------------------------------------
     def card_begin(self, name: str, args: dict, targets: list[str] | None = None) -> None:
@@ -365,6 +386,112 @@ class ChatPane(Vertical):
     @property
     def card_active(self) -> bool:
         return self._card is not None
+
+    # ---- live compaction animation ---------------------------------------
+    #: Seconds the finished panel stays up before it closes. Long enough to
+    #: read "freed 167.8k", short enough not to sit in the way of the answer
+    #: that follows it.
+    COMPACT_LINGER = 1.6
+
+    def compact_begin(self, used: int, window: int = 0, threshold: int = 0,
+                      trigger: str = "threshold") -> None:
+        """Start the animation for a compaction that just began."""
+        self._compact = {
+            "used": max(0, int(used)),
+            "window": max(0, int(window)),
+            "threshold": max(0, int(threshold)),
+            "trigger": trigger,
+            "started": time.monotonic(),
+            "frame": 0,
+            "done": False,
+            "ok": False,
+            "note": "",
+            "after": 0,
+            "done_at": 0.0,
+        }
+        self.compact_tick()
+
+    def compact_end(self, ok: bool, note: str = "", used: int | None = None,
+                    after: int | None = None) -> None:
+        """Stop the animation and show the outcome.
+
+        The panel is not hidden here: the last frame is the one that says what
+        happened and how much was freed, so it lingers for ``COMPACT_LINGER``
+        while the caller carries on with the turn.
+        """
+        c = self._compact
+        if c is None:
+            return
+        c["done"] = True
+        c["ok"] = bool(ok)
+        c["note"] = note or ""
+        c["done_at"] = time.monotonic()
+        if used is not None:
+            c["used"] = max(0, int(used))
+        if after is not None:
+            c["after"] = max(0, int(after))
+        self.compact_tick()
+
+    def compact_tick(self) -> bool:
+        """Advance one animation frame. Returns False once the panel has closed.
+
+        The caller drives this from a fast timer; returning False is the signal
+        to stop that timer, so the animation cannot outlive its compaction and
+        leave a timer painting a widget that is gone.
+        """
+        c = self._compact
+        if c is None:
+            return False
+        if c["done"] and time.monotonic() - c["done_at"] > self.COMPACT_LINGER:
+            self.compact_finish()
+            return False
+        # Safety net: an aborted turn can drop the `compacted` event entirely, and
+        # a spinner that never stops is worse than no spinner. Fifteen minutes is
+        # far past any real summary and still finite.
+        if not c["done"] and time.monotonic() - c["started"] > 900:
+            self.compact_finish()
+            return False
+        try:
+            w = self.query_one("#compact", Static)
+        except Exception:
+            return False
+        from .renderers import compaction_panel
+
+        width = 72
+        try:
+            width = self.content_size.width or 72
+        except Exception:  # noqa: BLE001 - not mounted yet
+            pass
+        w.remove_class("hidden")
+        w.update(compaction_panel({
+            "used": c["used"],
+            "window": c["window"],
+            "threshold": c["threshold"],
+            "trigger": c["trigger"],
+            "frame": c["frame"],
+            "elapsed": (c["done_at"] or time.monotonic()) - c["started"]
+            if c["done"] else time.monotonic() - c["started"],
+            "done": c["done"],
+            "ok": c["ok"],
+            "note": c["note"],
+            "after": c["after"],
+        }, self.palette, width=width))
+        c["frame"] += 1
+        return True
+
+    def compact_finish(self) -> None:
+        """Close and clear the compaction slot."""
+        self._compact = None
+        try:
+            w = self.query_one("#compact", Static)
+        except Exception:
+            return
+        w.update("")
+        w.add_class("hidden")
+
+    @property
+    def compact_active(self) -> bool:
+        return self._compact is not None
 
     # ---- live streaming line ---------------------------------------------
     # These are called from the 0.55s cursor timer and from the streaming
@@ -485,10 +612,23 @@ class StatusBar(Static):
         self.started = time.monotonic()
         self.busy = False
         self._verb_index = 0
+        #: True while history is being compacted. The verb spinner must not
+        #: overwrite the readout then — "compacting context" is the one thing
+        #: worth saying, and it used to be replaced by "Pondering…" within a
+        #: third of a second.
+        self.hold = False
+        self._compact_frame = 0
 
-    def set_activity(self, activity: str, busy: bool = False) -> None:
+    def set_activity(self, activity: str, busy: bool = False,
+                     hold: bool = False) -> None:
         self.activity = activity
         self.busy = busy
+        self.hold = hold
+        self.render_bar()
+
+    def tick_compaction(self) -> None:
+        """Advance the compaction spinner in the bar."""
+        self._compact_frame += 1
         self.render_bar()
 
     def tick_verb(self, verbs: list[str]) -> None:
@@ -519,7 +659,14 @@ class StatusBar(Static):
         t.append("  │  ", style=p.dim)
         t.append(f"{mm:02d}:{ss:02d}", style=p.primary)
         t.append("  │  ", style=p.dim)
-        if self.busy:
+        if self.hold:
+            # Compaction: the bar carries its own spinner frame, advanced by the
+            # animation timer, so the readout moves at the same rate as the
+            # panel instead of the slower verb rotation.
+            from .renderers import COMPACT_SPINNER
+            spin = COMPACT_SPINNER[self._compact_frame % len(COMPACT_SPINNER)]
+            t.append(f"{spin} {self.activity}", style=f"bold {p.amber}")
+        elif self.busy:
             t.append(f"⟳ {self.activity}", style=f"bold {p.accent}")
         else:
             t.append(f"● {self.activity}", style=p.dim)

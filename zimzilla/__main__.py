@@ -64,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tokens", type=int, default=None, help="max output tokens per reply")
     parser.add_argument("--no-auto-compact", action="store_true",
                         help="never compact history automatically; /compact still works")
+    parser.add_argument("--compact-at", type=int, default=None, metavar="TOKENS",
+                        help="compact history once the prompt reaches TOKENS tokens, "
+                             "whichever comes first against the window percentage "
+                             "(default 200000; 0 = percentage only)")
     parser.add_argument("--no-update", action="store_true",
                         help="skip the launch-time check for new commits on the upstream")
     parser.add_argument("--list-models", action="store_true", help="list known models and exit")
@@ -233,6 +237,9 @@ def main(argv: list[str] | None = None) -> int:
         # explicitly rather than `or None` — otherwise the flag could never turn
         # the feature off, which is its entire job.
         auto_compact=False if args.no_auto_compact else None,
+        # `0` is a real value here (percentage-only), so it is passed through
+        # rather than folded into the None-means-default rule.
+        compact_tokens=args.compact_at,
         mode=args.mode,
         agents_path=agents_path,
         rain=True if args.rain else None,

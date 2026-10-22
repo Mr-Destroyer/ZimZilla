@@ -274,6 +274,15 @@ class Config:
     #: request that finally overflows is the one that was already too big, and it
     #: fails after spending the tokens.
     compact_at: float = 0.8
+    #: Absolute ceiling for that trigger, in tokens. The threshold is the
+    #: EARLIER of ``context_window * compact_at`` and this, so history is
+    #: compacted at 200k even when the resolved window claims far more than the
+    #: endpoint actually serves. That mismatch is the reported failure: the
+    #: catalog (or the 1M fallback) says there is room, the gateway says
+    #: ``400 bad request`` at 200k, and a percentage-only threshold never trips
+    #: before the wall. ``0`` disables the absolute ceiling and restores
+    #: percentage-only behaviour.
+    compact_tokens: int = 200_000
     #: Whether to compact automatically at ``compact_at``. On by default: the
     #: whole point is that a long task should not need the operator to notice.
     auto_compact: bool = True

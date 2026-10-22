@@ -430,6 +430,12 @@ class Agent:
         #: can be a fraction of a known window rather than a guess. Zero means
         #: "nothing measured yet", which never trips the threshold.
         self._last_input_tokens = 0
+        #: A context limit the *endpoint itself* stated in a rejection, in
+        #: tokens. The catalogs can be wrong — a model advertised at 1M that
+        #: answers 400 at 200k is the case that produced this — and when the
+        #: endpoint says so in its own words, that figure wins over every
+        #: published one for the rest of the session. Zero means "not told".
+        self._window_hint = 0
 
         # scope is attached to cfg so tools can re-check defensively
         self.scope: Scope = Scope.load(cfg.allow_path, cfg.deny_path)
@@ -852,10 +858,12 @@ class Agent:
             # (plus whatever this round added to it). Checked BEFORE the request
             # so the compaction happens instead of the overflow, not after it.
             if self._should_compact(window):
+                threshold = self.compact_threshold(window)
                 yield {
                     "type": "compacting",
                     "used": self._last_input_tokens,
                     "window": window,
+                    "threshold": threshold,
                     "trigger": "threshold",
                 }
                 ok, note = await self.compact()
@@ -865,6 +873,8 @@ class Agent:
                     "note": note,
                     "used": self._last_input_tokens,
                     "window": window,
+                    "threshold": threshold,
+                    "after": self.history_tokens() if ok else 0,
                 }
                 if ok:
                     # Reset so the next request re-measures. Without this the
@@ -885,16 +895,23 @@ class Agent:
                 # round again. Checked before the generic branch because
                 # otherwise the operator gets "bad request: <dict>" for a
                 # condition the harness can actually resolve.
-                if (
-                    self.cfg.auto_compact
-                    and not overflow_retried
-                    and self._is_context_overflow(e)
-                ):
+                overflow = self._is_context_overflow(e) or self._looks_like_overflow(
+                    e, window
+                )
+                if self.cfg.auto_compact and not overflow_retried and overflow:
                     overflow_retried = True
+                    # The rejection may state the real limit, which outranks the
+                    # catalog and the fallback for the rest of the session. Taken
+                    # before the event so the gauge and the retry agree.
+                    stated = self._stated_window_limit(str(e))
+                    if stated and stated < window:
+                        self._window_hint = stated
+                        window = self.context_window()
                     yield {
                         "type": "compacting",
                         "used": self._last_input_tokens,
                         "window": window,
+                        "threshold": self.compact_threshold(window),
                         "trigger": "overflow",
                     }
                     ok, note = await self.compact()
@@ -904,6 +921,8 @@ class Agent:
                         "note": note,
                         "used": self._last_input_tokens,
                         "window": window,
+                        "threshold": self.compact_threshold(window),
+                        "after": self.history_tokens() if ok else 0,
                     }
                     if ok:
                         self._last_input_tokens = 0
@@ -1625,7 +1644,38 @@ class Agent:
             found = sources_mod.context_window_for(self.cfg.base_url, self.cfg.model)
         except Exception:  # noqa: BLE001 - a lookup must not break a turn
             found = None
-        return found or self.cfg.context_window
+        window = found or self.cfg.context_window
+        # An endpoint that has already told us its real limit in a rejection
+        # outranks both figures: a catalog can promise 1M for a model that
+        # serves 200k, and the rejection is the one source that cannot be wrong.
+        if self._window_hint:
+            window = min(window, self._window_hint)
+        return window
+
+    def compact_threshold(self, window: int | None = None) -> int:
+        """The prompt size, in tokens, at which history is compacted.
+
+        Two triggers, whichever comes first:
+
+        * ``context_window * compact_at`` — the fraction that leaves room for
+          the reply, the tool results it asks for, and growth between the check
+          and the next request.
+        * ``compact_tokens`` — an absolute ceiling, 200k by default, for the
+          case the fraction cannot catch: a window that is resolved too *large*
+          (the catalog over-promises, or nothing is published and the 1M
+          fallback applies) so 80% of it is never reached before the endpoint
+          answers ``400 bad request``. That mismatch is what this exists for.
+
+        ``0`` for either disables that side. Public because the telemetry gauge
+        draws the threshold marker on the same arithmetic — two thresholds on
+        screen and in the loop would be worse than none.
+        """
+        window = window if window else self.context_window()
+        by_fraction = int(max(1, window) * self.cfg.compact_at)
+        absolute = int(self.cfg.compact_tokens or 0)
+        if absolute > 0:
+            return min(by_fraction, absolute)
+        return by_fraction
 
     def published_output_ceiling(self) -> int | None:
         """The active model's own output limit, or ``None`` when none is published.
@@ -1679,7 +1729,7 @@ class Agent:
         return found if found is not None else price_for(self.cfg.model)
 
     def _should_compact(self, window: int) -> bool:
-        """Whether the prompt is close enough to the window to compact first."""
+        """Whether the prompt is close enough to the threshold to compact first."""
         if not self.cfg.auto_compact:
             return False
         if self._last_input_tokens <= 0:
@@ -1689,7 +1739,7 @@ class Agent:
         # transcript that did not happen.
         if len(self.messages) < 4:
             return False
-        return self._last_input_tokens >= window * self.cfg.compact_at
+        return self._last_input_tokens >= self.compact_threshold(window)
 
     @staticmethod
     def _unsupported_sampling_param(e: Exception) -> str:
@@ -1731,12 +1781,20 @@ class Agent:
         Matched on the message rather than the status alone, because 400 is the
         generic bad-request code and a model-name typo is also a 400 — compacting
         the history in response to a bad model name would throw away the session
-        for nothing. The phrasings are the ones actually seen: Anthropic's
-        ``prompt is too long``, and the LiteLLM/openai-style
-        ``context length``/``maximum context``/``too many tokens`` that the local
-        proxies pass through.
+        for nothing. The phrasings are the ones actually seen across Anthropic,
+        LiteLLM, vLLM, Ollama and the OpenAI-compatible gateways: Anthropic's
+        ``prompt is too long``, LiteLLM's ``maximum context length``, vLLM's
+        ``input length and max_tokens exceed context limit``, and the various
+        ``too many tokens``/``reduce the length`` forms. A 413 is accepted on
+        the status alone, because ``request too large`` *is* the overflow in
+        HTTP terms.
         """
         import anthropic
+        if not isinstance(e, anthropic.APIStatusError):
+            return False
+        status = getattr(e, "status_code", None)
+        if status == 413:
+            return True
         if not isinstance(e, anthropic.BadRequestError):
             return False
         msg = str(e).lower()
@@ -1744,13 +1802,116 @@ class Agent:
             needle in msg
             for needle in (
                 "prompt is too long",
+                "prompt too long",
                 "context length",
                 "context_length",
+                "context window",
+                "context limit",
                 "maximum context",
+                "max context",
                 "too many tokens",
+                "too many input tokens",
+                "too long",
                 "exceeds the maximum",
+                "exceed the maximum",
+                "exceeds the model",
+                "reduce the length",
+                "token limit",
+                "request too large",
+                "input is too large",
             )
         )
+
+    def _looks_like_overflow(self, e: Exception, window: int) -> bool:
+        """Whether a rejection with no usable wording is still an overflow.
+
+        This is the reported failure: some gateways answer an over-long prompt
+        with a bare ``400 bad request`` and no explanation, so pattern-matching
+        the message finds nothing and the operator is shown a bad request for a
+        condition the harness can fix. The measurement is the evidence that
+        settles it — a prompt already inside a quarter of the compact threshold
+        that gets a 400/413/422 is an overflow in every case worth acting on,
+        and compacting costs one summary rather than the turn.
+
+        Deliberately NOT "any 400 on any prompt": a bad model name, a rejected
+        parameter or a malformed tool schema must keep its own diagnosis, and
+        they all arrive at prompts nowhere near the threshold.
+        """
+        import anthropic
+        if not isinstance(e, anthropic.APIStatusError):
+            return False
+        status = getattr(e, "status_code", None)
+        # A 413 says "too large" in HTTP terms, so no measurement is needed.
+        if status == 413:
+            return True
+        if status not in (400, 422):
+            return False
+        if self._last_input_tokens <= 0:
+            return False
+        return self._last_input_tokens >= self.compact_threshold(window) * 0.75
+
+    @staticmethod
+    def _stated_window_limit(message: str) -> int:
+        """The context limit an endpoint stated in its own rejection, or 0.
+
+        Endpoints are more reliable than catalogs about their own limit, and
+        some of them say it out loud:
+
+            prompt is too long: 210000 tokens > 200000 maximum
+            This model's maximum context length is 8192 tokens.
+            input length and `max_tokens` exceed context limit: 210000 > 200000
+
+        Reading the number back turns one rejection into a session that knows
+        the real window, so the *next* turn compacts early instead of walking
+        into the same wall. Patterns are tried in order of how explicitly they
+        name a limit — a bare number in a generic message is the least
+        trustworthy — and the smallest figure from the first pattern that
+        matches wins, because the limit is never the larger of two numbers in
+        one of these sentences.
+        """
+        import re
+        patterns = (
+            # "210000 tokens > 200000 maximum" / "210000 > 200000": the number
+            # after the comparison is the limit, the one before it is the
+            # request, so this pattern takes the right-hand side.
+            r"\d{3,9}\s*(?:tokens?\s*)?[>≥]\s*(\d{3,9})",
+            # "maximum context length is 8192 tokens". ``max(?!_)`` so
+            # ``max_tokens`` — a request parameter, not a limit — cannot be
+            # mistaken for the word "max".
+            r"(?:maximum|max(?!_)|limit)\b\D{0,32}?(\d{3,9})",
+            r"(?:context\s+(?:window|length)|window)\D{0,32}?(\d{3,9})",
+            r"(\d{3,9})\s*tokens?\s*(?:maximum|max\b|limit)",
+        )
+        for pat in patterns:
+            found = [int(m) for m in re.findall(pat, message, re.I)]
+            sane = [n for n in found if 1_000 <= n <= 20_000_000]
+            if sane:
+                return min(sane)
+        return 0
+
+    def history_tokens(self) -> int:
+        """Rough size of the current history in tokens, for the freed figure.
+
+        Four characters per token, the usual English approximation. Used only
+        to report what a compaction actually achieved — the gauge and the
+        threshold both work from the endpoint's measured ``input_tokens``, which
+        is exact and arrives with the next call.
+        """
+        chars = 0
+        for m in self.messages:
+            content = m.get("content")
+            if isinstance(content, str):
+                chars += len(content)
+            elif isinstance(content, list):
+                for b in content:
+                    if not isinstance(b, dict):
+                        chars += len(str(b))
+                        continue
+                    for key in ("text", "content", "input"):
+                        value = b.get(key)
+                        if value:
+                            chars += len(value if isinstance(value, str) else str(value))
+        return max(1, chars // 4)
 
     async def compact(self) -> tuple[bool, str]:
         """Summarise the conversation so far into a single recap message."""

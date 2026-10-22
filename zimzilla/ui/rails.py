@@ -370,11 +370,11 @@ class Waveform(Static):
 
 
 class ContextGauge(Static):
-    """How full the model's context window is."""
+    """How full the model's context window is, and where compaction trips."""
 
     DEFAULT_CSS = """
     ContextGauge {
-        height: 3;
+        height: 4;
         padding: 0 1;
     }
     """
@@ -385,18 +385,48 @@ class ContextGauge(Static):
         self.total = max(1, total)
         self.width = width
         self.used = 0
+        #: The token count the agent will compact at, or 0 when unknown. Drawn
+        #: as a marker on the bar and named underneath, so the operator can see
+        #: the wall before hitting it rather than reading "400 bad request".
+        self.threshold = 0
+        #: Set while a compaction is running: the bar then animates a folding
+        #: sweep instead of sitting still, because the one thing the rail must
+        #: not do during a compaction is look like nothing is happening.
+        self.compacting = False
+        self._frame = 0
 
-    def set(self, used: int, total: int | None = None) -> None:
+    def set(self, used: int, total: int | None = None,
+            threshold: int | None = None) -> None:
         self.used = max(0, int(used))
         if total:
             self.total = max(1, int(total))
+        if threshold is not None:
+            self.threshold = max(0, int(threshold))
+        self.render_gauge()
+
+    def set_compacting(self, active: bool) -> None:
+        self.compacting = bool(active)
+        self._frame = 0
+        self.render_gauge()
+
+    def tick(self) -> None:
+        """Advance the folding sweep one frame (only paints while compacting)."""
+        if not self.compacting:
+            return
+        self._frame += 1
         self.render_gauge()
 
     @property
     def ratio(self) -> float:
         return min(1.0, self.used / self.total)
 
-    def render_gauge(self) -> None:
+    def gauge_text(self) -> Text:
+        """Build the gauge's content without touching the widget.
+
+        Split out of :meth:`render_gauge` for the same reason ``rail_text`` is
+        split out of ``LoopRail``: the layout is worth asserting without a
+        running app, and ``update()`` needs one.
+        """
         p = self.palette
         ratio = self.ratio
         filled = int(round(ratio * self.width))
@@ -408,13 +438,51 @@ class ContextGauge(Static):
         else:
             bar_style = p.accent
 
+        # Where the compaction trips, in cells. Clamped into the bar so a
+        # threshold outside the window still marks an edge rather than vanishing.
+        mark = -1
+        if self.threshold and self.total:
+            mark = min(self.width - 1, max(0, int(round(
+                min(1.0, self.threshold / self.total) * self.width))))
+
+        # The folding sweep: a cursor travelling left to right, with the cells
+        # behind it drawn as already-folded. It loops rather than completing,
+        # because compaction reports no progress and a bar that finished would
+        # be inventing some.
+        cursor = (self._frame * 2) % (self.width + 6) if self.compacting else -1
+
         t = Text()
-        t.append("context\n", style=p.dim)
-        t.append(_FULL * filled, style=bar_style)
-        t.append(_EMPTY * (self.width - filled), style=p.dim)
+        t.append("context", style=p.dim)
+        if self.compacting:
+            t.append(" ⟲ folding", style=f"bold {p.amber}")
+        t.append("\n")
+        for i in range(self.width):
+            if i == mark:
+                t.append("┊", style=f"bold {p.amber}")
+            elif self.compacting and i < cursor:
+                t.append("▒", style=p.dim)
+            elif self.compacting and i == cursor:
+                t.append("▸", style=f"bold {p.accent}")
+            elif i < filled:
+                t.append(_FULL, style=bar_style)
+            else:
+                t.append(_EMPTY, style=p.dim)
         t.append(f" {int(ratio * 100)}%\n", style=bar_style)
         t.append(f"{_fmt_k(self.used)} / {_fmt_k(self.total)}", style=p.dim)
-        self.update(t)
+        t.append("\n")
+        if self.threshold:
+            t.append("⟲ ", style=p.dim)
+            t.append(f"compacts at {_fmt_k(self.threshold)}", style=p.dim)
+        return t
+
+    def render_gauge(self) -> None:
+        # Tolerates being called outside a running app, like the telemetry
+        # rail's cost line does: `update()` needs ``app.console``, and the
+        # gauge's arithmetic is worth testing (and worth setting) without one.
+        try:
+            self.update(self.gauge_text())
+        except Exception:  # noqa: BLE001 - no active app
+            pass
 
     def apply_palette(self, palette: Palette) -> None:
         self.palette = palette
@@ -657,8 +725,9 @@ class TelemetryRail(RailResizeMixin, Static):
     def push_wave(self, sample: float) -> None:
         self.query_one("#tel-wave", Waveform).push(sample)
 
-    def set_context(self, used: int, total: int | None = None) -> None:
-        """Set the gauge's reading, and the window it is a share of.
+    def set_context(self, used: int, total: int | None = None,
+                    threshold: int | None = None) -> None:
+        """Set the gauge's reading, the window it is a share of, and the wall.
 
         ``total`` is passed when the active model's real window is known (the
         live catalog's figure, resolved in ``agent.context_window``) so the
@@ -666,12 +735,30 @@ class TelemetryRail(RailResizeMixin, Static):
         configured fallback. Omitted, the gauge keeps the total it was built
         with — which is what the boot and resize paths want, since they have no
         model reading to offer.
+
+        ``threshold`` is ``agent.compact_threshold(window)``: the same number the
+        loop compacts at, drawn as a marker so the operator can see the wall
+        coming. Pass ``0`` to clear it.
         """
         gauge = self.query_one("#tel-gauge", ContextGauge)
-        gauge.set(used, total)
+        gauge.set(used, total, threshold)
         # Keep the rail's own copy in step, so a later `set_context(used)` with
         # no total does not snap the gauge back to the boot-time value.
         self.total_context = gauge.total
+
+    def set_compacting(self, active: bool) -> None:
+        """Put the gauge into (or out of) its folding animation."""
+        try:
+            self.query_one("#tel-gauge", ContextGauge).set_compacting(active)
+        except Exception:  # noqa: BLE001 - a rail tick must not raise
+            pass
+
+    def tick_context(self) -> None:
+        """Advance the gauge's compaction animation by one frame."""
+        try:
+            self.query_one("#tel-gauge", ContextGauge).tick()
+        except Exception:  # noqa: BLE001
+            pass
 
     def touch_file(self, path: str) -> None:
         if path:

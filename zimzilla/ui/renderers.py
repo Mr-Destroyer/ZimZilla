@@ -645,3 +645,163 @@ def finding_detail(f: dict, palette: Palette, *, indent: int = 2) -> Text:
         t.append(agent, style=palette.dim)
         t.append("\n")
     return t
+
+
+# ---- context compaction ---------------------------------------------------
+# Auto-compaction is the one long operation with no output of its own: the
+# summariser is a single request, so the operator sees a still screen for as
+# long as it takes. This panel is the answer — it animates the *shape* of what
+# is happening (a four-stage cascade draining the transcript into a summary)
+# rather than claiming progress it cannot know, which is why the cascade loops
+# instead of filling to 100%.
+#
+# The numbers are real: the start size is the measured prompt the endpoint
+# reported, the target is the size a summary is expected to land at, and the
+# elapsed clock is the wall time of the request. Only the motion is decoration.
+
+#: Braille spinner, the same family the rest of the harness uses.
+COMPACT_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+#: The four things compaction does, top to bottom. The bar per row is the
+#: transcript shrinking, and each row lags the one above it so the field reads
+#: as a wave folding down the column rather than four independent gauges.
+COMPACT_STAGES = ("read", "fold", "summarise", "rebuild")
+
+
+def _fmt_tokens(n: int) -> str:
+    """`182.4k` / `1.0M` — one decimal, never a bare long integer."""
+    n = max(0, int(n))
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _compact_bar(ratio: float, cells: int, palette: Palette,
+                 bright: bool) -> Text:
+    """One row of the cascade: filled cells, a lit leading edge, then slack."""
+    ratio = max(0.0, min(1.0, ratio))
+    filled = int(round(ratio * cells))
+    body = f"bold {palette.accent}" if bright else palette.primary
+    t = Text()
+    if filled:
+        # The last filled cell is the "edge" of the collapse — it is where the
+        # tokens are going, so it is the one cell that is always bright.
+        t.append("▓" * (filled - 1), style=body)
+        t.append("▓", style=f"bold {palette.accent}")
+    if filled < cells:
+        t.append("░" * (cells - filled), style=palette.dim)
+    return t
+
+
+def compaction_panel(state: dict, palette: Palette, width: int = 72) -> Text:
+    """The live compaction animation, as a block of text.
+
+    ``state`` keys, all optional except ``used``:
+
+    ``used``      the measured prompt size, in tokens
+    ``window``    the resolved context window the threshold is a share of
+    ``threshold`` the token count that tripped the compaction
+    ``trigger``   ``"threshold"`` or ``"overflow"``
+    ``frame``     monotonic frame counter, drives the animation
+    ``elapsed``   seconds since the compaction started
+    ``done``      True once the summariser returned (or failed)
+    ``ok``        whether it worked; only meaningful with ``done``
+    ``note``      the summariser's note or the error, shown on the last line
+    """
+    p = palette
+    used = max(0, int(state.get("used") or 0))
+    window = max(0, int(state.get("window") or 0))
+    threshold = max(0, int(state.get("threshold") or 0))
+    trigger = str(state.get("trigger") or "threshold")
+    frame = int(state.get("frame") or 0)
+    elapsed = float(state.get("elapsed") or 0.0)
+    done = bool(state.get("done"))
+    ok = bool(state.get("ok"))
+    note = str(state.get("note") or "")
+
+    # The size a summary lands at. Not knowable in advance, so the estimate
+    # below is labelled as one while the compaction runs; when it finishes the
+    # loop's measured figure (`after`) replaces it, so the "freed" line is a
+    # measurement rather than a guess.
+    after = max(0, int(state.get("after") or 0))
+    target = max(1_200, min(int(used * 0.08) if used else 1_200, 20_000))
+    if done and ok:
+        target = after or max(600, min(target, used))
+
+    # A looping sawtooth, deliberately not a progress bar: the summariser gives
+    # no progress, so a bar that filled would be inventing one.
+    phase = ((frame * 0.055) % 1.0) if not done else 1.0
+
+    cells = max(10, min(48, width - 30))
+    t = Text()
+
+    # ---- header ----
+    t.append(" ⟲ ", style=f"bold {p.accent}")
+    t.append("CONTEXT COMPACTION", style=f"bold {p.accent}")
+    t.append("  ")
+    if trigger == "overflow":
+        t.append("prompt overflow", style=f"bold {p.red}")
+        if window:
+            t.append(f" · {_fmt_tokens(window)} window", style=p.dim)
+    else:
+        t.append(f"at {_fmt_tokens(threshold)}", style=p.amber)
+        if window:
+            t.append(f" of {_fmt_tokens(window)}", style=p.dim)
+    t.append("\n")
+
+    rule = "─" * max(8, min(width, 78))
+    t.append(" " + rule, style=p.dim)
+    t.append("\n")
+
+    # ---- the cascade ----
+    for i, stage in enumerate(COMPACT_STAGES):
+        # Each row starts a little after the one above it and runs a little
+        # further, so the collapse travels down the column.
+        lag = i * 0.17
+        row_phase = max(0.0, min(1.0, phase * 1.55 - lag))
+        floor = target / used if used else 0.0
+        ratio = 1.0 - row_phase * (1.0 - floor)
+        current = int(used * ratio)
+        bright = row_phase < 0.98
+        t.append(f" {stage:<10}", style=p.dim if done else p.primary)
+        t.append_text(_compact_bar(ratio, cells, p, bright))
+        t.append("  ")
+        t.append(f"{_fmt_tokens(current):>7}", style=p.primary if not done else p.dim)
+        t.append("\n")
+
+    t.append(" " + rule, style=p.dim)
+    t.append("\n")
+
+    # ---- footer: what is actually happening ----
+    if not done:
+        spin = COMPACT_SPINNER[frame % len(COMPACT_SPINNER)]
+        t.append(f" {spin} ", style=f"bold {p.accent}")
+        t.append("summarising history", style=f"bold {p.primary}")
+        t.append(f"  {elapsed:4.1f}s", style=p.dim)
+        t.append("  → ≈", style=p.dim)
+        t.append(_fmt_tokens(target), style=p.accent)
+        t.append(" after", style=p.dim)
+    elif ok:
+        t.append(" ✔ ", style=f"bold {p.accent}")
+        t.append("history compacted", style=f"bold {p.accent}")
+        t.append(f"  {_fmt_tokens(used)} → {_fmt_tokens(target)}", style=p.primary)
+        t.append(f"  freed {_fmt_tokens(max(0, used - target))}", style=p.dim)
+        t.append(f"  {elapsed:4.1f}s", style=p.dim)
+    else:
+        t.append(" ✖ ", style=f"bold {p.red}")
+        t.append("compaction failed", style=f"bold {p.red}")
+        t.append(f"  {elapsed:4.1f}s", style=p.dim)
+    t.append("\n")
+
+    if note:
+        # One line of the summariser's own words: a summary that came back
+        # about something else is a real failure mode, and it is invisible
+        # unless the note is shown.
+        first = note.strip().splitlines()[0] if note.strip() else ""
+        if first:
+            if len(first) > max(20, width - 4):
+                first = first[: max(20, width - 5)] + "…"
+            t.append("   " + first, style=p.dim)
+            t.append("\n")
+    return t

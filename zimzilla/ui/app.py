@@ -995,6 +995,10 @@ class ZimZillaApp(App):
         # cumulative input total — is how full the context window actually is:
         # the cumulative figure counts every turn's prompt and grows forever.
         self._last_call_input = 0
+        # The fast repaint timer for the compaction animation, or None when no
+        # compaction is running. One timer for the whole app: started by the
+        # `compacting` event, stopped when the panel closes itself.
+        self._compact_timer = None
         # Team workers' usage, carried into the bar on top of the main agent's
         # own totals. _handle_event computes the bar from self.agent alone, so
         # without this the synthesis turn would overwrite the bar and drop the
@@ -1389,7 +1393,8 @@ class ZimZillaApp(App):
             return
         a = self.agent
         rail.set_cost(a.session_cost, a.session_input_tokens, a.session_output_tokens)
-        rail.set_context(self._last_call_input)
+        window = a.context_window()
+        rail.set_context(self._last_call_input, window, a.compact_threshold(window))
         loop.set_counters(a.turn_count, self.query_one(StatusBar).iterations)
 
     def on_resize(self, event) -> None:
@@ -1419,11 +1424,52 @@ class ZimZillaApp(App):
         bar = self._status_bar()
         i = 0
         while self.busy:
-            if bar is not None:
+            if bar is not None and not bar.hold:
                 bar.activity = THINKING_VERBS[i % len(THINKING_VERBS)]
                 bar.render_bar()
             i += 1
             await asyncio.sleep(0.35)
+
+    # ---- compaction animation ---------------------------------------------
+    #: Frames per second for the compaction panel and the rail sweep. 0.09s is
+    #: fast enough to read as motion (11fps of a 4-row cascade) and slow enough
+    #: that repainting two widgets cannot cost a frame of the stream.
+    COMPACT_TICK = 0.09
+
+    def _start_compact_animation(self) -> None:
+        """Start the fast repaint loop for a compaction, if it is not running."""
+        if getattr(self, "_compact_timer", None) is not None:
+            return
+        self._compact_timer = self.set_interval(
+            self.COMPACT_TICK, self._compact_frame_tick)
+
+    def _stop_compact_animation(self) -> None:
+        timer = getattr(self, "_compact_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:  # noqa: BLE001 - a stopped timer is already fine
+                pass
+        self._compact_timer = None
+
+    def _compact_frame_tick(self) -> None:
+        """One frame of the compaction animation: panel, rail sweep, status."""
+        try:
+            chat = self.query_one(ChatPane)
+        except Exception:  # noqa: BLE001 - shutting down
+            self._stop_compact_animation()
+            return
+        alive = chat.compact_tick()
+        tele = self._telemetry_rail()
+        if tele is not None:
+            tele.tick_context()
+        bar = self._status_bar()
+        if bar is not None:
+            bar.tick_compaction()
+        if not alive:
+            # The panel has closed (or never opened): nothing left to paint, so
+            # the timer stops itself rather than spinning for the session.
+            self._stop_compact_animation()
 
     # ---- input ------------------------------------------------------------
     def _completer(self) -> CompletionPopup:
@@ -1660,8 +1706,11 @@ class ZimZillaApp(App):
                 # The window is passed alongside so the gauge's percentage is a
                 # share of *this model's* window, not of the configured
                 # fallback — resolved the same way the auto-compact threshold
-                # resolves it, so the two can never disagree.
-                tele.set_context(self._last_call_input, self.agent.context_window())
+                # resolves it, so the two can never disagree. The threshold is
+                # that same resolution, drawn as a marker on the bar.
+                window = self.agent.context_window()
+                tele.set_context(self._last_call_input, window,
+                                 self.agent.compact_threshold(window))
 
         elif etype == "tool_call":
             self._flush_stream(chat, p)
@@ -1754,9 +1803,28 @@ class ZimZillaApp(App):
                 f"({ev['used']:,} / {ev['window']:,} tokens)",
                 warn=True,
             )
-            bar.set_activity("compacting", busy=True)
+            # The animation owns the screen for the duration of the summariser
+            # request, which is a single call with no output of its own. It is
+            # fed the same numbers the loop used, so what it draws is the real
+            # compaction rather than a decorative spinner.
+            chat.compact_begin(
+                used=ev.get("used") or 0,
+                window=ev.get("window") or 0,
+                threshold=ev.get("threshold") or self.agent.compact_threshold(
+                    ev.get("window") or 0),
+                trigger=str(ev.get("trigger") or "threshold"),
+            )
+            if tele is not None:
+                tele.set_compacting(True)
+            self._start_compact_animation()
+            bar.set_activity("compacting context", busy=True, hold=True)
 
         elif etype == "compacted":
+            chat.compact_end(bool(ev["ok"]), str(ev.get("note") or ""),
+                             used=ev.get("used"), after=ev.get("after"))
+            if tele is not None:
+                tele.set_compacting(False)
+            bar.set_activity("thinking", busy=True)
             if ev["ok"]:
                 self._sys_line(
                     "history compacted — carrying on with a summary of it",
@@ -1770,7 +1838,6 @@ class ZimZillaApp(App):
                     tele.set_context(0)
             else:
                 self._sys_line(f"auto-compact failed: {ev['note']}", warn=True)
-            bar.set_activity("thinking", busy=True)
 
         elif etype == "reasoning_exhausted":
             # A truncation that carried nothing. The reply hit the ceiling and
@@ -2795,7 +2862,10 @@ class ZimZillaApp(App):
             ("last prompt", f"{used:,}" if used else "not measured yet",
              f"{used / window * 100:.1f}% of the window" if used else ""),
             ("auto-compact", "on" if self.cfg.auto_compact else "off",
-             f"compacts at {self.cfg.compact_at:.0%} of the window"
+             (f"at {a.compact_threshold(window):,} tokens "
+              f"({self.cfg.compact_at:.0%} of the window"
+              + (f", capped at {self.cfg.compact_tokens:,}" if self.cfg.compact_tokens else "")
+              + ")")
              if self.cfg.auto_compact else "/compact still works by hand"),
             ("output ceiling", f"{ceiling:,}",
              "per reply; a reply cut off here is reported as truncated"
@@ -4910,13 +4980,32 @@ class ZimZillaApp(App):
     async def _cmd_compact(self) -> None:
         self.busy = True
         bar = self.query_one(StatusBar)
-        bar.set_activity("compacting history", busy=True)
-        spinner = asyncio.create_task(self._verb_spinner())
+        chat = self.query_one(ChatPane)
+        # The manual command gets the same animation as the automatic one: it is
+        # the same operation with the same silence from the summariser, and the
+        # operator who typed /compact is the one most in need of seeing it move.
+        window = self.agent.context_window()
+        used = self.agent._last_input_tokens
+        chat.compact_begin(used=used, window=window,
+                           threshold=self.agent.compact_threshold(window),
+                           trigger="threshold")
+        tele = self._telemetry_rail()
+        if tele is not None:
+            tele.set_compacting(True)
+        self._start_compact_animation()
+        bar.set_activity("compacting history", busy=True, hold=True)
         self._sys_line("compacting conversation…")
+        ok, result = False, "the compaction request raised before answering"
         try:
             ok, result = await self.agent.compact()
         finally:
-            spinner.cancel()
+            # The timer is deliberately NOT stopped here: `compact_end` leaves
+            # the finished panel up for COMPACT_LINGER seconds, and the timer is
+            # what closes it. It stops itself on the first tick after that.
+            chat.compact_end(ok, result, used=used,
+                             after=self.agent.history_tokens() if ok else 0)
+            if tele is not None:
+                tele.set_compacting(False)
             self.busy = False
             bar.set_activity("idle", busy=False)
             bar.render_bar()

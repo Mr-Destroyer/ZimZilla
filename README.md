@@ -280,6 +280,8 @@ will restart the checkout under you on the next launch.
 --no-think           never show the model's own reasoning
 --max-tokens N       max output tokens per reply
 --no-auto-compact    never compact history automatically (/compact still works)
+--compact-at N       compact once the prompt reaches N tokens (default 200000;
+                     0 = percentage of the window only)
 --unsafe             disable the filesystem jail
 --panes              run under tmux; ctrl+b h/v open more ZimZilla panes
 --resume SESSION     restore a saved session at launch (used by /panes)
@@ -434,7 +436,7 @@ stops is almost always one of the last two, not the first.
 
 | Limit | Default | What happens at it |
 |---|---|---|
-| **Context window** | the model's own, from the live catalog (1M fallback) | History is compacted automatically at 80% — see below |
+| **Context window** | the model's own, from the live catalog (1M fallback) | History is compacted automatically at 200k or 80% of the window, whichever comes first — see below |
 | **Output ceiling** | 32768 tokens | The reply is cut off; reported as `truncated`, never silently. A cut that carried *nothing* is retried once at double — see below |
 | **Rounds before pause** | 40 | The turn **continues** if the last round did real work; otherwise it stops and says so |
 | **Hard round limit** | 400 | The turn stops and says so — this is the runaway guard |
@@ -543,9 +545,20 @@ errors is the loop spinning, and that is what the cap is for.
 ### Auto-compact
 
 History is summarised automatically when the **measured** prompt size — the
-`input_tokens` the endpoint reported for the previous call — reaches 80% of the
-model's window. The trigger is a real measurement, not an estimate, and it is
-checked *before* each request rather than after one fails.
+`input_tokens` the endpoint reported for the previous call — reaches the
+compaction threshold. The trigger is a real measurement, not an estimate, and it
+is checked *before* each request rather than after one fails.
+
+The threshold is whichever comes **first**:
+
+- **200k tokens**, absolute (`--compact-at TOKENS`, `0` to disable), and
+- **80% of the model's window** (`compact_at`).
+
+The absolute cap exists because the percentage alone cannot catch a window that
+resolves too *large*: a catalog that over-promises 1M for a model that serves
+200k, or no published figure at all and the 1M fallback applying, meant 80% was
+never reached and the session died at the wall with `400 bad request`. At 200k it
+compacts with room to spare, whatever the catalog claims.
 
 The window is per-model: it comes from the active source's live catalog
 (UnoRouter's `contextWindow`, OpenRouter's and TokenHarbour's `context_length`,
@@ -555,9 +568,20 @@ magnitude — a 1M-window free model and a 64k one cannot share a threshold
 without the small one overflowing before it trips.
 
 If a request is *still* rejected for being too long, that is recognised as a
-context overflow (rather than the generic `bad request` it used to print),
-history is compacted, and the round is retried once. `/compact` still works by
-hand; `--no-auto-compact` turns the automatic path off entirely.
+context overflow rather than the generic `bad request` it used to print —
+including the case where the gateway says nothing but `bad request` on a prompt
+that is already at the threshold. The endpoint's own figure is read back out of
+the message when it states one (`... 210000 tokens > 200000 maximum`), and that
+number then outranks the catalog for the rest of the session. History is
+compacted and the round is retried once. `/compact` still works by hand;
+`--no-auto-compact` turns the automatic path off entirely.
+
+While it runs, the compaction is drawn rather than left as a still screen: a
+four-row cascade in the transcript (read → fold → summarise → rebuild) draining
+the measured prompt towards the size of the summary, the context gauge sweeping
+a folding pass, and the status bar carrying a spinner that the idle-verb
+rotation cannot overwrite. The motion is decoration; every number in it is the
+real one, and the closing frame reports what was actually freed.
 
 ---
 
@@ -2234,6 +2258,8 @@ python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv
 python tests/test_deliverable.py   # the deliverable check — nudge, truncation, reasoning exhaustion
 python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, overflow
+python tests/test_compact_trigger.py  # the 200k trigger, the bare-400 recovery, the animation
+python tests/test_compact_ui.py    # the same, driven through the live TUI
 python tests/test_reasoning.py     # the reasoning display — forwarding, ordering, renderables
 python tests/test_boot.py          # the boot screen — the logo spin, frame geometry
 python tests/test_opencode.py      # /zim-opencode — the pool, rotation, retry policy, alias
