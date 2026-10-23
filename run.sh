@@ -21,6 +21,14 @@
 
 set -euo pipefail
 
-_self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+# Resolve this script's directory without `readlink -f`: GNU's -f is not on
+# macOS (BSD readlink has no -f), so symlinks are followed by hand.
+_self_path="${BASH_SOURCE[0]}"
+while [[ -L "$_self_path" ]]; do
+  _self_link_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
+  _self_path="$(readlink "$_self_path")"
+  [[ "$_self_path" == /* ]] || _self_path="$_self_link_dir/$_self_path"
+done
+_self_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
 export ZIMZILLA_ROOT="$_self_dir"
 exec "$_self_dir/packaging/zimzilla" "$@"

@@ -20,12 +20,20 @@ set -euo pipefail
 
 # Find the checkout. This launcher lives in <root>/packaging/, so when
 # ZIMZILLA_ROOT is not already exported — run.sh and the installed shim both
-# export it — the checkout is the parent of this file's directory. readlink -f
-# resolves a symlink first, so the same rule holds however it was reached.
-_self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+# export it — the checkout is the parent of this file's directory. Symlinks are
+# resolved by the helper above, so the same rule holds however it was reached.
+# Resolve this script's directory without `readlink -f`: GNU's -f is not on
+# macOS (BSD readlink has no -f), so symlinks are followed by hand.
+_self_path="${BASH_SOURCE[0]}"
+while [[ -L "$_self_path" ]]; do
+  _self_link_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
+  _self_path="$(readlink "$_self_path")"
+  [[ "$_self_path" == /* ]] || _self_path="$_self_link_dir/$_self_path"
+done
+_self_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
 if [[ -z "${ZIMZILLA_ROOT:-}" ]]; then
-  if [[ "$(basename -- "$_self_dir")" == "packaging" ]]; then
-    ZIMZILLA_ROOT="$(dirname -- "$_self_dir")"
+  if [[ "$(basename "$_self_dir")" == "packaging" ]]; then
+    ZIMZILLA_ROOT="$(dirname "$_self_dir")"
   else
     ZIMZILLA_ROOT="$_self_dir"
   fi

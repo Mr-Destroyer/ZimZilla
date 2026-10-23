@@ -115,12 +115,22 @@ bold "╰───────────────────────�
 # --- 0. preconditions --------------------------------------------------------
 
 step "Checking prerequisites"
-command -v git >/dev/null 2>&1 || die "git is required."
+if ! command -v git >/dev/null 2>&1; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    die "git is required — run: xcode-select --install"
+  fi
+  die "git is required."
+fi
 
 PY="$(command -v python3 || true)"
 [[ -n "$PY" ]] || die "python3 not found — install Python 3.11 or newer."
-"$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
-  || die "Python 3.11+ is required; $PY is $("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')."
+if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  _pyver="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo unknown)"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    die "Python 3.11+ is required; $PY is $_pyver. Install it with: brew install python@3.12"
+  fi
+  die "Python 3.11+ is required; $PY is $_pyver."
+fi
 ok "git and $("$PY" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')"
 
 # --- 1. get the source -------------------------------------------------------
@@ -136,7 +146,7 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
 elif [[ -e "$INSTALL_DIR" ]]; then
   die "$INSTALL_DIR exists but is not a git checkout — move it aside and re-run."
 else
-  mkdir -p "$(dirname -- "$INSTALL_DIR")"
+  mkdir -p "$(dirname "$INSTALL_DIR")"
   # A full clone, not --depth 1: the launcher's update check counts how far
   # behind the checkout is and fast-forwards it, and both want real history.
   # The repository is a couple of MB, so there is nothing to save by shallow.
@@ -203,8 +213,12 @@ ok "$BIN_DIR/zimzilla"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ok "$BIN_DIR is on PATH" ;;
   *)
+    # macOS defaults to zsh, where ~/.bashrc is not read at all. Print the file
+    # the operator's shell actually loads rather than a line that does nothing.
+    _rc=".bashrc"
+    case "${SHELL:-}" in *zsh) _rc=".zshrc" ;; esac
     warn "$BIN_DIR is not on your PATH — add it, then open a new shell:"
-    note "echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.bashrc"
+    note "echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/$_rc"
     ;;
 esac
 

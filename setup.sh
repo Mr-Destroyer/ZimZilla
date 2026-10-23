@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-SELF="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SELF="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ZIMZILLA_HOME="${ZIMZILLA_HOME:-$HOME/.zimzilla}"
 LOG_DIR="$ZIMZILLA_HOME/logfare"
 PROFILE="$LOG_DIR/source"
@@ -32,7 +32,15 @@ PORT="${LITELLM_PORT:-4001}"
 # Prefer the checkout's own venv — the one install.sh builds — so `./setup.sh`
 # works with no activation after a global install. Then an activated venv
 # ($VIRTUAL_ENV), then a python3 on PATH. This script never creates a venv.
-_self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+# Resolve this script's directory without `readlink -f`: GNU's -f is not on
+# macOS (BSD readlink has no -f), so symlinks are followed by hand.
+_self_path="${BASH_SOURCE[0]}"
+while [[ -L "$_self_path" ]]; do
+  _self_link_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
+  _self_path="$(readlink "$_self_path")"
+  [[ "$_self_path" == /* ]] || _self_path="$_self_link_dir/$_self_path"
+done
+_self_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
 _root="${ZIMZILLA_ROOT:-$_self_dir}"
 if [[ -x "$_root/.venv/bin/python" ]]; then
   PY="$_root/.venv/bin/python"

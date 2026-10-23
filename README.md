@@ -10,7 +10,7 @@ keeps going until the job is done — while you watch it work.
 <sub>by **Mr-Destroyer / ZIM**</sub>
 
 ![python](https://img.shields.io/badge/python-3.11%2B-00ff41?style=flat-square&labelColor=040704)
-![platform](https://img.shields.io/badge/platform-linux-00ff41?style=flat-square&labelColor=040704)
+![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos-00ff41?style=flat-square&labelColor=040704)
 ![interface](https://img.shields.io/badge/interface-terminal-00ff41?style=flat-square&labelColor=040704)
 ![status](https://img.shields.io/badge/status-active-00ff41?style=flat-square&labelColor=040704)
 
@@ -117,6 +117,32 @@ zimzilla --mode zim                # full auto, follows AGENTS.md
 zimzilla --allow allow.yaml        # declare your targets
 zimzilla --deny out-of-scope.yaml  # hosts that are never touched
 ```
+
+### macOS
+
+ZimZilla runs natively on macOS 12+ — Apple silicon and Intel. There is no
+Docker step and no Linux emulation: the harness is Python, and the LiteLLM
+proxy is a local Python process exactly as it is on Linux.
+
+```bash
+brew install python@3.12 git
+curl -fsSL https://raw.githubusercontent.com/Mr-Destroyer/ZimZilla/main/install.sh | bash
+```
+
+macOS ships Python 3.9 with the Xcode command-line tools, and ZimZilla needs
+3.11+, so the Homebrew interpreter is the one the installer uses. The default
+shell is zsh, so when `~/.local/bin` is missing from `PATH` the installer prints
+the `~/.zshrc` line, not a `~/.bashrc` one.
+
+`Terminal.app` works, but it has no 24-bit colour; for the intended
+green-on-black look use iTerm2, Ghostty, WezTerm or kitty. The proxy binds
+loopback only, so macOS may ask for permission the first time your terminal
+connects to a local port — allow it for that terminal.
+
+The proxy manager uses `lsof` on macOS (where `ss` does not exist) and `ss` on
+Linux, so `/zim-logfare`, `/zim-iteracompute` and `/zim-infronai` behave the
+same on both. `start-litellm.sh` also stops a stale proxy by port rather than by
+pidfile, so a crashed session does not leave `:4001` claimed.
 
 If `~/.local/bin` is not on your `PATH`, the installer prints the line to add.
 Re-running the same command updates an existing install.

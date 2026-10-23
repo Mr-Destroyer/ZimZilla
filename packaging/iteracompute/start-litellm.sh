@@ -13,7 +13,15 @@ set -euo pipefail
 
 # Self-locating: this script, its config and its profile live together in one
 # directory, so a relocated install still finds its siblings.
-_self_dir="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+# Resolve this script's directory without `readlink -f`: GNU's -f is not on
+# macOS (BSD readlink has no -f), so symlinks are followed by hand.
+_self_path="${BASH_SOURCE[0]}"
+while [[ -L "$_self_path" ]]; do
+  _self_link_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
+  _self_path="$(readlink "$_self_path")"
+  [[ "$_self_path" == /* ]] || _self_path="$_self_link_dir/$_self_path"
+done
+_self_dir="$(cd -- "$(dirname "$_self_path")" && pwd -P)"
 
 # --------------------------- configurable ---------------------------
 ENV_FILE="${LITELLM_ENV_FILE:-$_self_dir/source}"
@@ -85,11 +93,16 @@ port_answers() {
 }
 
 # Pids LISTENing on $PORT. `sport = :$PORT` matches the local port rather than a
-# peer port that merely mentions the number, and ss is used because lsof is not
-# installed everywhere. Empty when nothing is listening.
+# peer port that merely mentions the number. ss is Linux-only and lsof is not
+# installed everywhere, so try both: lsof is what macOS ships, ss is what a bare
+# Linux box usually has. Empty when nothing is listening.
 port_owner_pids() {
-  ss -ltnpH "sport = :$PORT" 2>/dev/null \
-    | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH "sport = :$PORT" 2>/dev/null \
+      | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u
+  fi
 }
 
 # Kill whatever litellm holds $PORT, when it is not one this script tracks.
@@ -122,7 +135,7 @@ do_stop() {
     log "stopping proxy (pid $pid)..."
     kill "$pid" 2>/dev/null || true
     local i
-    for i in $(seq 1 20); do
+    for ((i = 1; i <= 20; i++)); do
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
       sleep 0.25
     done
@@ -144,20 +157,20 @@ do_stop() {
     # Then the general one, which reaches a stray from an older layout.
     kill_port_orphans TERM
     local w
-    for w in $(seq 1 20); do
+    for ((w = 1; w <= 20; w++)); do
       port_answers || break
       sleep 0.25
     done
     if port_answers; then
       kill_port_orphans KILL
-      for w in $(seq 1 8); do
+      for ((w = 1; w <= 8; w++)); do
         port_answers || break
         sleep 0.25
       done
     fi
     if port_answers; then
       err "something is still serving :$PORT and it is not a litellm I can identify."
-      err "find it with:  ss -ltnp \"sport = :$PORT\""
+      err "find it with:  lsof -nP -iTCP:$PORT -sTCP:LISTEN"
       return 1
     fi
     log "port :$PORT freed."
@@ -201,7 +214,7 @@ do_start() {
   disown 2>/dev/null || true
 
   local i
-  for i in $(seq 1 180); do
+  for ((i = 1; i <= 180; i++)); do
     if port_answers; then
       log "up and healthy (pid $(cat "$PID_FILE")) ✓"
       return 0
