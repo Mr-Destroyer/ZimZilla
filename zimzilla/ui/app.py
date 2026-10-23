@@ -34,6 +34,7 @@ from .. import hunt as hunt_mod
 from .. import infronai as inf_mod
 from .. import iteracompute as ic_mod
 from .. import ldxhub as ldx_mod
+from .. import leadgen as leadgen_mod
 from .. import logfare as lf_mod
 from .. import nvidia as nv_mod
 from .. import opencode as oc_mod
@@ -2143,6 +2144,7 @@ class ZimZillaApp(App):
             "team": lambda a: self._cmd_team(a),
             "osint": lambda a: self._cmd_osint(a),
             "osint-tree": lambda a: self._cmd_osint_tree(a),
+            "leadgen": lambda a: self._cmd_leadgen(a),
             "shodan-api-setup": lambda a: self._cmd_shodan_key(a),
             "shodan-cam-search": lambda a: self._cmd_shodan_search("cam", a),
             "shodan-scada-search": lambda a: self._cmd_shodan_search("scada", a),
@@ -2274,6 +2276,7 @@ class ZimZillaApp(App):
             ("/team <task>", "fan the task out across parallel agents"),
             ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
             ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
+            ("/leadgen <niche> <location>", "passive local lead gen — audit, drafts, never sends"),
             ("/shodan-api-setup <key>", "store your Shodan API key"),
             ("/shodan-cam-search [cc]", "exposed IP cameras, then analyse the result"),
             ("/shodan-scada-search [cc]", "exposed ICS / SCADA (PLCs, RTUs, HMIs)"),
@@ -5361,6 +5364,177 @@ class ZimZillaApp(App):
                  style=p.primary)
         self.query_one(ChatPane).write_block(t)
 
+    # ---- leadgen ----------------------------------------------------------
+    def _cmd_leadgen(self, args) -> None:
+        """/leadgen <niche> <location> — local leads, passive audit, drafts.
+
+        A router like `/osint`: validate the pair, open a case directory, then
+        hand the phase sequence to the main agent as one turn — same tools,
+        same scope guard, same transcript, same Ctrl+C.
+
+        The split between the two halves is the only parsing decision here.
+        Niche and location are both free text, so `--in` is the explicit
+        separator: `/leadgen emergency plumbers --in Austin, TX` gives a
+        two-word niche, while `/leadgen plumbers Austin TX` takes the first
+        word as the niche and the rest as the location. Guessing further than
+        that would silently run the wrong search.
+        """
+        p = self.palette
+
+        if not args:
+            self._leadgen_usage()
+            return
+
+        niche, location, err = self._leadgen_split(args)
+        if err:
+            self._sys_line(f"usage: /leadgen <niche> <location>  ({err})",
+                           warn=True)
+            return
+
+        ok, err = leadgen_mod.validate(niche, location)
+        if not ok:
+            self._sys_line(f"usage: /leadgen <niche> <location>  ({err})",
+                           warn=True)
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        case = leadgen_mod.case_dir(self.cfg, niche, location)
+        prompt = leadgen_mod.build_prompt(niche, location, case)
+
+        t = Text()
+        t.append("  ◈ CASE      ", style=f"bold {p.accent}")
+        t.append(leadgen_mod.label(niche, location) + "\n", style=p.primary)
+        t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
+        t.append(str(case) + "\n", style=p.dim)
+        # Which phases can actually run, before a single request is made: a
+        # run with no Places key has no leads, and saying so here is kinder
+        # than a report that opens with an empty discovery table.
+        rows = leadgen_mod.plan()
+        ready = [r["phase"] for r in rows if r["ready"]]
+        skipped = [f"{r['phase']} {r['reason']}" for r in rows if not r["ready"]]
+        t.append("  ◈ PHASES    ", style=f"bold {p.accent}")
+        t.append(" · ".join(ready), style=p.primary)
+        if skipped:
+            t.append("\n              skipped: " + " · ".join(skipped),
+                     style=p.dim)
+        t.append("\n")
+        t.append("  ◈ NOTICE    ", style=f"bold {p.amber}")
+        t.append(
+            "for businesses you have a legitimate reason to contact — "
+            "drafts are written to disk, never sent\n",
+            style=p.dim,
+        )
+        self.query_one(ChatPane).write_block(t)
+
+        self._run_turn(
+            prompt,
+            display=f"⚑ /leadgen {leadgen_mod.label(niche, location)}",
+            finalise=lambda: self._finalise_leadgen(case,
+                                                    interrupted=self._cancelled),
+            # The report is the run's product. Declaring it means a model that
+            # narrates "Writing the report." and stops is asked again, and one
+            # that still will not write it is reported as having failed rather
+            # than ending in silence — the same contract /osint has.
+            deliverable=Deliverable(path=case / "report.md", label="report.md"),
+        )
+
+    @staticmethod
+    def _leadgen_split(args) -> tuple[str, str, str]:
+        """Split the argument list into (niche, location, error)."""
+        words = [str(a) for a in args]
+        if "--in" in words:
+            i = words.index("--in")
+            if words.count("--in") > 1:
+                return "", "", "use --in once"
+            niche = " ".join(words[:i])
+            location = " ".join(words[i + 1:])
+        else:
+            if len(words) < 2:
+                return "", "", "give a niche and a location"
+            niche, location = words[0], " ".join(words[1:])
+        # A quoted location (`"Austin, TX"`) arrives as two tokens with the
+        # quote characters still attached — the command line is split on
+        # whitespace here, not by a shell.
+        niche = " ".join(niche.replace('"', " ").split())
+        location = " ".join(location.replace('"', " ").split())
+        if not niche:
+            return "", "", "no niche before --in"
+        if not location:
+            return "", "", "no location given"
+        return niche, location, ""
+
+    def _finalise_leadgen(self, case: Path, interrupted: bool = False) -> None:
+        """Archive the report and the drafts, clear the working directory.
+
+        The report says what was found; the drafts are what the operator
+        actually sends. Both are kept, everything else — raw API responses,
+        fetched HTML, the audit JSON the report already cites — is deleted. A
+        run that produced no report is left exactly as it is, drafts and all,
+        so the operator can see how far it got.
+
+        An *interrupted* run is kept even when it got as far as writing the
+        report. `/osint` archives in that case; this command does not, because
+        the thing an interrupted lead run most needs is to be looked at — which
+        leads were reached, which were refused, where it stopped — and a
+        cleanup that deletes the audit trail the moment Ctrl+C lands is the
+        wrong default for a run whose output is a judgement call.
+        """
+        if interrupted:
+            self._sys_line(
+                f"run interrupted — case directory kept for inspection: {case}",
+                warn=True,
+            )
+            return
+
+        report, cleaned = leadgen_mod.finalise_case(self.cfg, case)
+        if report is not None:
+            self._sys_line(f"report archived: {report}", ok=True)
+            drafts = leadgen_mod.archived_drafts(self.cfg, case)
+            if drafts.is_dir():
+                n = len(list(drafts.glob("*.md")))
+                self._sys_line(f"{n} draft(s) archived: {drafts}", ok=True)
+            else:
+                self._sys_line("no drafts written — every lead was clean, "
+                               "skipped, or out of scope")
+            if cleaned:
+                self._sys_line("case directory cleared (raw audit data discarded)")
+            else:
+                self._sys_line(
+                    f"case directory kept — cleanup could not finish: {case}",
+                    warn=True,
+                )
+        else:
+            self._sys_line(
+                f"no report found — case directory kept for inspection: {case}",
+                warn=True,
+            )
+
+    def _leadgen_usage(self) -> None:
+        """The phase list and key status, shown by a bare `/leadgen`."""
+        p = self.palette
+        t = Text()
+        t.append("  LEAD GEN\n\n", style=f"bold {p.accent}")
+        for row in leadgen_mod.plan():
+            ready = row["ready"]
+            t.append(f"  {'◉' if ready else '○'} {row['phase']:<11}",
+                     style=f"bold {p.accent}" if ready else p.dim)
+            t.append(row["blurb"] + "\n", style=p.primary if ready else p.dim)
+            if not ready:
+                t.append(f"    {row['reason']}\n", style=p.dim)
+        t.append("\n  usage: ", style=p.dim)
+        t.append("/leadgen <niche> <location>\n", style=p.primary)
+        t.append("         /leadgen emergency plumbers --in Austin, TX\n",
+                 style=p.dim)
+        t.append("\n  drafts are written to disk and never sent.\n",
+                 style=p.dim)
+        t.append("  cases land in ", style=p.dim)
+        t.append(f"{Path(self.cfg.state_dir) / 'leadgen'}/"
+                 "<niche>-<location>-<stamp>/\n", style=p.primary)
+        self.query_one(ChatPane).write_block(t)
+
     # ---- Shodan -----------------------------------------------------------
     # A named search is a *read* of Shodan's index followed by one analysis
     # turn. Nothing here touches the hosts the index returns: the turn is
@@ -7766,6 +7940,8 @@ class ZimZillaApp(App):
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
             ("/osint-tree", "re-show a finished recon as a result tree", "osint"),
+            ("/leadgen", "local leads: passive audit + outreach drafts",
+             "leadgen"),
             ("/shodan-api-setup", "store your Shodan API key", "shodan-api-setup"),
             ("/shodan-cam-search", "exposed IP cameras, then analyse the result",
              "shodan-cam-search"),

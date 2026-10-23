@@ -76,6 +76,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/team", "fan the task out across parallel agents"),
     ("/osint", "open-source recon on a target"),
     ("/osint-tree", "re-show a finished recon as a result tree"),
+    ("/leadgen", "local leads: passive audit + outreach drafts"),
     ("/shodan-api-setup", "store your Shodan API key"),
     ("/shodan-cam-search", "exposed IP cameras, then analyse the result"),
     ("/shodan-scada-search", "exposed ICS / SCADA — PLCs, RTUs, HMIs"),

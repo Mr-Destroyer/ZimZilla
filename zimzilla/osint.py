@@ -119,6 +119,13 @@ evidence:
   UNVERIFIED  — a single source, not yet corroborated.
 """
 
+#: Public aliases for the two guides above, so another command can reuse the
+#: same report shape instead of copying it. `/leadgen` imports these: the
+#: point of the pair being here is that a report's structure is defined once
+#: and the two commands cannot drift into different formats.
+REPORT_GUIDE = _REPORT_GUIDE
+CONFIDENCE_GUIDE = _CONFIDENCE_GUIDE
+
 
 # ---------------------------------------------------------------------------
 # The email playbook

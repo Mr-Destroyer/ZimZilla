@@ -1343,6 +1343,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/osint-tree [kind\|path]` | re-show a finished recon as a result tree |
+| `/leadgen <niche> <location>` | local leads — passive audit, outreach drafts, never sends |
 | `/shodan-api-setup <key>` | store your Shodan API key |
 | `/shodan-cam-search [cc]` | exposed IP cameras — then the model analyses the result |
 | `/shodan-scada-search [cc]` | exposed ICS / SCADA — PLCs, RTUs, HMIs |
@@ -1754,6 +1755,125 @@ environment; none are hard-coded.
 > this on every run and cannot verify it — that part is yours. Recon against
 > people or accounts you have no lawful basis to investigate is not what this
 > is for.
+
+---
+
+## Lead Gen
+
+`/leadgen` finds local businesses for a niche, audits their websites passively,
+and writes one short outreach draft per lead — referencing a finding it
+actually observed. It is a router like `/osint`: validate the pair, open a case
+directory, hand the phase sequence to the main agent as one turn. Same tools,
+same scope guard, same transcript, same `Ctrl+C`.
+
+It **never sends anything**. There is no SMTP client, no Instantly, no
+Smartlead, no dispatch call in the command — the drafts are files on disk, and
+sending is a human, reviewed step outside the harness. That is a structural
+property, not a promise in a prompt: a test fails if the module ever grows a
+sender.
+
+```
+/leadgen plumbers Austin, TX
+
+  ◈ CASE      plumbers · Austin, TX
+  ◈ EVIDENCE  ~/.zimzilla/leadgen/plumbers-austin-tx-20261023-114241/
+  ◈ PHASES    site_audit · draft · report
+              skipped: discovery skipped (no GOOGLE_PLACES_API_KEY) · enrichment skipped (no HUNTER_API_KEY)
+  ◈ NOTICE    for businesses you have a legitimate reason to contact — drafts are written to disk, never sent
+```
+
+The first word is the niche and the rest is the location, so a two-word niche
+needs `--in`:
+
+```bash
+/leadgen plumbers Austin, TX
+/leadgen emergency plumbers --in Austin, TX
+```
+
+| Phase | Needs | What it does |
+|---|---|---|
+| `discovery` | `GOOGLE_PLACES_API_KEY` | Text Search for the niche in the location; name, site, phone, category. Dedupes by host then phone, keeps leads with no site |
+| `site_audit` | — | GET/HEAD only: security headers, certificate and expiry, redirect, load time, CMS fingerprint |
+| `enrichment` | `HUNTER_API_KEY` | one role address per domain (`info@`, `contact@`) — business contact only |
+| `draft` | — | one 90–120 word draft per lead with a finding, written to `drafts/` |
+| `report` | — | `report.md` — headline, coverage, one block per lead, gaps |
+
+A phase whose key is missing is **skipped and reported**, never quietly
+dropped and never improvised around: the startup block says so, the coverage
+table says `skipped (no GOOGLE_PLACES_API_KEY)`, and `## Gaps and next steps`
+says what setting the key would add. `/leadgen` with no arguments prints the
+same phase list with the key status for this machine, and
+`python -m zimzilla.leadgen plan` prints it from a shell.
+
+**The audit is read-only.** One request per check, GET or HEAD, no concurrency.
+It reads what the site volunteers: `strict-transport-security`,
+`content-security-policy`, `x-frame-options`, `x-content-type-options`,
+`referrer-policy`, `permissions-policy`; the certificate's issuer and
+`notAfter` via `openssl s_client`; the http→https redirect; `%{time_total}`
+from the fetch (labelled for what it is — time-to-last-byte from your machine,
+not a field measurement) or PageSpeed lab metrics if `PAGESPEED_API_KEY` is
+set; and a fingerprint from headers, cookies and `<meta name="generator">`.
+Two independent signals before it names a CMS.
+
+It does **not** submit a form, attempt a login, request `/wp-login.php` or
+`/admin` to "confirm" a fingerprint, fuzz a parameter, or scan a port. Absence
+of a header is the finding — that is the whole point, and most local-business
+sites have none of them.
+
+**Scope is enforced before the first fetch.** Every lead host goes through
+`out-of-scope.yaml` before the audit touches it, exactly as `/phish` step 1
+does:
+
+```bash
+python -m zimzilla.leadgen gate https://lead.example/
+# ALLOW  https://lead.example/ — not denied
+# DENY   https://blocked.example/ — denied — listed domain
+```
+
+A denied host is skipped, written to `skipped.jsonl` with the guard's own
+reason, and reported in the `SKIPPED` section of the report. It is not retried
+with another spelling, port or scheme. The bash and web-fetch tools apply the
+same guard independently, so the gate is belt and braces — but the gate is the
+one that leaves a record.
+
+**The drafts.** One file per lead under `drafts/`, each naming the single
+finding it is about and the evidence behind it, then a 90–120 word body: one
+sentence on why it matters in the business's own terms, one sentence offering
+the fix, no price, no urgency, no severity rating, no claim that is not in
+`audit.json`. A lead with no finding gets no draft, and the report says so
+rather than inventing a reason to write.
+
+**The report** uses the same format as `/osint` — the shared guide lives in
+`zimzilla/osint.py` and both commands import it, so they cannot drift. It opens
+with `## Headline` and a coverage table, then `1. DISCOVERY`, `2. SITE AUDIT`
+(one five-line **What / Where / Confidence / Means / Verify** block per lead),
+`3. ENRICHMENT`, `4. DRAFTS`, `5. SKIPPED`, and closes with `## Gaps and next
+steps`. An empty phase keeps its heading and says `Nothing found — <why>`.
+
+**Where it lands.** Working files go to
+`<state_dir>/leadgen/<niche>-<location>-<timestamp>/`, beside your sessions.
+On a successful run the report moves to `<state_dir>/reports/<case>.md` and
+the drafts to `<state_dir>/reports/<case>-drafts/`, and the case directory —
+raw API responses, fetched HTML, the audit JSON the report already cites — is
+deleted. The drafts are archived rather than discarded because they are the
+deliverable. A run that produced no report is left exactly as it is, drafts
+and all, so you can see how far it got — and an interrupted run is always left
+in place, even if it had already written the report, because what an
+interrupted run most needs is to be looked at.
+
+**Keys, all optional, all from the environment.** `GOOGLE_PLACES_API_KEY`
+(discovery), `HUNTER_API_KEY` (enrichment), `PAGESPEED_API_KEY` (real load
+timings) — export them in the shell that launches ZimZilla; this command reads
+`os.environ` and writes no credential of its own. None is hard-coded. With no
+Places key you can still run the rest by dropping your own `leads.json` into
+the case directory before the turn — the phase uses it as-is and says so.
+
+> **Authorised use only.** `/leadgen` is for businesses you have a legitimate
+> reason to contact — your own client base, a market you actually serve, a
+> consented audit. The command states this on every run and cannot verify it —
+> that part is yours. It writes drafts; it never sends them, and it is not a
+> bulk-mail tool. Cold-outreach law (GDPR/PECR in the EU and UK, CAN-SPAM in
+> the US) applies to what you do with the files.
 
 ---
 
@@ -2244,6 +2364,7 @@ zimzilla/                     the package
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
   osint_tree.py               reads a finished report back as a result tree
+  leadgen.py                  /leadgen phases, the scope gate, drafts, report archive
   shodan.py                   /shodan-* searches — the key, the query, the result
   hunt.py                     the campaign engine — wave loop, per-wave dirs, reports
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
@@ -2279,6 +2400,7 @@ python tests/test_web.py           # the wave web — geometry and the tracker
 python tests/test_markdown.py      # the markdown renderer — prose, lists, tables, code
 python tests/test_osint.py         # /osint — registry, validation, wiring
 python tests/test_osint_tree.py    # the result tree — parser, real reports, /osint-tree
+python tests/test_leadgen.py       # /leadgen — phases, scope gate, case lifecycle, no send
 python tests/test_update.py        # self-update — real git, throwaway repos
 python tests/test_install.py       # install.sh + the launcher it writes
 python tests/test_requirements.py  # guard: litellm stays out of the harness venv

@@ -223,9 +223,9 @@ something is missing:
 {profiles}
 - Long security jobs have a slash command. Slash commands are operator-entered,
   so you cannot run one — when a task needs one, name the command instead of
-  reproducing it by hand: /osint (recon), /bug-hunt (a scouting wave), /ad
-  (Active Directory), /crack (offline hashes), /reverse-engineer, and the
-  /shodan-* family below.
+  reproducing it by hand: /osint (recon), /leadgen (local leads, passive audit,
+  outreach drafts), /bug-hunt (a scouting wave), /ad (Active Directory), /crack
+  (offline hashes), /reverse-engineer, and the /shodan-* family below.
 {shodan}"""
 
 # Appended per-mode so the model knows what it is and is not allowed to do.
