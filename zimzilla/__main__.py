@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-think", action="store_true",
                         help="do not show the model's own reasoning when the "
                              "endpoint forwards it (on by default; /think toggles)")
+    parser.add_argument("--effort", default=None,
+                        choices=["low", "medium", "high", "off"],
+                        help="how hard the model thinks, for this session: "
+                             "low | medium | high | off (default: the level "
+                             "remembered by /effort, else the model's own)")
     parser.add_argument("--mode", default=None,
                         choices=["auto", "edits", "plan", "zim", "danger", "uncensored"],
                         help="agent mode: auto | edits | plan | zim | danger | uncensored (default: auto)")
@@ -245,7 +250,14 @@ def main(argv: list[str] | None = None) -> int:
         rain=True if args.rain else None,
         boot_rain=False if args.no_rain else None,
         show_thinking=False if args.no_think else None,
+        # A level, or nothing: `--effort off` is applied just below, because
+        # "off" and "not given" are both None to this signature and only one of
+        # them may fall back to the remembered level.
+        reasoning_effort=(args.effort if args.effort in ("low", "medium", "high")
+                          else None),
     )
+    if args.effort == "off":
+        cfg.reasoning_effort = None
 
     # A remembered hosted-gateway choice has to be re-applied here, not in the
     # launcher: the key can live in ZimZilla's own profile, in ~/claude-source,

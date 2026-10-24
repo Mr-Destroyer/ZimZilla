@@ -30,6 +30,7 @@ from .. import aihubmix as ah_mod
 from .. import beatapi as bp_mod
 from .. import crack as crack_mod
 from .. import antseed as as_mod
+from .. import effort as effort_mod
 from .. import hunt as hunt_mod
 from .. import infronai as inf_mod
 from .. import iteracompute as ic_mod
@@ -2098,6 +2099,12 @@ class ZimZillaApp(App):
         # Useful mid-run too — while a *new* recon is cooking, the previous
         # one's tree is exactly what you want to compare against.
         "osint-tree",
+        # `/effort` sets a field on the config and writes one small preference
+        # file — no turn, no client rebuild — and the next request in the
+        # running turn picks the new level up, which is the point of raising it
+        # mid-answer. `/tokenjuice-api-setup` is a local read plus a mode-600
+        # write, like every other /<source>-api-setup.
+        "effort", "tokenjuice-api-setup", "tokenjuic-api-setup",
         # Reading the session's own limits is a pure read of state that is
         # already in memory, and it is most useful *during* a long turn — "is
         # this about to hit a cap" is exactly the question a running turn
@@ -2168,6 +2175,13 @@ class ZimZillaApp(App):
             "zim-opencode": lambda a: self._cmd_zim_opencode(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare", a),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice", a),
+            # Two spellings, one handler. The shipped name carries the "e" its
+            # siblings have (/zim-tokenjuice, /tokenjuice-api-setup in the
+            # docs); the shorter one is accepted because it was asked for by
+            # that name and a mistyped command should not read as missing.
+            "tokenjuice-api-setup": lambda a: self._cmd_tokenjuice_key(a),
+            "tokenjuic-api-setup": lambda a: self._cmd_tokenjuice_key(a),
+            "effort": lambda a: self._cmd_effort(a),
             "zim-tokenharbour": lambda a: self._cmd_zim_tokenharbour(a),
             "zim-openrouter": lambda a: self._cmd_zim_gateway("openrouter"),
             "zim-antseed": lambda a: self._cmd_zim_gateway("antseed"),
@@ -2228,9 +2242,11 @@ class ZimZillaApp(App):
             ("/scope", "show allow.yaml / out-of-scope.yaml status"),
             ("/rain", "toggle the matrix-rain background"),
             ("/think", "toggle showing the model's own reasoning"),
+            ("/effort [low|medium|high|off]", "raise or lower how hard the model thinks"),
             ("/theme green|amber|cyan|system", "switch the color theme"),
             ("/zim-logfare", "switch upstream to Logfare (bundled proxy, all models)"),
             ("/zim-tokenjuice", "switch upstream to Token Juice (direct, no proxy)"),
+            ("/tokenjuice-api-setup [key|clear]", "your own tj_ key — or fall back to the shared one"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
             ("/zim-unorouter", "switch upstream to UnoRouter    (hosted, free models)"),
@@ -2972,6 +2988,69 @@ class ZimZillaApp(App):
                 "shown only when the endpoint forwards it — an Anthropic-native "
                 "one does; a LiteLLM proxy's /v1/messages bridge drops it"
             )
+
+    def _cmd_effort(self, args) -> None:
+        """/effort [low|medium|high|off] — how hard the current model thinks.
+
+        The level is translated per protocol when the request is built (see
+        ``zimzilla/effort.py``), so this handler only validates, stores and
+        reports. Two things it says out loud instead of implying:
+
+        * what will actually go on the wire for *this* route, because an
+          ``effort`` field and an enabled thinking budget are different things
+          and only one of them is visible in the transcript;
+        * that a model without the knob drops it and reports the drop on the
+          first request — that is the agent's existing retry, not a failed turn.
+
+        Safe mid-turn: the field is read when the next request is assembled, so
+        raising effort during a long answer takes effect on the next round.
+        """
+        p = self.palette
+        if not args:
+            current = self.cfg.reasoning_effort
+            t = Text()
+            t.append("  REASONING EFFORT\n\n", style=f"bold {p.accent}")
+            t.append("  now          ", style=p.dim)
+            t.append(f"{current or 'off'}\n", style=f"bold {p.primary}")
+            t.append("  on the wire  ", style=p.dim)
+            t.append(
+                effort_mod.describe(current, self.agent.protocol,
+                                    self.agent.output_ceiling()) + "\n\n",
+                style=p.primary)
+            for name in effort_mod.LEVEL_ORDER:
+                spec = effort_mod.LEVELS[name]
+                mark = "◉" if name == current else "○"
+                style = f"bold {p.accent}" if name == current else p.primary
+                t.append(f"  {mark} {name:<8}", style=style)
+                t.append(spec.blurb + "\n", style=p.dim)
+            t.append("\n  set it with  ", style=p.dim)
+            t.append("/effort low|medium|high\n", style=f"bold {p.primary}")
+            t.append("  turn it off with  ", style=p.dim)
+            t.append("/effort off\n", style=f"bold {p.primary}")
+            t.append("  remembered   ", style=p.dim)
+            t.append(f"{effort_mod.pref_file()}\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        ok, message = effort_mod.validate(str(args[0]))
+        if not ok:
+            self._sys_line(message, warn=True)
+            return
+        level = effort_mod.normalise(str(args[0]))
+        self.cfg.reasoning_effort = level
+        effort_mod.persist(level)
+        if level is None:
+            self._sys_line(
+                "effort off — nothing sent, the model's own default", ok=True)
+            return
+        self._sys_line(
+            f"effort {level} — "
+            + effort_mod.describe(level, self.agent.protocol,
+                                  self.agent.output_ceiling()),
+            ok=True)
+        self._sys_line(
+            "a model without this knob drops it and says so on the first "
+            "request — that is not a failed turn")
 
     def _cmd_theme(self, args) -> None:
         if not args:
@@ -3891,6 +3970,122 @@ class ZimZillaApp(App):
         self.cfg.api_key = ""
         self.agent._client = None
         self._sys_line(f"{src.label} proxy restarted — the new key is live", ok=True)
+
+    def _cmd_tokenjuice_key(self, args) -> None:
+        """/tokenjuice-api-setup [key|clear] — your own Token Juice key.
+
+        The shared key in the tree (``packaging/tokenjuice/source``) is what
+        makes a fresh clone work with no signup, and it is deliberately
+        committed. **This command never touches it.** A personal key goes to
+        ``$ZIMZILLA_HOME/tokenjuice/source`` — mode 600, the same
+        ``export VAR="value"`` format as every other profile — which the
+        discovery chain reads first, so replacing the shared key locally needs
+        no repository change. ``clear`` removes only that personal file and the
+        shared key takes over again.
+
+        The key is never echoed: the confirmation names the file and the last
+        four characters, enough to tell one key from another and not enough to
+        be one. Same rule as every other ``/<source>-api-setup``.
+
+        ``/zim-tokenjuice <key>`` remains the one-step "set it and switch"; this
+        command is the setup half on its own, so a key can be replaced while the
+        session is on a different route without repointing it.
+        """
+        p = self.palette
+        word = str(args[0]).strip() if args else ""
+
+        if not word or word.lower() in ("status", "show"):
+            st = sources_mod.tokenjuice_status()
+            t = Text()
+            t.append("  TOKEN JUICE KEY\n\n", style=f"bold {p.accent}")
+            t.append("  in force     ", style=p.dim)
+            if not st.origin:
+                t.append("nothing found\n", style=p.amber)
+            else:
+                label = {
+                    "personal": "your own key",
+                    "legacy": "your key (older layout)",
+                    "shipped": "the shared key",
+                }.get(st.origin, st.origin)
+                t.append(f"{label}  ····{st.tail}\n", style=p.primary)
+                t.append("  from         ", style=p.dim)
+                t.append(f"{st.path}\n", style=p.dim)
+            if st.base_url:
+                t.append("  upstream     ", style=p.dim)
+                t.append(st.base_url + "\n", style=p.primary)
+            if st.model:
+                t.append("  model        ", style=p.dim)
+                t.append(st.model + "\n", style=p.primary)
+            t.append("\n  the shared key is public by design — every clone "
+                     "spends it.\n", style=p.dim)
+            t.append("  a personal key replaces it locally and is read "
+                     "first.\n\n", style=p.dim)
+            t.append("  set it with    ", style=p.dim)
+            t.append("/tokenjuice-api-setup tj_…\n", style=f"bold {p.primary}")
+            t.append("  fall back to the shared one with  ", style=p.dim)
+            t.append("/tokenjuice-api-setup clear\n", style=f"bold {p.primary}")
+            t.append("  stored in      ", style=p.dim)
+            t.append(f"{sources_mod.tokenjuice_profile()}  (mode 600)\n",
+                     style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        if word.lower() in ("clear", "reset", "shared", "default"):
+            try:
+                removed = sources_mod.clear_token()
+            except OSError as e:
+                self._sys_line(
+                    f"could not remove the personal Token Juice profile: {e}",
+                    warn=True)
+                return
+            if removed is None:
+                self._sys_line(
+                    "no personal key to clear — the shared key is already in "
+                    "force")
+            else:
+                self._sys_line(
+                    f"removed {removed} — the shared key is in force again",
+                    ok=True)
+            # The client holds the token it read at switch time, so a clear on
+            # the live route has to reload it or the old key stays in memory
+            # until the next launch — the "saved but not in force" failure the
+            # NVIDIA command documents.
+            if sources_mod.active_key(self.cfg.base_url) == "tokenjuice":
+                src = sources_mod.discover().get("tokenjuice")
+                env = sources_mod.load_profile(src) if src is not None else {}
+                self.cfg.auth_token = env.get("ANTHROPIC_AUTH_TOKEN") or None
+                self.cfg.api_key = env.get("ANTHROPIC_API_KEY") or ""
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+            else:
+                self._sys_line(
+                    "the route is not Token Juice right now — /zim-tokenjuice "
+                    "to switch")
+            self._sys_line(
+                "the shipped key was not touched — it stays public in the tree")
+            return
+
+        if not sources_mod.is_tokenjuice_key(word):
+            self._sys_line(
+                "that does not look like a Token Juice key — paste just the "
+                "tj_ key, not the whole `export` line", warn=True)
+            return
+        try:
+            path = sources_mod.save_token(word)
+        except OSError as e:
+            self._sys_line(f"could not save the Token Juice key: {e}", warn=True)
+            return
+        self._sys_line(
+            f"Token Juice key saved (…{word[-4:]}) to {path} (mode 600)", ok=True)
+        if sources_mod.active_key(self.cfg.base_url) == "tokenjuice":
+            self.cfg.auth_token = word
+            self.cfg.api_key = ""
+            self.agent._client = None
+            self._sys_line("applied to this session — no restart", ok=True)
+        else:
+            self._sys_line("switch to it with /zim-tokenjuice")
+        self._sys_line(
+            "the shared key in the tree was not modified — it stays public")
 
     def _cmd_gateway_key(self, kind: str, args) -> None:
         """/openrouter-api-setup and /unorouter-api-setup [key] — store the key.
@@ -7878,9 +8073,12 @@ class ZimZillaApp(App):
             ("/scope", "scope guard status", "scope"),
             ("/rain", "toggle the matrix rain", "rain"),
             ("/think", "show the model's reasoning", "think"),
+            ("/effort", "raise or lower how hard the model thinks", "effort"),
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
+            ("/tokenjuice-api-setup", "your own Token Juice key, or the shared one",
+             "tokenjuice-api-setup"),
             ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
             ("/zim-unorouter", "switch upstream to UnoRouter", "zim-unorouter"),
             ("/zim-aihubmix", "switch upstream to AIHubMix", "zim-aihubmix"),

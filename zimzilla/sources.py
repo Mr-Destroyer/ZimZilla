@@ -1020,18 +1020,15 @@ def active_key(base_url: str) -> str | None:
 # profile / proxy
 # ---------------------------------------------------------------------------
 
-def load_profile(src: Source) -> dict[str, str]:
-    """Read the profile's exports without a shell, so nothing is echoed.
+def _parse_exports(text: str) -> dict[str, str]:
+    """Parse ``export VAR="value"`` lines into a dict.
 
-    Parses the ``export VAR="value"`` lines the profiles are written in. A
-    profile that uses anything more exotic than that is read by the launcher
-    anyway; this is only for the in-TUI switch.
+    The single reader for every profile in the project: the in-TUI switch
+    (``load_profile``), and the Token Juice key report that has to say which
+    file is in force. Extracted rather than copied so the two can never
+    disagree about what a profile says.
     """
     out: dict[str, str] = {}
-    try:
-        text = src.profile.read_text(encoding="utf-8")
-    except OSError:
-        return out
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("export "):
@@ -1046,6 +1043,21 @@ def load_profile(src: Source) -> dict[str, str]:
             value = value[1:-1]
         if name:
             out[name] = value
+    return out
+
+
+def load_profile(src: Source) -> dict[str, str]:
+    """Read the profile's exports without a shell, so nothing is echoed.
+
+    Parses the ``export VAR="value"`` lines the profiles are written in. A
+    profile that uses anything more exotic than that is read by the launcher
+    anyway; this is only for the in-TUI switch.
+    """
+    try:
+        text = src.profile.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out = _parse_exports(text)
     # A template is not a credential. The shipped Logfare profile carries
     # `lfu_REPLACE_ME` so the file's shape is visible in the checkout; sending
     # that upstream would turn "you have not set a key yet" into a 401 that
@@ -1120,6 +1132,81 @@ def save_token(token: str) -> Path:
     os.chmod(profile.parent, 0o700)
     profile.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
     os.chmod(profile, 0o600)
+    return profile
+
+
+@dataclass(frozen=True)
+class TokenJuiceKey:
+    """Which Token Juice credential is in force, and where it came from.
+
+    Three origins, because the profile chain has three rungs and "a key is
+    set" is not the same answer as "you are spending the shared one":
+
+    * ``personal`` — ``$ZIMZILLA_HOME/tokenjuice/source``, written by
+      ``/tokenjuice-api-setup`` or ``/zim-tokenjuice <key>``.
+    * ``legacy``   — ``$HOME/claude-source/deepseek-claude``, the older layout,
+      still read so an existing install keeps working.
+    * ``shipped``  — ``packaging/tokenjuice/source`` in the tree, the shared key
+      every fresh clone works on.
+
+    ``tail`` is the last four characters of the token in force, which is enough
+    to tell two keys apart and not enough to be one.
+    """
+
+    origin: str
+    path: Path | None
+    tail: str
+    base_url: str
+    model: str
+
+    @property
+    def is_personal(self) -> bool:
+        return self.origin in ("personal", "legacy")
+
+
+def tokenjuice_status() -> TokenJuiceKey:
+    """Report the Token Juice credential in force, in profile order.
+
+    Read-only: it never writes, and it never reports the key itself — only the
+    last four characters. An install with nothing set at all comes back with
+    ``origin == ""``, which is what lets the UI say "no key" instead of showing
+    an empty panel.
+    """
+    for path in _profile_candidates("tokenjuice"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        env = _parse_exports(text)
+        token = env.get("ANTHROPIC_AUTH_TOKEN", "")
+        if path == tokenjuice_profile():
+            origin = "personal"
+        elif str(path).startswith(str(DEFAULT_ROOT)):
+            origin = "shipped"
+        else:
+            origin = "legacy"
+        return TokenJuiceKey(
+            origin=origin,
+            path=path,
+            tail=token[-4:] if len(token) >= 4 else "",
+            base_url=env.get("ANTHROPIC_BASE_URL", ""),
+            model=env.get("ANTHROPIC_MODEL", ""),
+        )
+    return TokenJuiceKey(origin="", path=None, tail="", base_url="", model="")
+
+
+def clear_token() -> Path | None:
+    """Remove the operator's own Token Juice profile, falling back to shared.
+
+    Only the personal file is ever unlinked. The shipped key in the tree is
+    what makes a fresh clone work without a signup, so deleting it would be the
+    one change this command must never make — a test pins that.
+    """
+    profile = tokenjuice_profile()
+    try:
+        profile.unlink()
+    except FileNotFoundError:
+        return None
     return profile
 
 

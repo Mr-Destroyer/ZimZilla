@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import AsyncContextManager, AsyncIterator, Awaitable, Callable
 
 from .config import Config, price_for
+from . import effort as effort_mod
 from . import tools as tools_mod
 from .scope import Scope
 
@@ -628,6 +629,19 @@ class Agent:
                 path = None
             where = path if path is not None else (state / module_name / "source")
             profiles.append(f"    - {label:<12} {where}  (export {var}=…)")
+
+        # Token Juice has no module of its own — its profile lives in
+        # ``sources.py`` — so it is named here rather than in the table above.
+        # The shared key ships in the tree; a personal one goes to this path,
+        # and /tokenjuice-api-setup is the command that writes it.
+        try:
+            from . import sources as sources_mod
+            tj_path = sources_mod.tokenjuice_profile()
+        except Exception:  # noqa: BLE001
+            tj_path = state / "tokenjuice" / "source"
+        profiles.append(
+            f"    - {'Token Juice':<12} {tj_path}  "
+            "(export ANTHROPIC_AUTH_TOKEN=…; /tokenjuice-api-setup)")
 
         shodan_note = self._shodan_note(state)
         return ENVIRONMENT_PROMPT.format(
@@ -1319,6 +1333,14 @@ class Agent:
                 # `temperature` outright.
                 for _p in self._dropped_params:
                     extra.pop(_p, None)
+                # `/effort`: a level translated into whichever knob this
+                # protocol actually has. Empty when the level is off or the
+                # ceiling leaves no room for a legal thinking budget, so a
+                # session that never ran /effort sends exactly what it did
+                # before the command existed.
+                if self.cfg.reasoning_effort:
+                    extra.update(effort_mod.body(
+                        self.cfg.reasoning_effort, self.protocol, ceiling))
                 if extra:
                     kwargs["extra_body"] = extra
 
@@ -1766,10 +1788,24 @@ class Agent:
             return ""
         msg = str(e).lower()
         if not any(w in msg for w in ("deprecated", "not supported", "unsupported",
-                                      "not allowed", "unknown parameter")):
+                                      "not allowed", "unknown parameter",
+                                      # Anthropic's own wording when a thinking
+                                      # budget meets temperature=0: "may only be
+                                      # set to 1 when thinking is enabled". No
+                                      # "unsupported" appears in it, so without
+                                      # this `/effort` would fail the turn on
+                                      # exactly the endpoints it targets.
+                                      "may only be set")):
             return ""
         for param in ("temperature", "top_p", "top_k", "frequency_penalty",
-                      "presence_penalty"):
+                      "presence_penalty",
+                      # `/effort`'s two spellings, listed AFTER the sampling
+                      # knobs on purpose: an Anthropic endpoint rejects
+                      # `temperature` first once thinking is enabled ("only 1 is
+                      # allowed"), and dropping the sampling knob is the retry
+                      # that keeps the thinking budget. Longest name first, so
+                      # `reasoning_effort` is not mistaken for `reasoning`.
+                      "reasoning_effort", "reasoning", "thinking"):
             if param in msg:
                 return param
         return ""

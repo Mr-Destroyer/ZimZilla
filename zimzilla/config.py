@@ -246,6 +246,12 @@ class Config:
     # limit is model-dependent, so this is the value that is safe everywhere).
     max_tokens: int = 32768
     temperature: float = 0.0
+    #: How hard the model should think: ``"low"``, ``"medium"``, ``"high"``, or
+    #: ``None`` to send nothing and take the model's own default. `/effort` sets
+    #: it; the knob it becomes differs per protocol (``reasoning_effort`` on Chat
+    #: Completions, an enabled ``thinking`` budget on Messages), so see
+    #: ``zimzilla/effort.py`` for the translation rather than assuming a field.
+    reasoning_effort: str | None = None
     # Max seconds to wait on the API between reads. Without this the SDK default
     # is 600s, so a proxy that accepts the connection and then goes quiet hangs
     # the turn — with no output and no error — for ten minutes. Applied as the
@@ -371,10 +377,21 @@ class Config:
             # true would make the opt-out impossible to express.
             openai_stream=os.environ.get("ZIMZILLA_OPENAI_STREAM", "1").strip()
             not in ("0", "false", "no", "off"),
+            # The environment names a level for this session; the remembered
+            # one is only consulted when it does not, so a launch flag or an
+            # export always beats the file without deleting it.
+            reasoning_effort=(os.environ.get("ZIMZILLA_EFFORT") or None),
         )
         for key, value in overrides.items():
             if value is not None:
                 setattr(cfg, key, value)
+        from . import effort as effort_mod
+        if cfg.reasoning_effort is None:
+            cfg.reasoning_effort = effort_mod.read_persisted()
+        else:
+            # Junk from an env var or a flag is "no preference", not a value
+            # that reaches the request body.
+            cfg.reasoning_effort = effort_mod.normalise(cfg.reasoning_effort)
         cfg.workdir = Path(cfg.workdir).expanduser().resolve()
         return cfg
 

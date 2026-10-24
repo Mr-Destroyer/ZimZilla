@@ -548,6 +548,44 @@ delta — so the measurement above is history, not a current limitation. It is
 also why the proxy is gone rather than merely bypassed: a bridge that silently
 eats a paid-for reasoning block is not one to keep around.
 
+### Raising the effort
+
+`/think` decides whether reasoning is *shown*. `/effort` decides how much of it
+there is:
+
+```
+/effort            # what is set now, and what it will send on this route
+/effort high       # raise it
+/effort off        # back to the model's own default
+```
+
+There is no single field to set, so the level is translated per protocol when
+the request is built:
+
+| Level | Chat Completions | Messages (Anthropic-native) |
+|---|---|---|
+| `low` | `reasoning_effort: "low"` | `thinking` enabled, 2048-token budget |
+| `medium` | `reasoning_effort: "medium"` | `thinking` enabled, 8192-token budget |
+| `high` | `reasoning_effort: "high"` | `thinking` enabled, 16384-token budget |
+
+A thinking budget must be **strictly below** the request's own `max_tokens`, so
+it is clamped under the live ceiling — and nothing is sent at all when there is
+no room, because a smaller budget the server accepts beats a larger one it
+refuses.
+
+Not every model has either knob. The level is sent optimistically, and the
+harness's existing drop-and-retry handles the refusal: a `400` naming the
+parameter drops exactly that field, says so in the transcript, and re-sends. The
+same path covers the second-order case — an Anthropic endpoint refuses
+`temperature` once thinking is on, and `temperature` is dropped first so the
+retry keeps the budget rather than losing it.
+
+The level is remembered in `~/.zimzilla/effort`, beside `current-theme`, so it
+survives a restart. `ZIMZILLA_EFFORT=high` or `--effort high` overrides it for
+one session, and `--effort off` ignores a remembered level entirely. It is safe
+to set mid-turn: the field is read when the next request is assembled, so
+raising effort during a long answer takes effect on the next round.
+
 ### Why a long turn used to just stop
 
 This was a real bug, reported as *"sometimes in long tasks my models just go to
@@ -737,6 +775,15 @@ install spends the same key — treat it as public. Your own key still wins:
 locally never touches the repository. If the shared key is ever rotated
 upstream, a `401` says so and names that command rather than reporting a
 generic auth failure.
+
+`/tokenjuice-api-setup` is the setup half on its own, for when the key needs
+replacing without repointing the session. With no argument it reports which
+credential is in force — your own, the older `~/claude-source` layout, or the
+shared key — with its last four characters and the file it came from;
+`/tokenjuice-api-setup tj_…` writes a personal key; and
+`/tokenjuice-api-setup clear` removes that personal file so the shared key takes
+over again. It never writes into the tree, so the shared key stays exactly as
+public as it shipped.
 
 ### NVIDIA NIM, and a catalog that lists more than you can call
 
@@ -1334,6 +1381,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/theme green\|amber\|cyan\|system` | switch palette — `system` adopts the terminal's own colours |
 | `/rain` | toggle the matrix rain |
 | `/think` | show the model's own reasoning — where the endpoint forwards it |
+| `/effort [low\|medium\|high\|off]` | how hard the model thinks — `reasoning_effort`, or a thinking budget, per protocol |
 | `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
 | `/zim-opencode [--model id] [--refresh] [-- args]` | open **opencode** in this terminal behind a fresh rotating IP — free models, no account, nothing global |
 | `/save [name]` | write the session to disk |
@@ -1355,6 +1403,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
 | `/zim-logfare` | switch upstream to Logfare (`:4001`) — bundled proxy, all chat models |
 | `/zim-tokenjuice` | switch upstream to Token Juice — direct, no proxy |
+| `/tokenjuice-api-setup [key\|clear]` | your own `tj_` key, or `clear` to fall back to the shared one |
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |
 | `/tokenharbour-api-setup <key>` | store your TokenHarbour API key |
 | `/tokenharbour-models` | fetch the live catalog; show what is free |
@@ -2358,6 +2407,8 @@ run.sh                        run from the checkout, using ./.venv
 zimzilla/                     the package
   agent.py                    the tool-use loop and mode doctrine
   config.py                   modes, defaults, model registry, pricing
+  effort.py                   /effort levels, the per-protocol translation, and
+                              the remembered choice ($ZIMZILLA_HOME/effort)
   tools.py                    the nine tools
   sandbox.py                  the filesystem jail
   scope.py                    allow.yaml / out-of-scope.yaml
@@ -2409,6 +2460,8 @@ python tests/test_agent_limits.py  # round caps, auto-continue, auto-compact, ov
 python tests/test_compact_trigger.py  # the 200k trigger, the bare-400 recovery, the animation
 python tests/test_compact_ui.py    # the same, driven through the live TUI
 python tests/test_reasoning.py     # the reasoning display — forwarding, ordering, renderables
+python tests/test_effort.py        # /effort — the registry, the per-protocol body, the drop path
+python tests/test_tokenjuice_key.py  # /tokenjuice-api-setup — your key, and the shared one untouched
 python tests/test_boot.py          # the boot screen — the logo spin, frame geometry
 python tests/test_opencode.py      # /zim-opencode — the pool, rotation, retry policy, alias
 python tests/test_shodan.py        # /shodan-* — the key, the query, the result, the turn
