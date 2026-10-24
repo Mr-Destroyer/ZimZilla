@@ -42,6 +42,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-source", "show upstream sources and status"),
     ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
     ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
+    ("/zim-orcarouter", "switch upstream to OrcaRouter Cyber Inference (hosted)"),
     ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
     ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
     ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
@@ -52,6 +53,10 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
     ("/openrouter-api-setup", "store your OpenRouter API key"),
+    ("/orcarouter-api-setup", "store your OrcaRouter API key (sk-orca-…)"),
+    ("/orcarouter-auth", "sign in with OrcaRouter — OAuth 2.0 + PKCE"),
+    ("/orcarouter-models", "the live chat catalog — what this route serves"),
+    ("/orcarouter-key-clear", "remove the stored OrcaRouter key"),
     ("/unorouter-api-setup", "store your UnoRouter API key"),
     ("/unorouter-models", "the live free catalog — what is free and usable"),
     ("/aihubmix-api-setup", "store your AIHubMix API key"),
@@ -365,7 +370,8 @@ class CompletionPopup(VerticalScroll):
                     # /models accepts.
                     "models": ["logfare", "tokenjuice", "tokenharbour",
                                "openrouter", "unorouter", "antseed", "aihubmix",
-                               "beatapi", "iteracompute", "infronai", "nvidia"],
+                               "beatapi", "iteracompute", "infronai", "nvidia",
+                               "orcarouter"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

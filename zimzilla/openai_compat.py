@@ -88,6 +88,11 @@ ANTHROPIC_HOSTS = (
     "aihubmix.com",
     "beatapi.io",
     "gw.ldxhub.io",
+    # OrcaRouter serves the Messages protocol at ``/v1/messages`` — a
+    # credential-less POST answers an Anthropic-shaped 401, i.e. the route
+    # exists — and its base URL carries no ``/v1`` path for the heuristic to
+    # read, so it is named here rather than guessed at.
+    "api.orcarouter.ai",
 )
 
 #: Hosts that are Chat Completions by construction. Not exhaustive, and not

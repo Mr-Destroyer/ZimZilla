@@ -196,6 +196,20 @@ if [[ "$_current_source" == "nvidia" ]]; then
   fi
 fi
 
+if [[ "$_current_source" == "orcarouter" ]]; then
+  # Hosted, like OpenRouter — no proxy, no port, nothing to start. ZimZilla's
+  # own profile (written by /orcarouter-api-setup or /orcarouter-auth) is
+  # sourced when it exists; when it does not, the key may still live in the
+  # environment or in ~/claude-source and the harness resolves it from there.
+  # Either way ZIMZILLA_NO_PROXY=1, so a remembered selection cannot fall
+  # through to the Logfare profile and fail-closed on a gateway that needs no
+  # profile at all.
+  if [[ -r "$ZIMZILLA_HOME/orcarouter/source" ]]; then
+    LITELLM_ENV_FILE="${_env_override:-$ZIMZILLA_HOME/orcarouter/source}"
+  fi
+  ZIMZILLA_NO_PROXY=1
+fi
+
 LITELLM_ENV_FILE="${LITELLM_ENV_FILE:-$ZIMZILLA_HOME/logfare/source}"
 LITELLM_PORT="${LITELLM_PORT:-4001}"
 LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"

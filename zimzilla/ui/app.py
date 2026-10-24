@@ -40,6 +40,7 @@ from .. import nvidia as nv_mod
 from .. import opencode as oc_mod
 from .. import osint as osint_mod
 from .. import openrouter as or_mod
+from .. import orcarouter as orc_mod
 from .. import osint_tree as osint_tree_mod
 from .. import phish as phish_mod
 from .. import reverse as reverse_mod
@@ -668,6 +669,60 @@ class ScopePasteScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class OAuthCodeScreen(ModalScreen[str | None]):
+    """The out-of-band code box for the OrcaRouter PKCE login.
+
+    Flow B exists because a terminal cannot assume it can listen on a loopback
+    port: the install may be over SSH, in a container, or on a machine whose
+    only route out is a corporate proxy. So the consent screen shows a code and
+    this collects it. ``escape`` dismisses with ``None``, which is what releases
+    the pending attempt — a dismissed login must not stay live.
+    """
+
+    DEFAULT_CSS = """
+    OAuthCodeScreen { align: center middle; background: $background 70%; }
+    #oauth-code-box {
+        width: 84; height: auto; border: round $secondary; padding: 1 2;
+        background: $surface;
+    }
+    #oauth-code-hint { height: auto; margin-bottom: 1; }
+    #oauth-code-input { margin-bottom: 1; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel", priority=True),
+    ]
+
+    def __init__(self, palette, *, url: str, app_name: str) -> None:
+        super().__init__()
+        self.palette = palette
+        self.url = url
+        self.app_name = app_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="oauth-code-box"):
+            yield Static(
+                f"Authorize {self.app_name} in your browser, then paste the code "
+                "it shows.\n\n"
+                f"{self.url}\n\n"
+                "S256 PKCE · the verifier never leaves this process · "
+                "escape cancels",
+                id="oauth-code-hint",
+            )
+            yield Input(placeholder="paste the code the consent screen showed",
+                        id="oauth-code-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#oauth-code-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        code = (event.value or "").strip()
+        self.dismiss(code or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class FindingsPanel(ModalScreen[None]):
     """The hunt's finding tracker, as its own window.
 
@@ -1228,6 +1283,11 @@ class ZimZillaApp(App):
         # instead of the ~57 chat entries the endpoint actually lists.
         elif sources_mod.active_key(self.cfg.base_url) == "nvidia":
             self._warm_nvidia_catalog()
+        # And again for OrcaRouter: its catalog is public and every id is
+        # `vendor/model`, so a cold cache would offer the eight verified seed
+        # ids instead of the listing the endpoint actually serves.
+        elif sources_mod.active_key(self.cfg.base_url) == "orcarouter":
+            self._warm_orcarouter_catalog()
         # Replay anything the user typed while the boot animation was running.
         text = "".join(typed or [])
         inp.focus()
@@ -2079,6 +2139,11 @@ class ZimZillaApp(App):
         # both stay typeable mid-answer — the same reason /mode and /model do.
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
         "openrouter-api-setup", "zim-openrouter", "models",
+        # OrcaRouter's key command, its PKCE login and its catalog are local
+        # reads and a mode-600 write — none starts a turn, so all three stay
+        # typeable mid-answer for the same reason as the gateways above.
+        "orcarouter-api-setup", "orcarouter-auth", "orcarouter-models",
+        "orcarouter-key-clear", "zim-orcarouter",
         "unorouter-api-setup", "unorouter-models", "zim-unorouter",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
@@ -2175,6 +2240,12 @@ class ZimZillaApp(App):
             "tokenharbour-api-setup": lambda a: self._cmd_tokenharbour_key(a),
             "tokenharbour-models": lambda a: self._cmd_tokenharbour_models(a),
             "openrouter-api-setup": lambda a: self._cmd_gateway_key("openrouter", a),
+            "zim-orcarouter": lambda a: self._cmd_zim_gateway("orcarouter"),
+            "orcarouter-api-setup": lambda a: self._cmd_gateway_key(
+                "orcarouter", a),
+            "orcarouter-auth": lambda a: self._cmd_orcarouter_auth(a),
+            "orcarouter-models": lambda a: self._cmd_models(["orcarouter"]),
+            "orcarouter-key-clear": lambda a: self._cmd_orcarouter_clear(),
             "zim-unorouter": lambda a: self._cmd_zim_gateway("unorouter"),
             "unorouter-api-setup": lambda a: self._cmd_gateway_key("unorouter", a),
             "unorouter-models": lambda a: self._cmd_models(["unorouter"]),
@@ -2233,6 +2304,7 @@ class ZimZillaApp(App):
             ("/zim-tokenjuice", "switch upstream to Token Juice (direct, no proxy)"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
             ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
+            ("/zim-orcarouter", "switch upstream to OrcaRouter Cyber Inference (hosted)"),
             ("/zim-unorouter", "switch upstream to UnoRouter    (hosted, free models)"),
             ("/zim-aihubmix", "switch upstream to AIHubMix     (hosted, free models)"),
             ("/zim-beatapi", "switch upstream to BeatAPI      (hosted, free models)"),
@@ -2246,6 +2318,10 @@ class ZimZillaApp(App):
             ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
             ("/tokenharbour-models", "fetch the live catalog; show what is free"),
             ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
+            ("/orcarouter-api-setup [key]", "store your OrcaRouter API key (sk-orca-…)"),
+            ("/orcarouter-auth [code]", "sign in with OrcaRouter — OAuth 2.0 + PKCE (out-of-band)"),
+            ("/orcarouter-models", "the live chat catalog — what this route serves"),
+            ("/orcarouter-key-clear", "remove the stored OrcaRouter key"),
             ("/unorouter-api-setup [key]", "store your UnoRouter API key (optional)"),
             ("/unorouter-models", "the live free catalog — what is free and usable"),
             ("/aihubmix-api-setup [key]", "store your AIHubMix API key (optional)"),
@@ -2439,6 +2515,12 @@ class ZimZillaApp(App):
         # instead of billing a model at DEFAULT_PRICE.
         nv_catalog = (nv_mod.cached_models()
                       if active == "nvidia" else None)
+        # OrcaRouter's too: it is the only catalog here that publishes both a
+        # price and a context window per entry, and it is the list the picker
+        # itself came from — so the note beside a model is the gateway's own
+        # figure rather than this harness's estimate.
+        orc_catalog = (orc_mod.cached_models()
+                       if active == "orcarouter" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -2463,7 +2545,8 @@ class ZimZillaApp(App):
             order = self._model_display_order(
                 models,
                 th_catalog or as_catalog or uno_catalog or ah_catalog
-                or bp_catalog or ic_catalog or inf_catalog or nv_catalog)
+                or bp_catalog or ic_catalog or inf_catalog or nv_catalog
+                or orc_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -2479,7 +2562,7 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {shown:<26}", style=style)
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
-                                        inf_catalog, nv_catalog)
+                                        inf_catalog, nv_catalog, orc_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -2545,6 +2628,19 @@ class ZimZillaApp(App):
                     "developer tier, not a per-model\n"
                     "  price. The catalog lists more than the account can call\n",
                     style=p.dim)
+            elif active == "orcarouter":
+                t.append(
+                    f"  catalog {_catalog_clause(orc_mod.catalog_age(), orc_mod.CACHE_TTL)}"
+                    " — /orcarouter-models refetches it\n", style=p.dim)
+                t.append(
+                    "  chat models only, by the catalog's declared endpoint "
+                    "type and output\n  modalities · orcarouter/auto is the "
+                    "default router; the OrcaCyber tier\n  needs business "
+                    "verification\n", style=p.dim)
+                if orc_mod.needs_reauth():
+                    t.append("  the stored key was rejected — reconnect with ",
+                             style=p.dim)
+                    t.append("/orcarouter-auth\n", style=f"bold {p.amber}")
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -2578,8 +2674,8 @@ class ZimZillaApp(App):
         #
         # It is also the source the operator is most likely to be on, so the
         # wrong answer was the common case rather than the corner.
-        if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
-                      "logfare", "aihubmix", "beatapi",
+        if active in ("tokenharbour", "openrouter", "orcarouter", "unorouter",
+                      "antseed", "logfare", "aihubmix", "beatapi",
                       "iteracompute", "infronai", "nvidia") and (
                 models is None or check_name not in models):
             fetched = None
@@ -2593,6 +2689,17 @@ class ZimZillaApp(App):
             elif active == "openrouter":
                 creds = or_mod.load_credentials()
                 fetched, _ = or_mod.fetch_models(creds[0] if creds else "")
+            elif active == "orcarouter":
+                # Keyless too, and filtered to chat entries: the raw listing
+                # carries image-generation and rerank models that cannot answer
+                # a turn. Fetched rather than read from the cache when the cache
+                # is cold or expired, so a live model is not refused against a
+                # stale list.
+                if orc_catalog is None:
+                    creds = orc_mod.load_credentials()
+                    fetched, _ = orc_mod.chat_models(creds[0] if creds else "")
+                else:
+                    fetched = list(orc_catalog)
             elif active == "unorouter":
                 # Keyless like OpenRouter's: the catalog is public. Fetched
                 # rather than read from the cache when the cache is cold or
@@ -2677,6 +2784,8 @@ class ZimZillaApp(App):
                     ic_catalog = fetched
                 elif active == "infronai":
                     inf_catalog = fetched
+                elif active == "orcarouter":
+                    orc_catalog = fetched
                 elif active == "nvidia":
                     nv_catalog = fetched
                 elif active == "logfare":
@@ -2736,7 +2845,7 @@ class ZimZillaApp(App):
     def _model_note(self, name: str, catalog, lf_catalog=None,
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
                     ic_catalog=None, inf_catalog=None,
-                    nv_catalog=None) -> str:
+                    nv_catalog=None, orc_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -2773,6 +2882,8 @@ class ZimZillaApp(App):
             live = inf_mod.price_for(name, inf_catalog)
         if live is None:
             live = nv_mod.price_for(name, nv_catalog)
+        if live is None:
+            live = orc_mod.price_for(name, orc_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
@@ -3090,6 +3201,8 @@ class ZimZillaApp(App):
                  "/iteracompute-api-setup"),
                 ("infronai", inf_mod, "InfronAI", "/infronai-api-setup"),
                 ("nvidia", nv_mod, "NVIDIA NIM", "/nvidia-api-setup"),
+                ("orcarouter", orc_mod, "OrcaRouter Cyber Inference",
+                 "/orcarouter-api-setup"),
             ):
                 # IteraCompute and InfronAI have local proxies, so when their
                 # profiles exist they are already listed above by discover() —
@@ -3150,10 +3263,10 @@ class ZimZillaApp(App):
             t.append(f"  ·  {self.cfg.base_url}\n", style=p.dim)
             t.append("  switch with  /zim-logfare,  /zim-tokenjuice,\n"
                      "                 /zim-tokenharbour,  /zim-openrouter,\n"
-                     "                 /zim-unorouter,  /zim-aihubmix,\n"
-                     "                 /zim-beatapi,  /zim-iteracompute,\n"
-                     "                 /zim-infronai,  /zim-nvidia,\n"
-                     "                 or  /zim-antseed\n",
+                     "                 /zim-orcarouter,  /zim-unorouter,\n"
+                     "                 /zim-aihubmix,  /zim-beatapi,\n"
+                     "                 /zim-iteracompute,  /zim-infronai,\n"
+                     "                 /zim-nvidia,  or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
             # list above and this hint agree about what is actually reachable.
@@ -3190,6 +3303,15 @@ class ZimZillaApp(App):
                 self._sys_line(
                     "NVIDIA is not set up on this machine — set your key with "
                     "/nvidia-api-setup <key> (free at build.nvidia.com)", warn=True)
+                return
+            if key == "orcarouter":
+                # Two ways in, and naming only one would send half the
+                # operators to a path they cannot use (no key yet, or no
+                # browser). Both are stated.
+                self._sys_line(
+                    "OrcaRouter is not set up on this machine — paste a key with "
+                    "/orcarouter-api-setup <sk-orca-…>, or sign in with "
+                    "/orcarouter-auth", warn=True)
                 return
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
@@ -3658,6 +3780,20 @@ class ZimZillaApp(App):
         creds = nv_mod.load_credentials()
         nv_mod.fetch_models(creds[0] if creds else "")
 
+    @work(exclusive=True, thread=True)
+    def _warm_orcarouter_catalog(self) -> None:
+        """Fetch OrcaRouter's chat catalog once at startup, silently.
+
+        Silent for the same reason as the others: a launch that cannot reach
+        the catalog is still a working launch, /model falls back to the verified
+        seed, and /orcarouter-models reports the failure on demand. Unlike the
+        other hosted gateways this one is cold-start populated by a seed of
+        eight ids rather than a full snapshot, so the warm-up is what turns the
+        picker into the real listing.
+        """
+        creds = orc_mod.load_credentials()
+        orc_mod.chat_models(creds[0] if creds else "")
+
     def _show_logfare_models(self, models, err: str) -> None:
         p = self.palette
         if models is None:
@@ -3754,6 +3890,8 @@ class ZimZillaApp(App):
         """
         if kind == "openrouter":
             return or_mod, "OpenRouter"
+        if kind == "orcarouter":
+            return orc_mod, "OrcaRouter Cyber Inference"
         if kind == "unorouter":
             return uno_mod, "UnoRouter"
         if kind == "aihubmix":
@@ -3940,8 +4078,8 @@ class ZimZillaApp(App):
                 return
             t.append("  set it with  ", style=p.dim)
             t.append(f"/{kind}-api-setup <key>\n", style=f"bold {p.primary}")
-            if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
-                        "iteracompute", "infronai", "nvidia"):
+            if kind in ("openrouter", "orcarouter", "unorouter", "aihubmix",
+                        "beatapi", "iteracompute", "infronai", "nvidia"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -3957,6 +4095,30 @@ class ZimZillaApp(App):
                 t.append("  keys start    ", style=p.dim)
                 t.append(f"{mod.KEY_PREFIX}  · free developer tier, ~40 req/min\n",
                          style=p.dim)
+            if kind == "orcarouter":
+                # Two entry paths, deliberately distinct. One button that
+                # sometimes asks for a key and sometimes opens a browser makes
+                # logout and reauthentication impossible to reason about.
+                t.append("\n  or sign in     ", style=p.dim)
+                t.append("/orcarouter-auth\n", style=f"bold {p.primary}")
+                t.append("  — OAuth 2.0 + PKCE, out-of-band: a browser opens, the "
+                         "consent\n  screen shows a code, paste it back here. No "
+                         "client secret, no account\n  password, and the key it "
+                         "issues belongs to your account.\n", style=p.dim)
+                t.append("  clear it      ", style=p.dim)
+                t.append("/orcarouter-key-clear\n", style=f"bold {p.primary}")
+                t.append("  keys          ", style=p.dim)
+                t.append(f"{orc_mod.CONSOLE_URL}\n", style=p.primary)
+                t.append("  cyber tier    ", style=p.dim)
+                t.append(f"{orc_mod.CYBER_PAGE}\n", style=p.primary)
+                t.append("                ", style=p.dim)
+                t.append(f"{orc_mod.CYBER_CATALOG}\n", style=p.primary)
+                t.append("  credential    ", style=p.dim)
+                t.append(
+                    ("needs re-authentication — the key was rejected\n"
+                     if orc_mod.needs_reauth() else
+                     "in force; reused until revoked (no refresh grant)\n"),
+                    style=p.amber if orc_mod.needs_reauth() else p.dim)
             t.append(f"  stored in     {mod.PROFILE}\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
@@ -3985,6 +4147,150 @@ class ZimZillaApp(App):
             self._sys_line("applied to this session — no restart", ok=True)
             return
         self._sys_line(f"switch to it with /zim-{kind}")
+
+    def _cmd_orcarouter_auth(self, args) -> None:
+        """/orcarouter-auth [code] — sign in with OAuth 2.0 + PKCE (Flow B).
+
+        Kept separate from ``/orcarouter-api-setup`` on purpose: both produce a
+        plain ``sk-orca-…`` key, but one is a paste and the other is a browser
+        round-trip, and an operator troubleshooting a failure needs to know
+        which half broke. Passing the code inline completes an attempt that is
+        already pending (the common case, because the modal can be dismissed
+        with escape and the code still arrives on the clipboard).
+        """
+        p = self.palette
+        code = (args[0].strip() if args else "")
+
+        pending = getattr(self, "_orca_pending", None)
+        if pending is None:
+            if code:
+                self._sys_line(
+                    "no authorization is pending — run /orcarouter-auth with no "
+                    "argument first, so a verifier exists to bind this code to",
+                    warn=True)
+                return
+            pending = orc_mod.start_authorization()
+            self._orca_pending = pending
+            t = Text()
+            t.append("  CONNECT WITH ORCAROUTER\n\n", style=f"bold {p.accent}")
+            t.append("  Open this in a browser, approve, then paste the code the\n"
+                     "  consent screen shows:\n\n", style=p.dim)
+            t.append(f"  {pending.url}\n\n", style=p.primary)
+            t.append("  S256 PKCE · no client secret · the verifier stays in "
+                     "this process\n", style=p.dim)
+            t.append("  Then run  ", style=p.dim)
+            t.append("/orcarouter-auth <code>\n", style=f"bold {p.primary}")
+            t.append("  or paste it into the box below.\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            try:
+                import webbrowser
+                webbrowser.open(pending.url)
+            except Exception:  # noqa: BLE001 - a headless box has no browser
+                pass
+            self._prompt_orcarouter_code(pending)
+            return
+
+        if not code:
+            # Re-show the box for the attempt already pending, rather than
+            # minting a second verifier and burning one of the ten keys a user
+            # may issue per 24 hours.
+            self._prompt_orcarouter_code(pending)
+            return
+
+        self._complete_orcarouter_auth(pending, code)
+
+    def _prompt_orcarouter_code(self, pending) -> None:
+        """Collect the out-of-band code, releasing the attempt on cancel."""
+        def got(value: str | None) -> None:
+            if not value:
+                # Cancel is a terminal path: the attempt is dropped, so a code
+                # from it cannot be redeemed later by accident.
+                if getattr(self, "_orca_pending", None) is pending:
+                    self._orca_pending = None
+                self._sys_line("OrcaRouter sign-in cancelled — nothing stored",
+                               warn=True)
+                return
+            self._complete_orcarouter_auth(pending, value)
+
+        self.push_screen(
+            OAuthCodeScreen(self.palette, url=pending.url,
+                            app_name=pending.app_name), got)
+
+    def _complete_orcarouter_auth(self, pending, code: str) -> None:
+        """Exchange the code off the UI thread, then apply the key."""
+        self._sys_line("exchanging the authorization code…")
+
+        def work_done(cred, err):
+            self._orca_pending = None
+            if err is not None:
+                # Every terminal path leaves the previous credential in place:
+                # a failed login must not be the reason the operator has none.
+                self._sys_line(str(err), warn=True)
+                return
+            t = Text()
+            t.append("  CONNECTED TO ORCAROUTER\n\n", style=f"bold {self.palette.accent}")
+            t.append("  credential    ", style=self.palette.dim)
+            t.append(f"stored (…{cred.token[-4:]}) · generation {cred.generation}\n",
+                     style=self.palette.primary)
+            t.append("  granted scope ", style=self.palette.dim)
+            t.append(f"{cred.scope or 'api'}\n", style=self.palette.primary)
+            if cred.scope and cred.scope != "api":
+                t.append("  note          ", style=self.palette.dim)
+                t.append("a narrower grant than requested was approved; this key "
+                         "holds only what\n                the response says\n",
+                         style=self.palette.amber)
+            t.append("  reused until revoked at ", style=self.palette.dim)
+            t.append(f"{orc_mod.CONSOLE_URL}\n", style=self.palette.primary)
+            self.query_one(ChatPane).write_block(t)
+            self._apply_orcarouter_credential()
+
+        def run() -> None:
+            try:
+                cred = orc_mod.finish_authorization(pending, code)
+                self.call_from_thread(work_done, cred, None)
+            except Exception as e:  # noqa: BLE001 - the message is the product
+                self.call_from_thread(work_done, None, e)
+
+        self.run_worker(run, thread=True, exclusive=False)
+
+    def _apply_orcarouter_credential(self) -> None:
+        """Point the live session at the newly stored key, no restart."""
+        if not orc_mod.active_endpoint(self.cfg.base_url):
+            self._sys_line("switch to it with /zim-orcarouter")
+            return
+        creds = orc_mod.load_credentials()
+        if creds is None:
+            return
+        self.cfg.auth_token = creds[0]
+        self.cfg.api_key = ""
+        self.cfg.protocol = "auto"
+        self.agent._client = None
+        orc_mod.clear_cache()
+        self._sys_line("applied to this session — no restart", ok=True)
+        self._refresh_after_source_change("OrcaRouter Cyber Inference",
+                                          "credential updated")
+
+    def _cmd_orcarouter_clear(self) -> None:
+        """/orcarouter-key-clear — remove the stored key and its state.
+
+        The operator's way out of a revoked credential without editing a file.
+        The session is left pointed at OrcaRouter; the next turn will 401 until
+        a new key is set, and the message says so rather than pretending the
+        route works.
+        """
+        had = orc_mod.has_key()
+        orc_mod.clear()
+        orc_mod.clear_cache()
+        if not had:
+            self._sys_line("no OrcaRouter key was stored — nothing to clear",
+                           warn=True)
+            return
+        if orc_mod.active_endpoint(self.cfg.base_url):
+            self.agent._client = None
+            self.cfg.auth_token = ""
+        self._sys_line(
+            "OrcaRouter key cleared — set one with /orcarouter-api-setup <key> "
+            "or reconnect with /orcarouter-auth", ok=True)
 
     def _cmd_ldxhub_key(self, args) -> None:
         """/ldxhub-api-setup [key] — store the LDXHub key for document jobs.
@@ -4317,7 +4623,7 @@ class ZimZillaApp(App):
                 return
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
-                 "unorouter", "antseed", "aihubmix", "beatapi",
+                 "orcarouter", "unorouter", "antseed", "aihubmix", "beatapi",
                  "iteracompute", "infronai", "nvidia"}
         if key not in known:
             self._sys_line(
@@ -4370,6 +4676,13 @@ class ZimZillaApp(App):
             # the listing matches what this session would be charged.
             creds = or_mod.load_credentials()
             return or_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "orcarouter":
+            # Keyless too: GET /v1/models answers 200 with no credential, so
+            # the chat list works before either auth path has run. Sent when
+            # present, because the per-workspace listing is what that key can
+            # actually call.
+            creds = orc_mod.load_credentials()
+            return orc_mod.chat_models(creds[0] if creds else "")
         if kind == "unorouter":
             # Keyless too, and for the same reason: /api/pricing answers 200
             # with no credential at all. The key is only needed to send.
@@ -4436,7 +4749,9 @@ class ZimZillaApp(App):
         if models is None:
             self._sys_line(f"{kind}: {err}", warn=True)
             return
-        label = {"openrouter": "OPENROUTER", "unorouter": "UNOROUTER",
+        label = {"openrouter": "OPENROUTER",
+                 "orcarouter": "ORCAROUTER CYBER INFERENCE",
+                 "unorouter": "UNOROUTER",
                  "aihubmix": "AIHUBMIX", "beatapi": "BEATAPI",
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
@@ -4451,6 +4766,11 @@ class ZimZillaApp(App):
                 t.append(
                     "  (free models that cannot call tools are excluded — "
                     "they cannot drive this harness)\n", style=p.dim)
+            if kind == "orcarouter":
+                t.append(
+                    "  (the listing is live; entries that declare a non-chat "
+                    "endpoint —\n  image generation, video, rerank, embeddings — "
+                    "are filtered out\n", style=p.dim)
             if kind == "aihubmix":
                 # A different exclusion, and saying the wrong one would send the
                 # operator looking for a tool-calling filter that is not there.
@@ -4535,6 +4855,17 @@ class ZimZillaApp(App):
         if kind == "openrouter":
             t.append("  free = :free suffix and a zero price · tools-capable only\n",
                      style=p.dim)
+        if kind == "orcarouter":
+            t.append(
+                "  chat models only · filtered on the catalog's own "
+                "supported_endpoint_types\n  and architecture.output_modalities, "
+                "never on the model's name\n", style=p.dim)
+            t.append(
+                "  cyber tier: OrcaCyber Ultra / Zero are for teams that have "
+                "completed\n  business verification; orcarouter/auto is the "
+                "default router\n", style=p.dim)
+            t.append("  provider page  ", style=p.dim)
+            t.append(f"{orc_mod.CYBER_PAGE}\n", style=p.primary)
         if kind == "unorouter":
             t.append(
                 "  free = the catalog's own is_free · text output and "
@@ -7882,6 +8213,8 @@ class ZimZillaApp(App):
             ("/zim-source", "upstream sources and status", "zim-source"),
             ("/zim-tokenharbour", "switch upstream to TokenHarbour", "zim-tokenharbour"),
             ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
+            ("/zim-orcarouter", "switch upstream to OrcaRouter Cyber Inference",
+             "zim-orcarouter"),
             ("/zim-unorouter", "switch upstream to UnoRouter", "zim-unorouter"),
             ("/zim-aihubmix", "switch upstream to AIHubMix", "zim-aihubmix"),
             ("/zim-beatapi", "switch upstream to BeatAPI", "zim-beatapi"),

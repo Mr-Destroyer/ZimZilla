@@ -172,9 +172,9 @@ also carries a wildcard route, so a model Logfare adds later works without
 waiting for a ZimZilla release.
 
 Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-nvidia`,
-`/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`,
-`/zim-beatapi` and `/zim-antseed`, each with your own credential, a shared one,
-or none at all.
+`/zim-tokenharbour`, `/zim-openrouter`, `/zim-orcarouter`, `/zim-unorouter`,
+`/zim-aihubmix`, `/zim-beatapi` and `/zim-antseed`, each with your own
+credential, a shared one, or none at all.
 
 To configure setup yourself later, or to install somewhere other than the
 default:
@@ -684,7 +684,7 @@ or a colour diff of the change, and three keys:
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, so it can run against a local LiteLLM proxy, a hosted gateway or a
-peer-to-peer marketplace without any code caring which. Eleven sources are wired
+peer-to-peer marketplace without any code caring which. Twelve sources are wired
 up:
 
 | Source | Endpoint | Key | How it starts |
@@ -696,6 +696,7 @@ up:
 | **NVIDIA NIM** | `integrate.api.nvidia.com` | yours (`nvapi-…`) | direct, no proxy — free developer tier, 57 chat models |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
 | **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
+| **OrcaRouter Cyber Inference** | `api.orcarouter.ai` | yours (`sk-orca-…`, or sign in) | hosted — nothing to start, cyber tier for verified security teams |
 | **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
 | **AIHubMix** | `aihubmix.com` | yours | hosted — nothing to start |
 | **BeatAPI** | `direct.beatapi.io` | yours | hosted — nothing to start |
@@ -703,8 +704,9 @@ up:
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-tokenharbour`, `/zim-openrouter`,
-`/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` or `/zim-antseed`; the choice
-is remembered, so the next launch comes back to the one that was working.
+`/zim-orcarouter`, `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` or
+`/zim-antseed`; the choice is remembered, so the next launch comes back to the
+one that was working.
 
 The three routes with a local proxy are reached **directly** by default — the
 proxy is a translation shim, and the harness speaks both protocols now. Add
@@ -782,6 +784,67 @@ budget came back as 104 thinking frames and no answer at all. The harness's
 default ceiling (32768) has room, and it doubles the budget once when a reply is
 spent entirely on thinking, so you only meet this if you lower `max_tokens`
 yourself.
+
+### OrcaRouter Cyber Inference, and two ways to authenticate
+
+[OrcaRouter](https://www.orcarouter.ai) is an OpenAI-compatible gateway that
+fronts many models behind one key, and it also serves the **Anthropic Messages**
+protocol natively — so this route needs no proxy, no port and no translation,
+exactly like OpenRouter's. What it adds for this harness is a named **cyber
+inference** tier: models and defenses for security teams, for the authorized,
+scoped security work a general gateway tends to refuse or silently downgrade.
+
+Two credentials, one resulting key. Pick whichever fits the machine you are on:
+
+- `/orcarouter-api-setup <sk-orca-…>` — paste an existing key. Written to
+  `~/.zimzilla/orcarouter/source`, mode 600, in the same profile format every
+  other route uses.
+- `/orcarouter-auth` — sign in with your own OrcaRouter account over **OAuth 2.0
+  + PKCE**, out-of-band. A browser opens at the consent screen, shows a code,
+  and you paste it back. There is no client secret and no redirect URI to
+  register: the verifier stays in this process and the code is bound to it, so
+  an intercepted code cannot be redeemed elsewhere. Out-of-band rather than a
+  loopback listener because this harness is a terminal — the install may be over
+  SSH, in a container, or behind a proxy that will not accept an inbound port.
+
+Both paths end up holding a normal `sk-orca-…` key that belongs to your account:
+billed to you, listed in your console, revocable at
+https://www.orcarouter.ai/console/authorized-apps. **It is a durable key grant,
+not a refreshable token** — there is no refresh endpoint, so it is reused until
+revoked. A `401` from the relay marks that exact credential as needing
+re-authentication and names the command; it never triggers a fake refresh, and a
+late failure from an old request cannot mark a newly authorized key broken.
+
+`/orcarouter-key-clear` removes the stored key and its state. `/zim-orcarouter`
+switches onto the gateway: the API root is `https://api.orcarouter.ai/v1`, and
+the Anthropic prefix this harness stores is `https://api.orcarouter.ai` — the
+SDK appends `/v1/messages`, which is exactly where OrcaRouter serves it.
+
+**Models.** `/orcarouter-models` and the `/model` picker read the live catalog at
+`GET https://api.orcarouter.ai/v1/models`. The list is filtered on what the
+catalog itself declares — `supported_endpoint_types` and
+`architecture.output_modalities` — never on a model's name, so the image
+generators, video, rerank and embedding entries do not appear in a chat picker.
+The default is `orcarouter/auto`, the gateway's own router: a fresh key needs no
+model choice. `orcarouter/fusion` is the general fallback.
+
+The cyber tier is for teams that have completed business verification
+(https://www.orcarouter.ai/cyber · https://www.orcarouter.ai/models?tier=cyber):
+
+| Model | Id | For |
+|---|---|---|
+| OrcaCyber Ultra | `orca/orcacyber-ultra-1.0` | security code scanning and multi-step reasoning over large codebases |
+| OrcaCyber Zero | `orca/orcacyber-zero-1.5` (also `1.0`) | OrcaCyber-harness-driven agentic security work |
+
+A key whose scope does not include the cyber tier answers `403
+model_access_denied` for those ids. That is a **scope** answer about a valid key,
+not an auth failure, and ZimZilla says so instead of sending you to replace a
+working credential. The catalog is public, so `/orcarouter-models` works before
+either auth path has run; a verified eight-model seed covers a cold start, and
+live discovery wins once it succeeds.
+
+OrcaRouter is an aggregated, OpenAI-compatible AI gateway that routes many
+providers behind one endpoint.
 
 ### Two wire protocols, and skipping the proxy
 

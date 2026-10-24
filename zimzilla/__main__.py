@@ -14,6 +14,7 @@ from . import antseed as as_mod
 from . import beatapi as bp_mod
 from . import logfare as lf_mod
 from . import openrouter as or_mod
+from . import orcarouter as orc_mod
 from . import sources as sources_mod
 from . import session as session_mod
 from . import tokenharbour as th_mod
@@ -266,8 +267,9 @@ def main(argv: list[str] | None = None) -> int:
     # then silently reverted on the next launch.
     _remembered = sources_mod.current_key()
     for _key, _mod in (("tokenharbour", th_mod), ("openrouter", or_mod),
-                       ("unorouter", uno_mod), ("antseed", as_mod),
-                       ("aihubmix", ah_mod), ("beatapi", bp_mod)):
+                       ("orcarouter", orc_mod), ("unorouter", uno_mod),
+                       ("antseed", as_mod), ("aihubmix", ah_mod),
+                       ("beatapi", bp_mod)):
         if _remembered != _key:
             continue
         if _mod.applies_to_default_endpoint(cfg.base_url) or \

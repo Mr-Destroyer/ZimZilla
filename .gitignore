@@ -21,3 +21,8 @@ packaging/*/source
 !packaging/logfare/source
 !packaging/tokenjuice/source
 
+
+# OrcaRouter evidence is produced by verification, not shipped in the tree:
+# `python3 tests/test_orcarouter_ui.py` drives the real app and writes these.
+orca-evidence/*.png
+orca-evidence/manifest.json

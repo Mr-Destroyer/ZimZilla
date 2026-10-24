@@ -1460,6 +1460,22 @@ class Agent:
                     "been rotated, or the profile still holds a placeholder — "
                     "replace it with `/zim-tokenjuice <tj_ key>`."
                 )
+            if base_url and "api.orcarouter.ai" in base_url:
+                # A durable key grant, not a refreshable token: there is no
+                # refresh endpoint to call, so a 401 is terminal for exactly
+                # the credential that made the request. Mark that generation
+                # (and only that one) and say which command fixes it.
+                try:
+                    from . import orcarouter as orc_mod
+                    orc_mod.mark_needs_reauth()
+                except Exception:  # noqa: BLE001 - never mask the real 401
+                    pass
+                return (
+                    "OrcaRouter rejected the stored key (401) — it may have been "
+                    "revoked. Reconnect with `/orcarouter-auth`, or paste a new "
+                    "key with `/orcarouter-api-setup <sk-orca-…>`. The key is "
+                    "durable until revoked, so nothing refreshes it automatically."
+                )
             return ("authentication failed — check ANTHROPIC_AUTH_TOKEN / "
                     "ANTHROPIC_API_KEY (or OPENAI_API_KEY).")
         if isinstance(e, anthropic.NotFoundError):

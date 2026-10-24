@@ -46,8 +46,8 @@ points the session straight at it. Its key is the operator's own developer key
 (``/nvidia-api-setup``), never shipped, and its catalog is public — see
 :mod:`zimzilla.nvidia` for what that catalog does and does not say.
 
-The other upstreams (TokenHarbour, OpenRouter, UnoRouter, AIHubMix, BeatAPI,
-AntSeed) are remote or operator-started, and live in their own modules; this one
+The other upstreams (TokenHarbour, OpenRouter, OrcaRouter, UnoRouter, AIHubMix,
+BeatAPI, AntSeed) are remote or operator-started, and live in their own modules; this one
 is the local proxy plumbing and the selection record
 (``~/.zimzilla/current-source``).
 
@@ -382,8 +382,25 @@ NVIDIA_MODELS: tuple[str, ...] = (
     "meta/muse-glimmer-30b",                   # 14.5s with tools
 )
 
+#: OrcaRouter's cold-start seed — the verified sample read out of
+#: :mod:`zimzilla.orcarouter`, which is what ``/model`` shows before the live
+#: catalog has been fetched. Every entry was read out of
+#: ``GET https://api.orcarouter.ai/v1/models`` on 2026-10-24; the live catalog
+#: still wins once fetched (see ``models_for``).
+ORCAROUTER_MODELS: tuple[str, ...] = (
+    "openai/gpt-5.5",
+    "anthropic/claude-opus-4.8",
+    "google/gemini-3.5-flash",
+    "deepseek/deepseek-v4-pro",
+    "orcarouter/auto",
+    "orcarouter/fusion",
+    "orca/orcacyber-ultra-1.0",
+    "orca/orcacyber-zero-1.5",
+)
+
 MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "logfare": LOGFARE_MODELS,
+    "orcarouter": ORCAROUTER_MODELS,
     "tokenjuice": TOKENJUICE_MODELS,
     "iteracompute": ITERACOMPUTE_MODELS,
     "infronai": INFRONAI_MODELS,
@@ -451,6 +468,14 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import openrouter as or_mod
         cached = or_mod.cached_ids()
         return tuple(cached) if cached else None
+    if key == "orcarouter":
+        # Its catalog is fetched too, and filtered to entries that declare a
+        # chat route — the raw listing carries image and rerank models that
+        # cannot answer a turn. A cold cache falls back to the verified seed,
+        # which is why a fresh launch offers a usable list offline.
+        from . import orcarouter as orc_mod
+        cached = orc_mod.cached_ids()
+        return tuple(cached) if cached else ORCAROUTER_MODELS
     if key == "unorouter":
         from . import unorouter as uno_mod
         cached = uno_mod.cached_ids()
@@ -492,6 +517,9 @@ def catalog_models(key: str) -> list | None:
     if key == "openrouter":
         from . import openrouter as or_mod
         return or_mod.cached_models()
+    if key == "orcarouter":
+        from . import orcarouter as orc_mod
+        return orc_mod.cached_models()
     if key == "unorouter":
         from . import unorouter as uno_mod
         return uno_mod.cached_models()
@@ -803,7 +831,7 @@ def switchable(exclude: str | None = None) -> list[str]:
     """
     found = discover()
     out: list[str] = []
-    for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
+    for key in ("openrouter", "orcarouter", "unorouter", "aihubmix", "beatapi",
                 "tokenharbour", "infronai", "iteracompute", "antseed",
                 "nvidia", "tokenjuice", "logfare"):
         if key == exclude or key in UNDER_CONSTRUCTION:
@@ -842,11 +870,12 @@ def _gateway_module(key: str):
     from . import aihubmix as ah_mod
     from . import beatapi as bp_mod
     from . import openrouter as or_mod
+    from . import orcarouter as orc_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
-        "beatapi": bp_mod, "tokenharbour": th_mod,
+        "beatapi": bp_mod, "tokenharbour": th_mod, "orcarouter": orc_mod,
     }.get(key)
 
 
@@ -909,8 +938,8 @@ def _state_file() -> Path:
 #: `discover()`, which only knows the two LiteLLM proxies — its buyer is started
 #: and stopped by the operator, so requiring it to be up at selection time would
 #: lose the choice every time the proxy was down.
-BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
-                          "aihubmix", "beatapi"})
+BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "orcarouter", "unorouter",
+                          "antseed", "aihubmix", "beatapi"})
 
 
 def current_key() -> str | None:
@@ -965,12 +994,18 @@ def active_key(base_url: str) -> str | None:
     from . import iteracompute as ic_mod
     from . import nvidia as nv_mod
     from . import openrouter as or_mod
+    from . import orcarouter as orc_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
     if or_mod.is_openrouter(base_url):
         return "openrouter"
+    # Checked before the generic host loop: OrcaRouter's inference origin has no
+    # port, and its predicate lives in its own module rather than being spelled
+    # again here.
+    if orc_mod.is_orcarouter(base_url):
+        return "orcarouter"
     if uno_mod.is_unorouter(base_url):
         return "unorouter"
     if ah_mod.is_aihubmix(base_url):
