@@ -319,6 +319,71 @@ async def test_ui_applies_to_the_live_route(tmp: Path) -> None:
               "no restart" in blob, blob[-500:])
 
 
+async def test_switch_paused(tmp: Path) -> None:
+    """``/zim-tokenjuice`` refuses the switch while the quota is finished.
+
+    The route must not move: the message carries the whole story (the quota, the
+    wait, and which sources to use meanwhile), and a ``tj_`` key handed over
+    during the pause is still stored for the day the route comes back.
+    """
+    from zimzilla.ui.app import ZimZillaApp
+
+    zhome, _root = _sandbox(tmp / "p")
+    cfg = Config.from_env(workdir=tmp, api_key="x",
+                          base_url="http://localhost:4001", boot_rain=False)
+    cfg.state_dir = tmp / "ui-state3"
+    app = ZimZillaApp(cfg)
+
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+
+        app._handle_command("/zim-tokenjuice")
+        await pilot.pause()
+        blob = "\n".join(s.text for s in app.query_one("#transcript").lines)
+        check("pause: the quota is named",
+              "unlimited quota finished" in blob, blob[-500:])
+        check("pause: it says when the route returns",
+              "back in a few days" in " ".join(blob.split()), blob[-500:])
+        check("pause: it names the sources to use meanwhile",
+              "/zim-tokenharbour" in blob and "/zim-nvidia" in blob
+              and "/zim-beatapi" in blob, blob[-500:])
+        check("pause: the session did not move",
+              "localhost:4001" in str(cfg.base_url), str(cfg.base_url))
+
+        # The old one-step "set it and switch" still sets it, for the return.
+        app._handle_command(f"/zim-tokenjuice {KEY}")
+        await pilot.pause()
+        personal = zhome / "tokenjuice" / "source"
+        check("pause: a key handed over during it is still saved",
+              personal.exists())
+        check("pause: and it says the key waits for the route's return",
+              "when the quota returns" in "\n".join(
+                  s.text for s in app.query_one("#transcript").lines),
+              "\n".join(s.text for s in app.query_one("#transcript").lines)[-500:])
+        check("pause: still no switch", "localhost:4001" in str(cfg.base_url),
+              str(cfg.base_url))
+        check("pause: the whole key is never echoed",
+              KEY not in "\n".join(s.text for s in
+                                   app.query_one("#transcript").lines))
+
+
+def test_pause_wiring() -> None:
+    """Every surface that promises a switch has to stop promising one."""
+    app_src = (ROOT / "zimzilla" / "ui" / "app.py").read_text(encoding="utf-8")
+    check("wiring: the dispatch reaches the pause",
+          '"zim-tokenjuice": lambda a: self._cmd_tokenjuice_paused(a)' in app_src)
+    check("wiring: the pause carries the message",
+          "unlimited quota finished" in app_src
+          and "/zim-tokenharbour, /zim-nvidia, /zim-beatapi" in app_src)
+    check("wiring: the help table no longer advertises a switch",
+          '"/zim-tokenjuice", "switch upstream to Token Juice' not in app_src)
+    check("wiring: the completion popup no longer advertises a switch",
+          '("/zim-tokenjuice", "switch upstream to Token Juice'
+          not in (ROOT / "zimzilla" / "ui" / "complete.py").read_text(
+              encoding="utf-8"))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -327,7 +392,9 @@ def main() -> int:
         test_save(tmp)
         test_clear(tmp)
         test_wiring(tmp)
+        test_pause_wiring()
         asyncio.run(test_ui(tmp))
+        asyncio.run(test_switch_paused(tmp))
         asyncio.run(test_ui_applies_to_the_live_route(tmp))
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
