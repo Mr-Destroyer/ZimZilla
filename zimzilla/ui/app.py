@@ -6965,52 +6965,43 @@ class ZimZillaApp(App):
                 f"no report found — case kept for inspection: {case}", warn=True)
 
     def _cmd_obfuscate(self, args) -> None:
-        """Handle /obfuscate <payload> <encoder> [flags]."""
+        """Handle /obfuscate <file>"""
+        from zimzilla import obfuscate as ob_mod
 
-        parts = args[0].split() if args else []
-        if not parts:
-            self._cmd_obfuscate_list()
+        if not args:
+            ob_mod.print_usage()
             return
 
-        payload = parts[0]
-        encoder = parts[1] if len(parts) > 1 else ""
-        remaining = parts[2:]
+        filepath = args[0]
 
-        dry_run = False
-        iterations = 1
-        lhost = None
-        lport = None
-
-        i = 0
-        while i < len(remaining):
-            arg = remaining[i]
-            if arg == "--dry-run":
-                dry_run = True
-            elif arg == "--iterations" and i + 1 < len(remaining):
-                try:
-                    iterations = int(remaining[i + 1])
-                except ValueError:
-                    pass
-                i += 1
-            elif arg == "--lhost" and i + 1 < len(remaining):
-                lhost = remaining[i + 1]
-                i += 1
-            elif arg == "--lport" and i + 1 < len(remaining):
-                try:
-                    lport = int(remaining[i + 1])
-                except ValueError:
-                    pass
-                i += 1
-            i += 1
-
-        if not encoder:
-            self._sys_line("error: you must specify an encoder after the payload", warn=True)
+        if not os.path.isfile(filepath):
+            self._sys_line(f"error: '{filepath}' is not a file", warn=True)
             return
 
-        _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run)
+        # Analyze the file
+        analysis = ob_mod.analyze_payload_file(filepath)
 
-    
+        # Display analysis in the TUI
+        self._sys_line(f"  Obfuscation Analysis: {filepath}", ok=True)
+        self._sys_line(f"    Extension: .{__import__('pathlib').Path(filepath).suffix.lstrip('.').lower()}", ok=False)
+        self._sys_line(f"    Category: {analysis['category'].upper()}", ok=False)
+        self._sys_line(f"    Description: {analysis['description']}", ok=False)
 
+        if analysis['default_payload']:
+            self._sys_line(f"    Default payload: {analysis['default_payload']}", ok=False)
+
+        self._sys_line("")
+        self._sys_line("  Recommended encoders:", ok=False)
+        for rec in analysis['encoders']:
+            enc = rec["name"]
+            it = rec["iterations"]
+            notes = rec["notes"] if rec["notes"] else ""
+            self._sys_line(f"    - {enc} (iterations={it})", ok=False)
+            if notes:
+                self._sys_line(f"      Notes: {notes}", ok=False)
+
+        self._sys_line("")
+        self._sys_line("  Usage: place the file in a directory you own and test delivery", ok=True)
     def _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run):
         """Run the obfuscation or print the command."""
         from zimzilla import obfuscate as ob_mod
