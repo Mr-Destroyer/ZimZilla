@@ -89,6 +89,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/shodan-search", "run any Shodan query verbatim, then analyse"),
     ("/phish", "clone a login page and harvest creds"),
     ("/payload", "build a payload for a file extension — apk, exe, elf, php…"),
+    ("/obfuscate", "run a payload through one or more msfvenom encoders"),
     ("/scope-validator", "paste a programme overview → scope files + ranked targets"),
     ("/bug-hunt", "recon, then one wave of 10 agents"),
     ("/ad", "Active Directory campaign — gated and interlocked"),

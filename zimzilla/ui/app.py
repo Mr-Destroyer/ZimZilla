@@ -2249,6 +2249,7 @@ class ZimZillaApp(App):
             "scope-validator": lambda a: self._cmd_scope_validator(a),
             "ad": lambda a: self._cmd_ad(a),
             "crack": lambda a: self._cmd_crack(a),
+            "obfuscate": lambda a: self._cmd_obfuscate(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
@@ -6963,6 +6964,204 @@ class ZimZillaApp(App):
             self._sys_line(
                 f"no report found — case kept for inspection: {case}", warn=True)
 
+    def _cmd_obfuscate(self, args) -> None:
+        """Handle /obfuscate <payload> <encoder> [flags]."""
+
+        parts = args[0].split() if args else []
+        if not parts:
+            self._cmd_obfuscate_list()
+            return
+
+        payload = parts[0]
+        encoder = parts[1] if len(parts) > 1 else ""
+        remaining = parts[2:]
+
+        dry_run = False
+        iterations = 1
+        lhost = None
+        lport = None
+
+        i = 0
+        while i < len(remaining):
+            arg = remaining[i]
+            if arg == "--dry-run":
+                dry_run = True
+            elif arg == "--iterations" and i + 1 < len(remaining):
+                try:
+                    iterations = int(remaining[i + 1])
+                except ValueError:
+                    pass
+                i += 1
+            elif arg == "--lhost" and i + 1 < len(remaining):
+                lhost = remaining[i + 1]
+                i += 1
+            elif arg == "--lport" and i + 1 < len(remaining):
+                try:
+                    lport = int(remaining[i + 1])
+                except ValueError:
+                    pass
+                i += 1
+            i += 1
+
+        if not encoder:
+            self._sys_line("error: you must specify an encoder after the payload", warn=True)
+            return
+
+        _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run)
+
+    
+
+    def _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run):
+        """Run the obfuscation or print the command."""
+        from zimzilla import obfuscate as ob_mod
+
+        # Validate the pairing exists in the table (optional but helpful)
+        key = f"{payload}+{encoder}"
+        spec = ob_mod.SPECS.get(key)
+
+        lhost_val = lhost or "127.0.0.1"
+        lport_val = lport or 4444
+
+        if dry_run:
+            argv = ob_mod.build_argv(payload, encoder, iterations, lhost_val, lport_val)
+            print("  COMMAND (copy-paste this into your shell):")
+            print("  " + " ".join(argv))
+            print()
+            print("  NOTES:")
+            if spec:
+                for note in spec.notes:
+                    print(f"  · {note}")
+            else:
+                print("  · (no table entry -- verify the pairing with a real msfvenom run)")
+            print()
+            print("  The output will be the encoder-encoded payload.")
+            return
+
+        # Run the build
+        result = ob_mod.generate(payload, encoder, iterations, lhost_val, lport_val)
+
+        if not result["ok"]:
+            print(f"  build failed: {result['error']}")
+            print()
+            print("  full stderr:")
+            print(f"  {result['stderr']}")
+            print()
+            print("  full stdout (first 500 chars):")
+            print(f"  {result['stdout'][:500]}")
+            return
+
+        print("  build succeeded")
+        print()
+        print("  argv: " + " ".join(result["argv"]))
+        print()
+        print("  encoded output (first 500 chars):")
+        print(f"  {result['stdout'][:500]}")
+        print()
+        if result["sha256"]:
+            print(f"  sha256: {result['sha256']}")
+        if result["size"]:
+            from zimzilla.reverse import human_size
+            print(f"  size: {human_size(result['size'])}")
+        print()
+        print("  stderr (notes from msfvenom):")
+        print(f"  {result['stderr'][:500]}")
+
+    def _cmd_obfuscate_list():
+        """List every encoder/payload pairing this can run."""
+        ob_mod = __import__('zimzilla.obfuscate', fromlist=['SPECS'])
+        SPECS = ob_mod.SPECS
+
+        print("  /obfuscate <payload> <encoder> [--iterations N] [--lhost IP] [--lport N]")
+        print("  /obfuscate <payload> <encoder> --dry-run")
+        print()
+        print("  Available pairings (payload + encoder):")
+        print()
+
+        # Show all entries from SPECS, grouped by payload
+        payloads_seen = set()
+        for key, spec in sorted(SPECS.items()):
+            payload = spec.payload
+            if payload not in payloads_seen:
+                payloads_seen.add(payload)
+                print(f"  {payload}:")
+            enc_name = f"{spec.encoder} (it={spec.iterations})"
+            notes = "  " + "; ".join(spec.notes) if spec.notes else "  (no notes)"
+            print(f"    - {enc_name}: {notes}")
+
+        # Also list available encoders
+        print()
+        print("  Available msfvenom encoders:")
+        encoders_list = ob_mod.encoders()
+        if encoders_list:
+            for e in encoders_list[:20]:
+                print(f"    - {e}")
+            if len(encoders_list) > 20:
+                print(f"    ... and {len(encoders_list) - 20} more")
+        else:
+            print("    (msfvenom not installed)")
+
+        print()
+        print("  Every pairing above was measured against a real msfvenom run.")
+        print("  Point it at targets you own or are authorised to test.")
+
+    def _cmd_obfuscate(argv):
+        """Entry point for /obfuscate command."""
+        from zimzilla import obfuscate as ob_mod
+
+        if not argv:
+            _cmd_obfuscate_list()
+            return
+
+        # argv[0] = payload, argv[1] = encoder, rest = flags
+        if len(argv) < 2:
+            print("error: /obfuscate requires a payload and an encoder")
+            print(_cmd_obfuscate.__doc__.split('"""')[1] if '"""' in _cmd_obfuscate.__doc__ else "")
+            return
+
+        payload = argv[0]
+        encoder = argv[1]
+
+        # Parse flags from argv[2:]
+        dry_run = False
+        iterations = 1
+        lhost = None
+        lport = None
+
+        i = 2
+        while i < len(argv):
+            arg = argv[i]
+            if arg == "--dry-run":
+                dry_run = True
+            elif arg == "--iterations" and i + 1 < len(argv):
+                try:
+                    iterations = int(argv[i + 1])
+                    if iterations < 1:
+                        print("error: --iterations must be >= 1")
+                        return
+                except ValueError:
+                    print(f"error: --iterations takes a positive integer, not {argv[i + 1]!r}")
+                    return
+                i += 2
+            elif arg == "--lhost" and i + 1 < len(argv):
+                lhost = argv[i + 1]
+                i += 2
+            elif arg == "--lport" and i + 1 < len(argv):
+                try:
+                    lport = int(argv[i + 1])
+                    if not (1 <= lport <= 65535):
+                        print(f"error: --lport must be 1-65535, not {lport}")
+                        return
+                except ValueError:
+                    print(f"error: --lport takes a port number, not {argv[i + 1]!r}")
+                    return
+                i += 2
+            else:
+                print(f"error: unexpected argument {arg!r}")
+                return
+
+        _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run)
+
+    
     # ---- /ad ---------------------------------------------------------------
     def _cmd_ad(self, args) -> None:
         """/ad <domain> --ack <domain> — an Active Directory campaign.
