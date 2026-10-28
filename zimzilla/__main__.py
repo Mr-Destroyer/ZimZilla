@@ -32,7 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", "-m", default=None, help=f"model name (default: {DEFAULT_MODEL})")
     parser.add_argument("--base-url", default=None,
                         help="API endpoint (default: $ANTHROPIC_BASE_URL, then "
-                             "$OPENAI_BASE_URL, then the local Logfare proxy)")
+                             "$OPENAI_BASE_URL, then Logfare directly at "
+                             "https://logfare.ai/v1)")
     parser.add_argument("--protocol", default=None,
                         choices=["auto", "anthropic", "openai"],
                         help="wire protocol for the endpoint: auto (default), "
@@ -282,8 +283,13 @@ def main(argv: list[str] | None = None) -> int:
                        ("aihubmix", ah_mod), ("beatapi", bp_mod)):
         if _remembered != _key:
             continue
-        if _mod.applies_to_default_endpoint(cfg.base_url) or \
-                _mod.active_endpoint(cfg.base_url):
+        if (_mod.applies_to_default_endpoint(cfg.base_url)
+                or _mod.active_endpoint(cfg.base_url)
+                # The built-in default is Logfare's direct endpoint now, not a
+                # local proxy. It is still a *default*, so a remembered gateway
+                # has to be able to take it over — otherwise the choice made
+                # with /zim-openrouter would silently revert on the next launch.
+                or lf_mod.active_endpoint(cfg.base_url)):
             _mod.apply_to(cfg)
             break
 
@@ -356,19 +362,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not cfg.api_key_present:
+        # Start anyway. The TUI is where a key is set (`/logfare-api-setup`),
+        # and a harness that refuses to open cannot run the command that fixes
+        # it. The first turn is what needs the credential, and it reports the
+        # missing key against the upstream instead of pretending the account is
+        # broken.
         print(
-            "zimzilla: no credentials found.\n"
-            "  Set ANTHROPIC_AUTH_TOKEN (preferred) or ANTHROPIC_API_KEY.\n"
-            "  For a plain OpenAI-compatible endpoint, OPENAI_API_KEY and\n"
-            "  OPENAI_BASE_URL are read too (add --protocol openai if the URL\n"
-            "  does not make it obvious).\n"
-            "  For the local Logfare route, no key ships with the repository —\n"
-            "  get one at https://logfare.ai and set it with `/logfare-api-setup`\n"
-            "  in the TUI, or write it to ~/.zimzilla/logfare/source (mode 600).\n"
-            "  Then source that profile: set -a; . ~/.zimzilla/logfare/source; set +a",
+            "zimzilla: no credential is set yet — the harness will start, but "
+            "the first turn needs one.\n"
+            "  Logfare: get a key at https://logfare.ai, then run "
+            "`/logfare-api-setup <key>` in the TUI\n"
+            "           (or write it to ~/.zimzilla/logfare/source, mode 600).\n"
+            "  Plain OpenAI-compatible endpoint: set OPENAI_API_KEY and\n"
+            "           OPENAI_BASE_URL (add --protocol openai if the URL does "
+            "not make it obvious).\n",
             file=sys.stderr,
         )
-        return 2
 
     # Launch-time self-update. This runs after the preflight checks, so a
     # launch that cannot proceed anyway never pulls, and before the TUI takes

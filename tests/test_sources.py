@@ -356,8 +356,39 @@ def test_logfare_is_a_switchable_route() -> None:
         text = shipped.read_text()
         check("logfare: the shipped profile carries an lfu_ token",
               'ANTHROPIC_AUTH_TOKEN="lfu_' in text)
-        check("logfare: the shipped profile points at the local proxy",
-              'ANTHROPIC_BASE_URL="http://localhost:4001"' in text)
+        check("logfare: the shipped profile points at the direct upstream",
+              'ANTHROPIC_BASE_URL="https://logfare.ai/v1"' in text)
+
+    # The route is direct now: the profile is the whole install, and a proxy
+    # left behind by an older install is ignored rather than adopted.
+    with tempfile.TemporaryDirectory() as td:
+        with mock.patch.object(sources, "ZIMZILLA_HOME", Path(td) / "z"), \
+             mock.patch.object(sources, "DEFAULT_HOME", Path(td) / "h"):
+            found = sources.discover()
+    lf = found.get("logfare")
+    check("logfare: it is discovered from its profile", lf is not None,
+          str(sorted(found)))
+    if lf is not None:
+        check("logfare: no proxy is part of the route",
+              lf.service is None and lf.config is None,
+              f"{lf.service} {lf.config}")
+        check("logfare: it is direct-only", lf.is_direct_only,
+              str(lf.is_direct_only))
+        route = sources.direct_route(lf)
+        check("logfare: the route is the upstream, not :4001",
+              route is not None
+              and route.base_url == "https://logfare.ai/v1",
+              str(route and route.base_url))
+        check("logfare: a haiku alias is translated",
+              route is not None
+              and route.upstream_model("claude-3-5-haiku-latest")
+              == "deepseek-v4.1-flash",
+              str(route and route.upstream_model("claude-3-5-haiku-latest")))
+        check("logfare: a catalog id passes through",
+              route is not None
+              and route.upstream_model("deepseek-v4.1-flash")
+              == "deepseek-v4.1-flash",
+              str(route and route.upstream_model("deepseek-v4.1-flash")))
 
 
 def test_logfare_offers_every_chat_model() -> None:

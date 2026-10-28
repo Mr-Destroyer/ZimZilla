@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # start-litellm.sh — run the LiteLLM translation proxy for ZimZilla.
 #
+# RETIRED from the default route. Logfare serves Chat Completions itself, so
+# ZimZilla talks to https://logfare.ai/v1 directly and setup.sh no longer
+# installs or starts this script. It is kept for a manual/legacy setup that
+# still wants the Anthropic -> OpenAI hop.
+#
 #   ZimZilla (Anthropic /v1/messages) --▶ LiteLLM :4001 --▶ Logfare (OpenAI)
 #
 # Usage:  ./start-litellm.sh [start|stop|restart|status|logs|help]

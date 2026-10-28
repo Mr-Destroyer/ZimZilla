@@ -17,11 +17,14 @@
 # public); the first turn is what needs the key.
 #
 # The rest of this file is load-bearing and is copied into the operator's own
-# profile the first time a key is set: the base URL the proxy listens on, the
-# model aliases, and the empty ANTHROPIC_API_KEY that keeps the token
-# authoritative when a real key is inherited from the shell.
+# profile the first time a key is set: the upstream URL, the model aliases, and
+# the empty ANTHROPIC_API_KEY that keeps the token authoritative when a real key
+# is inherited from the shell.
+#
+# Direct route: Logfare serves Chat Completions itself, so there is no local
+# LiteLLM proxy in front of it. The harness sends this key straight upstream.
 
-export ANTHROPIC_BASE_URL="http://localhost:4001"
+export ANTHROPIC_BASE_URL="https://logfare.ai/v1"
 export ANTHROPIC_AUTH_TOKEN="lfu_REPLACE_ME"
 export ANTHROPIC_MODEL="deepseek-v4.1-flash"
 

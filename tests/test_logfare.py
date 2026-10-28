@@ -371,6 +371,8 @@ def test_profile_key(tmp: Path) -> None:
         text = profile.read_text(encoding="utf-8")
         check("key: the token is in the file",
               f'ANTHROPIC_AUTH_TOKEN="{first}"' in text)
+        check("key: the profile names the direct route",
+              'ANTHROPIC_BASE_URL="https://logfare.ai/v1"' in text, text[:200])
         check("key: the model aliases came along", "MODEL_QWEN" in text)
         check("key: the empty API key came along",
               'ANTHROPIC_API_KEY=""' in text)
@@ -398,6 +400,21 @@ def test_profile_key(tmp: Path) -> None:
         check("key: the model is kept when none is given",
               'ANTHROPIC_MODEL="deepseek-v4.1-flash"' in text)
 
+        # A profile written before the proxy was retired names :4001. Writing a
+        # new key must move it to the direct route rather than leave a working
+        # credential pointing at an address nothing answers.
+        profile.write_text(
+            'export ANTHROPIC_BASE_URL="http://localhost:4001"\n'
+            'export ANTHROPIC_AUTH_TOKEN="lfu_old_key_0123456789abcd"\n'
+            'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n'
+            'export ANTHROPIC_API_KEY=""\n', encoding="utf-8")
+        lf.save_key("lfu_third_key_0123456789abc", "")
+        text = profile.read_text(encoding="utf-8")
+        check("key: an old :4001 profile is moved to the direct route",
+              'ANTHROPIC_BASE_URL="https://logfare.ai/v1"' in text, text[:200])
+        check("key: the new key is the stored one",
+              "lfu_third_key_0123456789abc" in text, text[:200])
+
     check("key: lfu_ and a long body is accepted",
           lf.looks_like_key("lfu_" + "a" * 32))
     check("key: a pasted export line is rejected",
@@ -422,9 +439,9 @@ def test_key_command(tmp: Path) -> None:
     profile = tmp / "zhome" / "logfare" / "source"
     key = "lfu_live_0123456789abcdef"
     src = sources_mod.Source(key="logfare", label="Logfare", port=4001,
-                             profile=profile, service=tmp / "svc.sh",
-                             config=tmp / "cfg.yaml", model="deepseek-v4.1-flash",
-                             root=ROOT)
+                             profile=profile, service=None, config=None,
+                             model="deepseek-v4.1-flash", root=ROOT,
+                             direct=sources_mod.LOGFARE_DIRECT)
 
     def run(base_url: str, args: list[str]) -> tuple[list[str], Config, list[str]]:
         said: list[str] = []
@@ -467,11 +484,15 @@ def test_key_command(tmp: Path) -> None:
     check("cmd: the confirmation names the last four characters",
           any(key[-4:] in m for m in said), str(said))
 
-    # Through the local proxy: LiteLLM took the key at start-up, so restart it.
+    # A session launched on the retired :4001 profile is moved onto the direct
+    # route: there is no proxy there any more, and the key is sent by this
+    # client rather than held by a bridge that would need a restart.
     said, cfg, restarted = run("http://localhost:4001", [key])
-    check("cmd: the proxy is restarted for a proxied session",
-          restarted == ["logfare"], str(restarted))
-    check("cmd: the client sends the new key after the restart",
+    check("cmd: a legacy proxy endpoint is moved direct",
+          cfg.base_url == "https://logfare.ai/v1", cfg.base_url)
+    check("cmd: no proxy restart is attempted",
+          restarted == [], str(restarted))
+    check("cmd: the client sends the new key after the move",
           cfg.auth_token == key, str(cfg.auth_token))
     check("cmd: still no echo of the key", all(key not in m for m in said), str(said))
 

@@ -3998,10 +3998,14 @@ class ZimZillaApp(App):
 
         No Logfare key ships in this repository, so this is where the first one
         comes from. It goes to ``~/.zimzilla/logfare/source``, mode 600, which
-        the launcher, ``/zim-logfare`` and the proxy all read. Logfare applies a
-        per-account budget — 20/min, 500/hour, 2500/day, three concurrent, then
-        a 429 with a Retry-After until the UTC day rolls over — and a second key
-        is a second budget.
+        the launcher and ``/zim-logfare`` read. Logfare applies a per-account
+        budget — 20/min, 500/hour, 2500/day, three concurrent, then a 429 with a
+        Retry-After until the UTC day rolls over — and a second key is a second
+        budget.
+
+        Logfare is reached directly (``https://logfare.ai/v1``), so the key is
+        in force as soon as the client is rebuilt: there is no proxy holding its
+        own copy that would need a restart.
 
         Nothing is echoed. The confirmation names the last four characters,
         which tells two keys apart and is not enough to be one.
@@ -4057,50 +4061,23 @@ class ZimZillaApp(App):
         path = lf_mod.save_key(key, self.cfg.model if live else "")
         lf_mod.clear_cache()          # a new key means a new quota, refetch
         self._sys_line(f"Logfare key saved (…{key[-4:]}) to {path}", ok=True)
-        if direct:
-            # Talking to logfare.ai itself: this client sends the key, so it is
-            # in force as soon as the client is rebuilt.
+        if live:
+            # The key is sent by this client, so it is in force as soon as the
+            # client is rebuilt. A session launched on the retired :4001 profile
+            # is moved onto the direct route here too: the address it was
+            # pointing at has no proxy behind it any more.
+            src = sources_mod.discover().get("logfare")
+            if src is not None and src.is_direct_only:
+                route = sources_mod.direct_route(src)
+                if route is not None:
+                    self.cfg.base_url = route.base_url
+                    self.cfg.protocol = "openai"
             self.cfg.auth_token = key
             self.cfg.api_key = ""
             self.agent._client = None
             self._sys_line("applied to this session — no restart", ok=True)
-        elif live:
-            # Through the local proxy: LiteLLM took its master key and its
-            # upstream key from the profile at start-up, so a restart with the
-            # new environment is the only way the new key becomes the key in use.
-            src = sources_mod.discover().get("logfare")
-            if src is None:
-                self._sys_line("no Logfare service to restart — the key applies "
-                               "on the next launch", warn=True)
-            else:
-                self._restart_proxy_for_key(src, key)
         else:
             self._sys_line("switch to it with /zim-logfare")
-
-    @work(exclusive=True)
-    async def _restart_proxy_for_key(self, src, key: str) -> None:
-        """Restart a source's proxy so it comes up holding the key just written."""
-        bar = self.query_one(StatusBar)
-        self.busy = True
-        bar.set_activity(f"restarting {src.label} proxy", busy=True)
-        self._sys_line(f"restarting the {src.label} proxy so it uses the new key…")
-        try:
-            ok, detail = await asyncio.to_thread(sources_mod.restart_proxy, src)
-        finally:
-            self.busy = False
-            bar.set_activity("idle", busy=False)
-            bar.render_bar()
-            self.query_one("#input", Input).focus()
-        if not ok:
-            self._sys_line(f"proxy restart failed: {detail}", warn=True)
-            self._sys_line("the key is saved — it applies on the next launch", warn=True)
-            return
-        # The proxy's master key is the new key now, so this client has to send
-        # it or every request is a 401 against the proxy rather than upstream.
-        self.cfg.auth_token = key
-        self.cfg.api_key = ""
-        self.agent._client = None
-        self._sys_line(f"{src.label} proxy restarted — the new key is live", ok=True)
 
     def _cmd_tokenjuice_key(self, args) -> None:
         """/tokenjuice-api-setup [key|clear] — your own Token Juice key.

@@ -121,8 +121,8 @@ zimzilla --deny out-of-scope.yaml  # hosts that are never touched
 ### macOS
 
 ZimZilla runs natively on macOS 12+ — Apple silicon and Intel. There is no
-Docker step and no Linux emulation: the harness is Python, and the LiteLLM
-proxy is a local Python process exactly as it is on Linux.
+Docker step and no Linux emulation: the harness is Python, and the default
+Logfare route is a direct HTTPS connection, exactly as it is on Linux.
 
 ```bash
 brew install python@3.12 git
@@ -135,14 +135,13 @@ shell is zsh, so when `~/.local/bin` is missing from `PATH` the installer prints
 the `~/.zshrc` line, not a `~/.bashrc` one.
 
 `Terminal.app` works, but it has no 24-bit colour; for the intended
-green-on-black look use iTerm2, Ghostty, WezTerm or kitty. The proxy binds
-loopback only, so macOS may ask for permission the first time your terminal
-connects to a local port — allow it for that terminal.
+green-on-black look use iTerm2, Ghostty, WezTerm or kitty. The default route is
+a direct HTTPS connection to Logfare, so there is no local port to allow.
 
-The proxy manager uses `lsof` on macOS (where `ss` does not exist) and `ss` on
-Linux, so `/zim-logfare`, `/zim-iteracompute` and `/zim-infronai` behave the
-same on both. `start-litellm.sh` also stops a stale proxy by port rather than by
-pidfile, so a crashed session does not leave `:4001` claimed.
+`/zim-iteracompute` and `/zim-infronai` still have optional local proxies, and
+their manager uses `lsof` on macOS (where `ss` does not exist) and `ss` on
+Linux. They are reached directly by default; `ZIMZILLA_NO_PROXY=0` brings the
+proxy hop back for a route that needs it.
 
 If `~/.local/bin` is not on your `PATH`, the installer prints the line to add.
 Re-running the same command updates an existing install — including one whose
@@ -150,13 +149,14 @@ checkout can no longer fast-forward because the upstream history was rewritten;
 it prints the commit it ended up on (`code: <sha> on main`) and says plainly if
 local edits stopped the update instead of reporting success either way.
 
-The installer finishes by running `./setup.sh`, which configures the route
-without asking you anything — and without inventing a credential. No Logfare key
-ships in this repository, and `packaging/logfare/source` is a template whose
-token is a placeholder. Get a key at https://logfare.ai (`lfu_…`), then either
-run `/logfare-api-setup <key>` in the TUI or put it in
-`~/.zimzilla/logfare/source` yourself (mode 600). A profile that already exists
-is never overwritten, and `setup.sh` installs everything else either way.
+The installer finishes by running `./setup.sh`, which configures the direct
+route without asking you anything — and without inventing a credential. No
+Logfare key ships in this repository, and `packaging/logfare/source` is a
+template whose token is a placeholder. Get a key at https://logfare.ai
+(`lfu_…`), then either run `/logfare-api-setup <key>` in the TUI or put it in
+`~/.zimzilla/logfare/source` yourself (mode 600). An existing profile keeps its
+key: `setup.sh` rewrites only the address, moving a profile written for the old
+`:4001` proxy onto `https://logfare.ai/v1`.
 
 Until a key is set, the harness starts and `/logfare-models` still works — that
 catalog is public. The first *turn* is what needs the key, and it says so
@@ -170,8 +170,8 @@ into it. A second key is a second budget.
 **Logfare is a full route, not just the starting point.** `/zim-logfare` switches
 back to it from any other upstream, and the choice is remembered. Every chat
 model Logfare serves is available through it — `/logfare-models` lists what is
-up right now, with uptime, and `/model` offers the same list. The proxy config
-also carries a wildcard route, so a model Logfare adds later works without
+up right now, with uptime, and `/model` offers the same list. The catalog is
+read from Logfare's own status API, so a model it adds later works without
 waiting for a ZimZilla release.
 
 Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-nvidia`,
@@ -207,13 +207,12 @@ package and drops a `zimzilla` command into your venv's `bin/`. The launcher
 uses the checkout's `.venv` when it exists, then an activated `$VIRTUAL_ENV`,
 then `python3` on `PATH` — so a venv of your own works too.
 
-`requirements.txt` covers the **harness** only. The LiteLLM proxy is installed
-separately, into its own venv (`~/.zimzilla/venv`, built by `./setup.sh`),
-because the two cannot share one environment: `litellm[proxy]` requires
-`rich<14.0` while textual 8.x requires `rich>=14.2`, and a set listing both does
-not merely resolve badly — it fails to resolve at all, so nothing installs. If a
-`litellm` is already on your `PATH` or at `~/.local/bin/litellm`, `setup.sh`
-reuses it instead of building the proxy venv.
+`requirements.txt` covers the **harness** only, and that is all the default
+route needs: Logfare is reached directly over Chat Completions, so no LiteLLM
+proxy is installed. `/zim-iteracompute` and `/zim-infronai` still ship optional
+proxy files, and if you choose to use that hop you install `litellm[proxy]`
+yourself — it cannot share this environment (`litellm[proxy]` requires
+`rich<14.0` while textual 8.x requires `rich>=14.2`, an unsatisfiable pair).
 
 `zimzilla` reads its credentials from the environment. The launcher sources the
 profile `./setup.sh` wrote before the harness starts, so a normal launch needs
@@ -238,9 +237,8 @@ it is current.
 Every chat model in that catalog is selectable. At the time of writing that is
 nine: `deepseek-v4.1-flash`, `deepseek-v4-pro-0813`, `gemma-4-26b`, `glm-5.3`,
 `glm-5.3-flash`, `kimi-k2.6`, `claude-haiku-5-5`, `logfare/auto` and
-`qwen-3.8-27b`. The proxy config names each one and carries a `*` wildcard, so a
-model Logfare adds later routes without a new ZimZilla release — the wildcard is
-a fallback, never preferred over a named entry.
+`qwen-3.8-27b`. Because the list is fetched rather than declared, a model
+Logfare adds later is selectable without a new ZimZilla release.
 
 Two upstream behaviours are worth knowing before you pick one. **Premium models
 need a one-time training opt-in** on the Logfare account; until it is granted the
@@ -743,13 +741,13 @@ or a colour diff of the change, and three keys:
 ## Upstreams
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
-points at, so it can run against a local LiteLLM proxy, a hosted gateway or a
-peer-to-peer marketplace without any code caring which. Eleven sources are wired
-up:
+points at, or Chat Completions to an endpoint that serves it, so it can run
+against a hosted gateway, a direct upstream or a local proxy without any code
+caring which. Eleven sources are wired up:
 
 | Source | Endpoint | Key | How it starts |
 |---|---|---|---|
-| **Logfare** | `:4001` | yours | the bundled proxy — the default, all chat models |
+| **Logfare** | `logfare.ai/v1` | yours | direct, no proxy — the default, all chat models |
 | **Token Juice** | `api.tokenjuice.ai` | **shared** — ships, no signup | direct, no proxy — one model, Chat Completions |
 | **IteraCompute** | `:4002` | yours | direct (proxy on `:4002` if asked) — free Qwen tier |
 | **InfronAI** | `:4003` | yours | direct (proxy on `:4003` if asked) — free tier, $5 balance required |
@@ -766,20 +764,18 @@ Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` or `/zim-antseed`; the choice
 is remembered, so the next launch comes back to the one that was working.
 
-The three routes with a local proxy are reached **directly** by default — the
-proxy is a translation shim, and the harness speaks both protocols now. Add
-`proxy` to go through it: `/zim-iteracompute proxy`. Token Juice has no proxy to
-ask for: its upstream serves Chat Completions itself, so the route is direct and
-`/zim-tokenjuice` says so if you pass `proxy` anyway.
+Logfare, Token Juice and NVIDIA are reached **directly** — their upstreams serve
+Chat Completions themselves, so there is no proxy to start. IteraCompute and
+InfronAI still ship an optional local proxy, but are reached directly by
+default too; add `proxy` to go through it: `/zim-iteracompute proxy`.
 
 Logfare is a full switch target: it serves every chat model on Logfare's
 catalog, and `/logfare-models` shows what is up right now. You need your own key
 (`lfu_…` from https://logfare.ai) — none ships in this repository, because a key
 committed to a public repo is a budget anyone can spend. `/logfare-api-setup
 <key>` stores it and shows the last four characters of whichever key is in
-force, so it is obvious which credential a turn will use. On a direct endpoint the new key is live immediately; through the
-local proxy the proxy is restarted, because that is where LiteLLM reads the key
-from at start-up.
+force, so it is obvious which credential a turn will use. Because the route is
+direct, the new key is live immediately: there is no proxy holding its own copy.
 
 Token Juice is a direct route and nothing else: `/zim-source` lists it with
 `direct` where the others show a port, because there is no proxy to report on.
@@ -863,14 +859,14 @@ wrong the symptom is not "the proxy is broken", it is "the model cannot use
 tools".
 
 So ZimZilla also speaks Chat Completions **directly**, for any endpoint that
-serves it. No proxy, no translation. This is not an opt-in: every source that
-has a local proxy is switched to directly — `/zim-iteracompute` reads the
-proxy's own config for the upstream URL and model ids and connects there, and
-the same happens at launch, so a session started on `:4002` moves to
-`api.iteracompute.com/v1` before the first turn. `proxy` after the command
-brings the hop back for the times it earns its keep: `/zim-iteracompute proxy`.
-Token Juice never had a hop to bring back: its route is declared in
-`sources.py`, there is no proxy file in the tree, and `/zim-tokenjuice` always
+serves it. No proxy, no translation. This is not an opt-in: Logfare is direct by
+default, and every source that still has a local proxy is switched to directly —
+`/zim-iteracompute` reads the proxy's own config for the upstream URL and model
+ids and connects there, and the same happens at launch, so a session started on
+`:4002` moves to `api.iteracompute.com/v1` before the first turn. `proxy` after
+the command brings the hop back for the times it earns its keep:
+`/zim-iteracompute proxy`. Token Juice and Logfare never had a hop to bring
+back: their routes are declared in `sources.py`, and `/zim-tokenjuice` always
 lands on `api.tokenjuice.ai/v1`.
 
 Point at any other Chat Completions host with:
@@ -890,7 +886,7 @@ Which protocol is used is decided per endpoint, and the decision is visible:
 
 | Endpoint | Protocol | Why |
 |---|---|---|
-| `localhost:4001` … `:4003` | Anthropic | these are the bundled LiteLLM proxies |
+| `localhost:4002` … `:4003` | Anthropic | these are the optional local LiteLLM proxies |
 | `localhost:8000/v1` | OpenAI | a local vLLM/Ollama is not one of them |
 | any URL ending in `/v1` | OpenAI | the near-universal convention |
 | `openrouter.ai`, `tokenharbor.ai`, `api.unorouter.com`, `aihubmix.com`, `direct.beatapi.io` | Anthropic | hosted gateways that speak Messages natively |
@@ -1086,10 +1082,10 @@ costs one lookup rather than a broken switch.
 ### IteraCompute
 
 IteraCompute (`api.iteracompute.com`) serves an **OpenAI-compatible** API only —
-`/v1/messages` answers `404 edge_route_not_allowed` — so it runs behind the same
-kind of local LiteLLM translation proxy as Logfare and Token Juice, on `:4002`.
-The proxy is not optional here; it is what turns an OpenAI endpoint into
-something ZimZilla can talk to.
+`/v1/messages` answers `404 edge_route_not_allowed` — so it ships with a local
+LiteLLM translation proxy on `:4002`. ZimZilla speaks Chat Completions itself,
+so it connects to `api.iteracompute.com/v1` directly by default; the proxy is
+there for the `proxy` hop, and for a client that only speaks Messages.
 
 Set your key once:
 
@@ -1098,8 +1094,7 @@ Set your key once:
 ```
 
 That writes `~/.zimzilla/iteracompute/source` (mode 600), the same profile
-format as every other source, and the launcher starts the proxy from
-`~/.zimzilla/iteracompute/start-litellm.sh`. Then:
+format as every other source. Then:
 
 ```
 /zim-iteracompute          # switch (direct; add `proxy` for :4002), free list
@@ -1145,8 +1140,9 @@ against the conservative 128K.
 InfronAI (`infron.ai`, API at `llm.onerouter.pro`) is a model marketplace behind
 one key, and it is the one upstream here that **does** speak the Anthropic
 protocol natively — `POST /v1/messages` answers `401` without a key while a
-nonsense path `404`s, so the endpoint exists. It still runs behind a local
-LiteLLM proxy on `:4003`, and the catalog is what says why.
+nonsense path `404`s, so the endpoint exists. It ships with a local LiteLLM
+proxy on `:4003` for the models that only serve Chat Completions; ZimZilla
+reaches the upstream directly by default and uses the proxy only when asked.
 
 **Every free chat model is OpenAI-endpoint only.** The catalog publishes
 `supported_endpoint_types` per model: all six `:free` chat models list
@@ -1161,8 +1157,7 @@ Set your key once:
 ```
 
 That writes `~/.zimzilla/infronai/source` (mode 600), the same profile format as
-every other source, and the launcher starts the proxy from
-`~/.zimzilla/infronai/start-litellm.sh`. Then:
+every other source. Then:
 
 ```
 /zim-infronai              # switch (direct; add `proxy` for :4003), free list
@@ -1426,7 +1421,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/payload <ext>` | analyse an extension, build a payload, print the listener |
 | `/payload <ext> --dry-run` | print the exact msfvenom command, build nothing |
 | `/payload <ext> --handler` | the msfconsole listener only |
-| `/zim-logfare` | switch upstream to Logfare (`:4001`) — bundled proxy, all chat models |
+| `/zim-logfare` | switch upstream to Logfare — direct, no proxy, all chat models |
 | `/zim-tokenjuice` | switch upstream to Token Juice — direct, no proxy |
 | `/tokenjuice-api-setup [key\|clear]` | your own `tj_` key, or `clear` to fall back to the shared one |
 | `/zim-tokenharbour` | switch upstream to TokenHarbour (hosted) |

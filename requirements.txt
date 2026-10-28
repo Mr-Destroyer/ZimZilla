@@ -6,13 +6,13 @@
 # This installs the harness's dependencies and zimzilla itself (the trailing
 # `-e .`), which drops a `zimzilla` command into the venv's bin.
 #
-# The LiteLLM proxy is deliberately NOT in this file. It cannot share this
-# environment: litellm[proxy] requires rich<14.0, while textual 8.x requires
-# rich>=14.2. A requirements.txt that lists both is unsatisfiable — pip reports
+# The LiteLLM proxy is deliberately NOT in this file. The default route does
+# not use one: Logfare serves Chat Completions directly. The optional
+# IteraCompute/InfronAI proxies cannot share this environment either:
+# litellm[proxy] requires rich<14.0, while textual 8.x requires rich>=14.2. A
+# requirements.txt that lists both is unsatisfiable — pip reports
 # ResolutionImpossible and installs *nothing*, which is why
-# `pip install -r requirements.txt` failed on a fresh checkout. The proxy gets
-# its own venv instead (~/.zimzilla/venv, built by setup.sh), which
-# start-litellm.sh already looks in.
+# `pip install -r requirements.txt` failed on a fresh checkout.
 
 anthropic>=0.40
 textual>=0.80

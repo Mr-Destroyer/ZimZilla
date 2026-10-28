@@ -10,17 +10,19 @@ from pathlib import Path
 # Model registry
 # ---------------------------------------------------------------------------
 # The harness talks the Anthropic Messages protocol to whatever endpoint
-# ANTHROPIC_BASE_URL points at. By default that is the local LiteLLM proxy
-# (:4001) fronting Logfare, whose default model is deepseek-v4.1-flash.
+# ANTHROPIC_BASE_URL points at, or Chat Completions to an endpoint that serves
+# it. By default that is Logfare directly (https://logfare.ai/v1), whose default
+# model is deepseek-v4.1-flash. There is no local LiteLLM proxy in the default
+# path: the upstream serves Chat Completions itself.
 #
 # Prices are USD per million tokens and are *estimates* for CLI accounting —
 # they are not billing-accurate. Unknown models fall back to DEFAULT_PRICE.
 
-DEFAULT_BASE_URL = "http://localhost:4001"
+DEFAULT_BASE_URL = "https://logfare.ai/v1"
 DEFAULT_MODEL = "deepseek-v4.1-flash"
 
-# The harness dotdir. setup.sh installs the proxy files, the doctrine file and
-# the session state here; ZIMZILLA_HOME moves the whole lot.
+# The harness dotdir. setup.sh installs the doctrine file, the source profiles
+# and the session state here; ZIMZILLA_HOME moves the whole lot.
 DEFAULT_HOME = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
 
 

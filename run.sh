@@ -3,9 +3,9 @@
 #
 # The real launcher lives in packaging/; it needs ZIMZILLA_ROOT to point at the
 # checkout (its own directory is packaging/). This shim does exactly that, so
-# `./run.sh` starts the proxy and the harness for you. The launcher then uses
-# the checkout's own venv (./.venv) when it exists, so there is nothing to
-# activate:
+# `./run.sh` starts the harness directly — no local proxy in the default route.
+# The launcher then uses the checkout's own venv (./.venv) when it exists, so
+# there is nothing to activate:
 #
 #   python3 -m venv .venv && pip install -r requirements.txt
 #   ./setup.sh                          # verify the route end-to-end

@@ -10,11 +10,16 @@ is reached directly. A proxy route's direct endpoint is not a second Source but
 a property read out of the same config (:func:`direct_route`), and switching
 prefers it.
 
-Three local LiteLLM proxies front three different upstreams:
+Two local LiteLLM proxies front two different upstreams:
 
-    logfare       :4001  →  logfare.ai         (the default, shipped with the repo)
     iteracompute  :4002  →  api.iteracompute.com (OpenAI-only; free Qwen tier)
     infronai      :4003  →  llm.onerouter.pro  (OpenAI-only; free model tier)
+
+Logfare used to be the third. Its upstream serves Chat Completions itself, so
+the proxy is gone: ``https://logfare.ai/v1`` is the default route, reached
+directly with the same profile key (see ``LOGFARE_DIRECT``). ``:4001`` is still
+recognised so a profile written by an older install is migrated at launch
+rather than pointed at an address nothing answers.
 
 Token Juice has no proxy at all: its upstream serves Chat Completions, the
 harness speaks it, so the route is declared here and reached directly —
@@ -178,13 +183,31 @@ TOKENJUICE_DIRECT = DirectRoute(
 #: there is no proxy name to translate. See :mod:`zimzilla.nvidia`.
 NVIDIA_DIRECT = DirectRoute(base_url="https://integrate.api.nvidia.com/v1")
 
+#: Logfare's route, declared rather than read from a proxy config.
+#:
+#: ``https://logfare.ai/v1`` serves Chat Completions itself, so the bundled
+#: LiteLLM proxy is no longer part of the route: the harness sends the same
+#: bearer token straight upstream. The alias map keeps the haiku names Claude
+#: Code probes with pointed at a model Logfare actually serves, because the
+#: upstream does not know those names. Catalog ids (``deepseek-v4.1-flash``,
+#: ``qwen-3.8-27b``, …) pass through unchanged.
+LOGFARE_DIRECT = DirectRoute(
+    base_url="https://logfare.ai/v1",
+    models={
+        "claude-3-5-haiku-latest": "deepseek-v4.1-flash",
+        "claude-3-5-haiku": "deepseek-v4.1-flash",
+        "claude-haiku-4-5-20251001": "deepseek-v4.1-flash",
+    },
+)
+
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
 #: where they go.
-DIRECT_ONLY: frozenset[str] = frozenset({"tokenjuice", "nvidia"})
+DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia"})
 
 #: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
 DECLARED_ROUTES: dict[str, DirectRoute] = {
+    "logfare": LOGFARE_DIRECT,
     "tokenjuice": TOKENJUICE_DIRECT,
     "nvidia": NVIDIA_DIRECT,
 }
@@ -433,16 +456,20 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import nvidia as nv_mod
         cached = nv_mod.cached_ids()
         return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
+    if key == "logfare":
+        # Logfare has its own catalog module, and that is the list /model must
+        # offer: it is filtered to chat-capable models and carries health. The
+        # generic direct-only branch below would read the Models route cache
+        # instead, which is cold until a switch probes it.
+        from . import logfare as lf_mod
+        cached = lf_mod.cached_ids()
+        return tuple(cached) if cached else None
     if key in DIRECT_ONLY:
         # Declared, not fetched — but a switch probes the Models route, and what
         # the upstream actually answered is better than the declared fallback.
         from . import openai_compat as oa_mod
         probed = oa_mod.cached_ids(DECLARED_ROUTES[key].base_url)
         return tuple(probed) if probed else (MODELS_BY_KEY.get(key) or None)
-    if key == "logfare":
-        from . import logfare as lf_mod
-        cached = lf_mod.cached_ids()
-        return tuple(cached) if cached else None
     if key == "tokenharbour":
         from . import tokenharbour as th_mod
         cached = th_mod.cached_ids()
@@ -634,6 +661,9 @@ def _first(paths: list[Path]) -> Path | None:
 
 def _service_candidates(key: str) -> list[Path]:
     if key == "logfare":
+        # Retired: Logfare is direct-only now (see DECLARED_ROUTES). The paths
+        # are still listed so an older install's files can be found and ignored
+        # deliberately, rather than being mistaken for a route that still works.
         return [
             ZIMZILLA_HOME / "logfare" / "start-litellm.sh",
             DEFAULT_ROOT / "packaging" / "logfare" / "start-litellm.sh",
@@ -656,6 +686,8 @@ def _service_candidates(key: str) -> list[Path]:
 
 def _config_candidates(key: str) -> list[Path]:
     if key == "logfare":
+        # Same as _service_candidates: kept for recognition of an older
+        # install, ignored by _build because Logfare is direct-only.
         return [
             ZIMZILLA_HOME / "logfare" / "litellm-config.yaml",
             DEFAULT_ROOT / "packaging" / "logfare" / "litellm-config.yaml",
@@ -718,9 +750,15 @@ def _build(key: str, label: str, port: int, model: str) -> Source | None:
     config = _first(_config_candidates(key))
     if profile is None:
         return None
-    # A direct-only source needs no proxy files; every other one needs all
-    # three, because the proxy is what the route *is*.
-    if key not in DIRECT_ONLY and (service is None or config is None):
+    # A direct-only source needs no proxy files, and a proxy left behind by an
+    # older install is deliberately ignored: the route declared in
+    # DECLARED_ROUTES is the only one that exists now. Keeping the old files
+    # would make ``is_direct_only`` false and send the session back through a
+    # hop that is no longer installed.
+    if key in DIRECT_ONLY:
+        service = None
+        config = None
+    elif service is None or config is None:
         return None
     return Source(
         key=key, label=label, port=port, profile=profile,
@@ -734,10 +772,14 @@ def _build(key: str, label: str, port: int, model: str) -> Source | None:
 def discover() -> dict[str, Source]:
     """Every source this machine can switch to, keyed by name.
 
-    A proxy route is present when its profile, service and config are all
-    there; a direct-only one (Token Juice) when its profile is.
+    A direct-only source (Logfare, Token Juice, NVIDIA) is present when its
+    profile is. A proxy route is present only when its profile, service and
+    config are all there — none of the bundled proxies is the default any more,
+    so this is the bring-your-own-proxy case.
     """
     found: dict[str, Source] = {}
+    # Direct now: the upstream serves Chat Completions itself, so the profile is
+    # the whole install and the retired :4001 proxy files are ignored.
     logfare = _build("logfare", "Logfare", 4001, "deepseek-v4.1-flash")
     if logfare:
         found["logfare"] = logfare
@@ -906,9 +948,9 @@ def _state_file() -> Path:
 #: they have no local profile, service or config to discover, so gating them on
 #: discover() would silently discard the selection and drop a session back onto
 #: Logfare at the next launch. AntSeed is local but equally undiscoverable by
-#: `discover()`, which only knows the two LiteLLM proxies — its buyer is started
-#: and stopped by the operator, so requiring it to be up at selection time would
-#: lose the choice every time the proxy was down.
+#: `discover()`, which only knows the sources with profiles in this tree — its
+#: buyer is started and stopped by the operator, so requiring it to be up at
+#: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
                           "aihubmix", "beatapi"})
 
@@ -996,7 +1038,7 @@ def active_key(base_url: str) -> str | None:
     # Checked before the port match, and by port rather than by name: the buyer
     # hands out a plain http://localhost:8377 with no "antseed" in it, and the
     # regex below would otherwise find port 8377, miss it in source_for_port()
-    # (which only knows the two LiteLLM proxies) and return None.
+    # (which only knows the ports declared by discover()) and return None.
     if as_mod.is_antseed(base_url):
         return "antseed"
     # A source reached directly, with no proxy in the middle: identified by the

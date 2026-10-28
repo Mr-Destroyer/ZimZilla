@@ -30,8 +30,9 @@
 #
 # This is meant to be run from a pipe (`curl … | bash`), where standard input
 # is the script itself — so nothing here may read stdin. External commands get
-# </dev/null. setup.sh does not prompt either: it seeds the profile from the key
-# shipped in the checkout, so a fresh install finishes unattended.
+# </dev/null. setup.sh does not prompt either: it writes the direct Logfare
+# profile without inventing a credential, so a fresh install finishes
+# unattended.
 
 set -euo pipefail
 
@@ -39,7 +40,6 @@ REPO="${ZIMZILLA_REPO:-https://github.com/Mr-Destroyer/ZimZilla.git}"
 INSTALL_DIR="${ZIMZILLA_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/zimzilla}"
 BIN_DIR="${ZIMZILLA_BIN_DIR:-$HOME/.local/bin}"
 ZIMZILLA_HOME="${ZIMZILLA_HOME:-$HOME/.zimzilla}"
-PROFILE="$ZIMZILLA_HOME/logfare/source"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[36m▸\033[0m \033[1m%s\033[0m\n' "$*"; }
@@ -320,20 +320,16 @@ esac
 
 if [[ "${ZIMZILLA_SKIP_SETUP:-0}" == "1" ]]; then
   warn "ZIMZILLA_SKIP_SETUP=1 — not configuring the route"
-elif [[ -r "$PROFILE" ]]; then
-  step "Route already configured"
-  ok "$PROFILE exists"
 else
-  # setup.sh does not prompt: it seeds the profile from the key shipped in the
-  # checkout, so a fresh install needs no signup and no terminal. stdin is
-  # still pointed at /dev/null rather than left as this script's own, so a
-  # future read in setup.sh cannot eat the rest of a `curl | bash` pipeline.
+  # Run it even when a profile already exists: an install from before the
+  # direct route has a profile pointing at the retired :4001 proxy, and setup.sh
+  # is what migrates it. It no longer builds or starts a proxy, so this is a
+  # quick, idempotent step.
   #
-  # A setup.sh that fails must not fail the install: a proxy that will not
-  # start, an upstream that is down, or a machine with no network all leave a
-  # working checkout, and the launcher retries on launch. Hence `|| warn`
-  # rather than a bare call under `set -e`.
-  step "Configuring the Logfare route"
+  # A setup.sh that fails must not fail the install: an upstream that is down or
+  # a machine with no network still leaves a working checkout, and the launcher
+  # retries on launch. Hence `|| warn` rather than a bare call under `set -e`.
+  step "Configuring the Logfare route (direct)"
   "$INSTALL_DIR/setup.sh" </dev/null \
     || warn "setup did not finish — run $INSTALL_DIR/setup.sh to retry"
 fi

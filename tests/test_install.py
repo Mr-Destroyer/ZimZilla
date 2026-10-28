@@ -274,6 +274,96 @@ def test_launcher_prefers_bundled_venv(ctx: dict) -> None:
           str(venv_py) in err, err.strip()[-300:])
 
 
+def test_launcher_starts_without_a_key_or_a_proxy(td: Path) -> None:
+    """An empty key must not stop the harness, and no proxy may be started.
+
+    This is the fresh-install state: the profile exists but carries no token,
+    because no key ships. The launcher used to fail closed on the missing
+    credential, which left the operator unable to run the very command that sets
+    one. It must exec the harness instead — and it must not start the retired
+    :4001 proxy on the way.
+    """
+    root = td / "launcher-nokey"
+    (root / "packaging").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "zimzilla", root / "packaging" / "zimzilla")
+    os.chmod(root / "packaging" / "zimzilla", 0o755)
+    (root / "requirements.txt").write_text("# no deps in this test\n")
+
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    args_log = td / "launcher-args.log"
+    env_log = td / "launcher-env.log"
+    proxy_marker = td / "proxy-started"
+    py = venv_bin / "python"
+    py.write_text(
+        "#!/bin/sh\n"
+        # The launcher's dependency probe is the only -c it runs.
+        'if [ "$1" = "-c" ]; then exit 0; fi\n'
+        f'printf "%s\\n" "$@" >> "{args_log}"\n'
+        f'env | sort > "{env_log}"\n'
+        "exit 0\n"
+    )
+    os.chmod(py, 0o755)
+    proc = subprocess.run(["sha256sum", str(root / "requirements.txt")],
+                          capture_output=True, text=True)
+    if proc.returncode == 0:
+        (root / ".venv" / ".requirements.sha").write_text(proc.stdout.split()[0])
+
+    home = td / "launcher-nokey-home"
+    home.mkdir()
+    zhome = home / ".zimzilla"
+    (zhome / "logfare").mkdir(parents=True)
+    (zhome / "logfare" / "source").write_text(
+        'export ANTHROPIC_BASE_URL="http://localhost:4001"\n'
+        'export ANTHROPIC_AUTH_TOKEN=""\n'
+        'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n'
+        'export ANTHROPIC_API_KEY=""\n'
+    )
+    os.chmod(zhome / "logfare" / "source", 0o600)
+    service = zhome / "logfare" / "start-litellm.sh"
+    service.write_text(f'#!/bin/sh\necho started > "{proxy_marker}"\n')
+    os.chmod(service, 0o755)
+
+    env = base_env(home)
+    env["ZIMZILLA_HOME"] = str(zhome)
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+                "ZIMZILLA_NO_PROXY", "ZIMZILLA_REQUIRE_PROXY", "ZIMZILLA_WITH_PROXY"):
+        env.pop(var, None)
+
+    rc, out, err = run([str(root / "packaging" / "zimzilla"), "--version"],
+                       env=env, cwd="/")
+    check("launcher/nokey: it reaches the harness (exit 0)", rc == 0,
+          err.strip()[-400:])
+    check("launcher/nokey: the harness was exec'd",
+          args_log.is_file() and "-m\nzimzilla\n--version" in args_log.read_text(),
+          args_log.read_text() if args_log.is_file() else "no args log")
+    check("launcher/nokey: no proxy was started", not proxy_marker.exists(),
+          str(proxy_marker))
+    env_text = env_log.read_text() if env_log.is_file() else ""
+    check("launcher/nokey: the old :4001 profile was sourced",
+          "ANTHROPIC_BASE_URL=http://localhost:4001" in env_text, env_text[-300:])
+
+    # No profile at all: still start, on the direct default.
+    home2 = td / "launcher-noprofile-home"
+    home2.mkdir()
+    zhome2 = home2 / ".zimzilla"
+    zhome2.mkdir()
+    env2 = base_env(home2)
+    env2["ZIMZILLA_HOME"] = str(zhome2)
+    for var in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+                "ZIMZILLA_NO_PROXY", "ZIMZILLA_REQUIRE_PROXY", "ZIMZILLA_WITH_PROXY"):
+        env2.pop(var, None)
+    env_log.unlink(missing_ok=True)
+    rc, out, err = run([str(root / "packaging" / "zimzilla"), "--version"],
+                       env=env2, cwd="/")
+    check("launcher/noprofile: it still reaches the harness", rc == 0,
+          err.strip()[-400:])
+    env_text = env_log.read_text() if env_log.is_file() else ""
+    check("launcher/noprofile: it starts on the direct Logfare route",
+          "ANTHROPIC_BASE_URL=https://logfare.ai/v1" in env_text,
+          env_text[-300:])
+
+
 def test_launcher_falls_back_to_path_python(td: Path) -> None:
     # A checkout with no bundled venv: the bring-your-own-venv layout. With no
     # VIRTUAL_ENV either, it must fall back to python3 on PATH.
@@ -334,13 +424,13 @@ def test_setup_installs_without_a_key_and_without_prompting(td: Path) -> None:
     env["ZIMZILLA_ROOT"] = str(checkout)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
     env.pop("ANTHROPIC_API_KEY", None)
-    # Hermetic: no network, and nothing slow. `litellm` on PATH stops setup.sh
-    # from building a proxy venv (a pip install), and a `curl` that always
-    # fails stops the pagekite download and makes the health probes read as
-    # "nothing answering" — both are warnings, so the script still exits 0.
+    # Hermetic: no network, and nothing slow. A `curl` that always fails stops
+    # the pagekite download and makes the route probe read as "nothing
+    # answering" — both are warnings, so the script still exits 0. No `litellm`
+    # stub is needed: the direct route never looks for one, and if it did the
+    # command would fail loudly here.
     stubs = td / "stubs"
     stubs.mkdir()
-    (stubs / "litellm").write_text("#!/bin/sh\nexit 0\n")
     (stubs / "curl").write_text("#!/bin/sh\nexit 1\n")
     for stub in stubs.iterdir():
         os.chmod(stub, 0o755)
@@ -364,13 +454,21 @@ def test_setup_installs_without_a_key_and_without_prompting(td: Path) -> None:
           str(profile))
     check("setup: the profile carries no key", 'ANTHROPIC_AUTH_TOKEN=""' in text,
           text[:200])
+    check("setup: the profile points at the direct upstream",
+          'ANTHROPIC_BASE_URL="https://logfare.ai/v1"' in text, text[:200])
     check("setup: no placeholder is copied into the profile",
           "REPLACE_ME" not in text, text[:200])
     check("setup: it says where a key goes",
           "/logfare-api-setup" in combined and "logfare.ai" in combined,
           combined.strip()[-400:])
-    check("setup: no key means the proxy is not started",
-          "Skipping the proxy start" in combined, combined.strip()[-400:])
+    check("setup: no proxy is installed or started",
+          "Starting the proxy" not in combined
+          and "Checking the LiteLLM proxy" not in combined,
+          combined.strip()[-400:])
+    check("setup: no Logfare proxy files are laid down",
+          not (zhome / "logfare" / "start-litellm.sh").exists()
+          and not (zhome / "logfare" / "litellm-config.yaml").exists(),
+          str(sorted(p.name for p in (zhome / "logfare").iterdir())))
     check("setup: the profile is mode 600",
           profile.is_file() and (profile.stat().st_mode & 0o777) == 0o600,
           oct(profile.stat().st_mode & 0o777) if profile.is_file() else "missing")
@@ -391,6 +489,97 @@ def test_setup_installs_without_a_key_and_without_prompting(td: Path) -> None:
     check("setup: a personal key in the environment is written to the profile",
           written.is_file() and "lfu_personal_key_should_win" in written.read_text(),
           written.read_text()[:120] if written.is_file() else "missing")
+
+
+def test_setup_migrates_logfare_to_direct(td: Path) -> None:
+    """An older Logfare profile is moved off :4001, key intact, no proxy.
+
+    The route used to be a LiteLLM proxy on :4001. It is not any more — the
+    upstream serves Chat Completions itself — so a profile left pointing at that
+    port would aim the session at an address nothing answers. setup.sh rewrites
+    the address, keeps the token byte for byte, and removes the retired proxy
+    files rather than leaving a manager nothing will start.
+    """
+    home = td / "home-logfare"
+    home.mkdir()
+    zhome = home / ".zimzilla"
+    checkout = td / "checkout-logfare"
+    (checkout / "packaging" / "logfare").mkdir(parents=True)
+    shutil.copy(ROOT / "packaging" / "logfare" / "source",
+                checkout / "packaging" / "logfare" / "source")
+    shutil.copy(ROOT / "setup.sh", checkout / "setup.sh")
+    os.chmod(checkout / "setup.sh", 0o755)
+
+    venv_bin = checkout / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    shim = venv_bin / "python"
+    shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    os.chmod(shim, 0o755)
+
+    # The install as it was: a :4001 profile, plus the proxy it started.
+    lf = zhome / "logfare"
+    lf.mkdir(parents=True)
+    old = (
+        'export ANTHROPIC_BASE_URL="http://localhost:4001"\n'
+        'export ANTHROPIC_AUTH_TOKEN="lfu_test_key_1234567890"\n'
+        'export ANTHROPIC_MODEL="deepseek-v4.1-flash"\n'
+        'export ANTHROPIC_API_KEY=""\n'
+        'export MODEL_QWEN="qwen-3.8-27b"\n'
+    )
+    (lf / "source").write_text(old)
+    os.chmod(lf / "source", 0o600)
+    (lf / "start-litellm.sh").write_text("#!/bin/sh\n")
+    (lf / "litellm-config.yaml").write_text("model_list: []\n")
+
+    env = base_env(home)
+    env["ZIMZILLA_HOME"] = str(zhome)
+    env["ZIMZILLA_ROOT"] = str(checkout)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env.pop("ANTHROPIC_API_KEY", None)
+    stubs = td / "stubs-logfare"
+    stubs.mkdir()
+    (stubs / "curl").write_text("#!/bin/sh\nexit 1\n")
+    for stub in stubs.iterdir():
+        os.chmod(stub, 0o755)
+    env["PATH"] = f"{stubs}:/usr/bin:/bin"
+
+    proc = subprocess.run(
+        ["bash", str(checkout / "setup.sh")],
+        cwd=str(checkout), env=env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+    )
+    check("setup/logfare: finishes", proc.returncode == 0,
+          (proc.stdout + proc.stderr).strip()[-400:])
+
+    text = (lf / "source").read_text() if (lf / "source").is_file() else ""
+    check("setup/logfare: the profile now names the upstream",
+          'ANTHROPIC_BASE_URL="https://logfare.ai/v1"' in text, text[:200])
+    check("setup/logfare: the key is untouched",
+          'ANTHROPIC_AUTH_TOKEN="lfu_test_key_1234567890"' in text, text[:200])
+    check("setup/logfare: the model aliases are kept",
+          'MODEL_QWEN="qwen-3.8-27b"' in text, text[:200])
+    check("setup/logfare: the profile stays mode 600",
+          (lf / "source").stat().st_mode & 0o777 == 0o600,
+          oct((lf / "source").stat().st_mode & 0o777))
+    check("setup/logfare: the previous profile is kept as a backup",
+          (lf / "source.bak").is_file(), str(sorted(p.name for p in lf.iterdir())))
+    check("setup/logfare: the retired proxy files are gone",
+          not (lf / "start-litellm.sh").exists()
+          and not (lf / "litellm-config.yaml").exists(),
+          str(sorted(p.name for p in lf.iterdir())))
+    check("setup/logfare: no proxy is started",
+          "Starting the proxy" not in proc.stdout + proc.stderr,
+          (proc.stdout + proc.stderr).strip()[-400:])
+
+    # A second run is a no-op: the profile is already direct.
+    proc2 = subprocess.run(
+        ["bash", str(checkout / "setup.sh")],
+        cwd=str(checkout), env=env,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+    )
+    check("setup/logfare: a second run leaves the direct profile alone",
+          "already on the direct route" in proc2.stdout + proc2.stderr,
+          (proc2.stdout + proc2.stderr).strip()[-400:])
 
 
 def test_setup_migrates_tokenjuice_to_direct(td: Path) -> None:
@@ -487,8 +676,10 @@ def main() -> int:
         test_install_updates_a_rewritten_upstream(td)
         test_install_leaves_local_edits_alone(td)
         test_launcher_prefers_bundled_venv(ctx)
+        test_launcher_starts_without_a_key_or_a_proxy(td)
         test_launcher_falls_back_to_path_python(td)
         test_setup_installs_without_a_key_and_without_prompting(td)
+        test_setup_migrates_logfare_to_direct(td)
         test_setup_migrates_tokenjuice_to_direct(td)
 
     failed = [n for n, ok, _ in RESULTS if not ok]

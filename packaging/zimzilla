@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # zimzilla — launcher.
 #
-# Starts the LiteLLM -> Logfare proxy if it is not already up, then execs the
-# harness. Every argument is forwarded verbatim to `python -m zimzilla`, so
-# `zimzilla --help`, `zimzilla -C ~/proj` etc. all work unchanged.
+# Starts the harness. The default route is Logfare over Chat Completions at
+# https://logfare.ai/v1 — direct, with no local LiteLLM proxy. A proxy is only
+# managed when explicitly asked for (ZIMZILLA_NO_PROXY=0), for a route that
+# still uses one. Every argument is forwarded verbatim to `python -m zimzilla`,
+# so `zimzilla --help`, `zimzilla -C ~/proj` etc. all work unchanged.
 #
 # Configure through environment variables only:
 #
@@ -11,8 +13,10 @@
 #   LITELLM_ENV_FILE      profile to source         (default $ZIMZILLA_HOME/logfare/source)
 #   LITELLM_PORT          proxy port                (default 4001)
 #   LITELLM_SERVICE       proxy manager             (default $ZIMZILLA_HOME/logfare/start-litellm.sh)
-#   ZIMZILLA_NO_PROXY=1        never touch the proxy
-#   ZIMZILLA_REQUIRE_PROXY=1   hard-fail if the proxy is not healthy
+#   ZIMZILLA_NO_PROXY=1        never touch a proxy (the default)
+#   ZIMZILLA_NO_PROXY=0        manage a local proxy for a route that needs one
+#   ZIMZILLA_WITH_PROXY=1      same as ZIMZILLA_NO_PROXY=0 (explicit opt-in)
+#   ZIMZILLA_REQUIRE_PROXY=1   hard-fail if a proxy is not healthy
 #
 # No key is ever printed or logged.
 
@@ -57,6 +61,18 @@ else
 fi
 
 ZIMZILLA_HOME="${ZIMZILLA_HOME:-$HOME/.zimzilla}"
+
+# Direct is the default. The harness speaks Chat Completions itself, so the
+# bundled Logfare proxy is not part of the route and starting it would only add
+# a hop (and a "starting LiteLLM proxy" message) to a session that never uses
+# it. A proxy is managed only when explicitly asked for: ZIMZILLA_NO_PROXY=0,
+# or ZIMZILLA_REQUIRE_PROXY=1 for a route that genuinely needs one.
+if [[ "${ZIMZILLA_WITH_PROXY:-0}" == "1" \
+      || "${ZIMZILLA_REQUIRE_PROXY:-0}" == "1" ]]; then
+  ZIMZILLA_NO_PROXY="${ZIMZILLA_NO_PROXY:-0}"
+else
+  ZIMZILLA_NO_PROXY="${ZIMZILLA_NO_PROXY:-1}"
+fi
 
 # Which upstream to use. An explicit environment variable always wins; failing
 # that, honour the source last chosen with /zim-logfare or /zim-tokenjuice, so
@@ -201,7 +217,6 @@ LITELLM_PORT="${LITELLM_PORT:-4001}"
 LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"
 LITELLM_SERVICE="${LITELLM_SERVICE:-$ZIMZILLA_HOME/logfare/start-litellm.sh}"
 
-ZIMZILLA_NO_PROXY="${ZIMZILLA_NO_PROXY:-0}"
 ZIMZILLA_REQUIRE_PROXY="${ZIMZILLA_REQUIRE_PROXY:-0}"
 
 # Diagnostics go to stderr so piped/redirected runs stay parseable.
@@ -270,13 +285,13 @@ if ! ( cd / && "$PY" -c 'import anthropic, textual, rich, yaml' ) >/dev/null 2>&
            pip install -r requirements.txt"
 fi
 
-# Fail CLOSED. Without the profile, the harness would silently use whatever
-# ANTHROPIC_* the shell already exports — a session against the wrong provider
-# with no indication anything was off.
+# Fail CLOSED only when a proxy was explicitly requested. In the default direct
+# mode there is no profile to insist on: the harness starts on Logfare's direct
+# endpoint and the operator can set a key from inside the TUI.
 if [[ "$ZIMZILLA_NO_PROXY" != "1" && ! -r "$LITELLM_ENV_FILE" ]]; then
   die "profile not found: $LITELLM_ENV_FILE
-       Refusing to run: without it the harness would use whatever ANTHROPIC_*
-       variables your shell already exports.
+       Refusing to run a proxied session without it: the harness would use
+       whatever ANTHROPIC_* variables your shell already exports.
        Fix:  run ./setup.sh, or ZIMZILLA_NO_PROXY=1 zimzilla ... for a direct endpoint."
 fi
 
@@ -291,6 +306,15 @@ if [[ "$_skip_profile" != "1" && -r "$LITELLM_ENV_FILE" ]]; then
   if [[ -n "$_prev_base_url" && "$_prev_base_url" != "${ANTHROPIC_BASE_URL:-}" ]]; then
     warn "overriding inherited ANTHROPIC_BASE_URL=$_prev_base_url -> ${ANTHROPIC_BASE_URL:-}"
   fi
+fi
+
+# No profile, no inherited endpoint: start on the built-in direct route. This
+# is the fresh-install-with-ZIMZILLA_SKIP_SETUP case, and the TUI is where the
+# key gets set, so refusing to launch would be the one thing that makes it
+# unfixable from inside the harness.
+if [[ -z "${ANTHROPIC_BASE_URL:-}" && -z "${OPENAI_BASE_URL:-}" ]]; then
+  export ANTHROPIC_BASE_URL="https://logfare.ai/v1"
+  export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-deepseek-v4.1-flash}"
 fi
 
 # --- only manage a proxy when the profile points at the local one ------------

@@ -38,21 +38,24 @@ from pathlib import Path
 #: ``https://logfare.ai/`` and any subdomain path all count as the same source.
 HOST = "logfare.ai"
 DEFAULT_BASE_URL = "https://logfare.ai"
+#: The Chat Completions base the harness talks to directly. Logfare serves it
+#: itself, so no local translation proxy is involved.
+DIRECT_BASE_URL = f"{DEFAULT_BASE_URL}/v1"
 
-#: The local proxy the launcher starts for this source. A key set here is for
-#: that proxy (and for the upstream it forwards to), so the port belongs with
-#: the credential rather than only in ``sources.py``.
+#: The port the retired local proxy listened on. Kept because a profile written
+#: by an older install still names it, and ``active_endpoint`` has to recognise
+#: that session as Logfare so it can be moved onto the direct route rather than
+#: being reported as an unknown endpoint.
 PROXY_PORT = 4001
 
 #: Where the operator's own key lives. The launcher reads this first, then
-#: ``$ANTHROPIC_AUTH_TOKEN``, and only then the profile shipped in
-#: ``packaging/logfare/`` — which carries a *shared* key with a shared budget.
+#: ``$ANTHROPIC_AUTH_TOKEN``, and only then the template shipped in
+#: ``packaging/logfare/``.
 ZIMZILLA_HOME = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
 PROFILE = ZIMZILLA_HOME / "logfare" / "source"
 
 #: The committed profile, seeded into the operator's own the first time a key is
-#: set. Not a secret — it is in this repository's public history — but shared:
-#: 20/min, 500/hour, 2500/day, three concurrent, for every install at once.
+#: set. It is a template: the token is a placeholder, and no credential ships.
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_PROFILE = DEFAULT_ROOT / "packaging" / "logfare" / "source"
 
@@ -258,13 +261,13 @@ def is_logfare(base_url: str | None) -> bool:
 
 # ---- the credential ---------------------------------------------------------
 #
-# Logfare is the one source whose key ships in this repository, because a fresh
-# clone should be able to start a session without signing up for anything. That
-# key is shared by every install, so its budget is shared too — 20/min,
-# 500/hour, 2500/day, three concurrent, then a 429 with a Retry-After until the
-# UTC day rolls over. Your own key is the way past that, and this is where it
-# goes. Nothing here echoes a key: the confirmation names the last four
-# characters, which tells two keys apart and is not one.
+# No Logfare key ships in this repository. A key committed to a public
+# repository is a shared budget anyone can spend, and it cannot be taken back
+# out of everyone's clone, so the shipped profile is a template with a
+# placeholder. The operator's own key goes in ``~/.zimzilla/logfare/source``,
+# written by ``/logfare-api-setup`` or by setup.sh. Nothing here echoes a key:
+# the confirmation names the last four characters, which tells two keys apart
+# and is not one.
 
 
 def _export_line(line: str) -> tuple[str, str]:
@@ -329,7 +332,12 @@ def looks_like_key(value: str) -> bool:
 
 
 def active_endpoint(base_url: str | None) -> bool:
-    """Whether a session endpoint is Logfare — the local proxy or the host."""
+    """Whether a session endpoint is Logfare — the host or the retired proxy.
+
+    ``:4001`` is kept because a profile written by an older install still names
+    it; recognising it is what lets the session be moved onto the direct route
+    instead of being reported as pointing at an unknown endpoint.
+    """
     base = (base_url or "").rstrip("/")
     return is_logfare(base) or base.endswith(f":{PROXY_PORT}")
 
@@ -366,6 +374,12 @@ def save_key(token: str, model: str = "") -> Path:
         if name == "ANTHROPIC_AUTH_TOKEN":
             out.append(f'export ANTHROPIC_AUTH_TOKEN="{token}"')
             seen.add(name)
+        elif name == "ANTHROPIC_BASE_URL":
+            # Always the direct route. A profile written before the proxy was
+            # retired still says localhost:4001; leaving that in place would
+            # write a working key into a file that points at nothing.
+            out.append(f'export ANTHROPIC_BASE_URL="{DIRECT_BASE_URL}"')
+            seen.add(name)
         elif name == "ANTHROPIC_MODEL" and model:
             out.append(f'export ANTHROPIC_MODEL="{model}"')
             seen.add(name)
@@ -374,7 +388,7 @@ def save_key(token: str, model: str = "") -> Path:
             if name:
                 seen.add(name)
     if "ANTHROPIC_BASE_URL" not in seen:
-        out.insert(0, f'export ANTHROPIC_BASE_URL="http://localhost:{PROXY_PORT}"')
+        out.insert(0, f'export ANTHROPIC_BASE_URL="{DIRECT_BASE_URL}"')
     if "ANTHROPIC_AUTH_TOKEN" not in seen:
         out.append(f'export ANTHROPIC_AUTH_TOKEN="{token}"')
     if "ANTHROPIC_API_KEY" not in seen:
