@@ -156,7 +156,12 @@ template whose token is a placeholder. Get a key at https://logfare.ai
 (`lfu_…`), then either run `/logfare-api-setup <key>` in the TUI or put it in
 `~/.zimzilla/logfare/source` yourself (mode 600). An existing profile keeps its
 key: `setup.sh` rewrites only the address, moving a profile written for the old
-`:4001` proxy onto `https://logfare.ai/v1`.
+`:4001` proxy onto `https://logfare.ai/v1`. The launcher does the same on its
+own: an install updated by the launch-time self-update — which does not run
+`setup.sh` — still carries the old profile, so the first launch after the
+update moves it to the direct route and keeps the previous file as `source.bak`,
+so an existing install reaches Logfare instead of the dead proxy without having
+to re-run the installer.
 
 Until a key is set, the harness starts and `/logfare-models` still works — that
 catalog is public. The first *turn* is what needs the key, and it says so
@@ -1446,7 +1451,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/infronai-models` | the live free catalog — what is free and usable |
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
-| `/logfare-api-setup [key]` | use your own Logfare key; the shipped one is shared by every install |
+| `/logfare-api-setup [key]` | use your own Logfare key; none ships in the repository |
 | `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `iteracompute`, `infronai`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/reverse-engineer <file>` | map an artifact (`.apk`, `.zip`, `.exe`, `.sh`, binary), then ask what you want changed |

@@ -298,7 +298,9 @@ fi
 # --- load the profile --------------------------------------------------------
 
 _prev_base_url="${ANTHROPIC_BASE_URL:-}"
+_sourced_profile=""
 if [[ "$_skip_profile" != "1" && -r "$LITELLM_ENV_FILE" ]]; then
+  _sourced_profile="$LITELLM_ENV_FILE"
   set -a
   # shellcheck disable=SC1090
   . "$LITELLM_ENV_FILE"
@@ -315,6 +317,36 @@ fi
 if [[ -z "${ANTHROPIC_BASE_URL:-}" && -z "${OPENAI_BASE_URL:-}" ]]; then
   export ANTHROPIC_BASE_URL="https://logfare.ai/v1"
   export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-deepseek-v4.1-flash}"
+fi
+
+# --- an older profile still names the retired Logfare proxy ------------------
+#
+# Logfare went direct: setup.sh no longer installs the :4001 proxy and the
+# launcher no longer starts it unless asked. A profile written by an older
+# install still says http://localhost:4001, and nothing answers there any more,
+# so a session that was updated by the launch-time self-update (which does not
+# run setup.sh) would come up on a dead endpoint and every turn would fail.
+#
+# Move the session onto the direct route and rewrite the profile, so the next
+# launch does not repeat this. A profile that was *not* the Logfare one — or an
+# operator who explicitly asked for the proxy with ZIMZILLA_NO_PROXY=0 — is
+# left exactly as it is.
+if [[ "$ZIMZILLA_NO_PROXY" == "1" && -n "$_sourced_profile" ]] \
+   && grep -qE "^export ANTHROPIC_BASE_URL=.*(localhost|127\.0\.0\.1):${LITELLM_PORT}" \
+        "$_sourced_profile" 2>/dev/null; then
+  export ANTHROPIC_BASE_URL="https://logfare.ai/v1"
+  info "the profile names the retired Logfare proxy — using $ANTHROPIC_BASE_URL"
+  _migrate_tmp="$(mktemp "${TMPDIR:-/tmp}/zimzilla-profile.XXXXXX")"
+  if sed -E \
+       "s|^export ANTHROPIC_BASE_URL=.*|export ANTHROPIC_BASE_URL=\"$ANTHROPIC_BASE_URL\"|" \
+       "$_sourced_profile" > "$_migrate_tmp" 2>/dev/null; then
+    if ! cmp -s "$_sourced_profile" "$_migrate_tmp"; then
+      cp -p "$_sourced_profile" "$_sourced_profile.bak" 2>/dev/null || true
+      cat "$_migrate_tmp" > "$_sourced_profile" 2>/dev/null || true
+      chmod 600 "$_sourced_profile" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$_migrate_tmp"
 fi
 
 # --- only manage a proxy when the profile points at the local one ------------

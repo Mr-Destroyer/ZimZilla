@@ -282,6 +282,12 @@ def test_launcher_starts_without_a_key_or_a_proxy(td: Path) -> None:
     credential, which left the operator unable to run the very command that sets
     one. It must exec the harness instead — and it must not start the retired
     :4001 proxy on the way.
+
+    The profile is also the state an install updated by the launch-time
+    self-update carries: setup.sh never ran, so it still names the proxy that
+    is no longer installed. The launch has to move it to the direct route (and
+    write that back) or the session comes up on an address nothing answers —
+    which is what made an updated install look like it had lost commands.
     """
     root = td / "launcher-nokey"
     (root / "packaging").mkdir(parents=True)
@@ -340,8 +346,38 @@ def test_launcher_starts_without_a_key_or_a_proxy(td: Path) -> None:
     check("launcher/nokey: no proxy was started", not proxy_marker.exists(),
           str(proxy_marker))
     env_text = env_log.read_text() if env_log.is_file() else ""
-    check("launcher/nokey: the old :4001 profile was sourced",
-          "ANTHROPIC_BASE_URL=http://localhost:4001" in env_text, env_text[-300:])
+    check("launcher/nokey: the old :4001 profile is moved to the direct route",
+          "ANTHROPIC_BASE_URL=https://logfare.ai/v1" in env_text
+          and "ANTHROPIC_BASE_URL=http://localhost:4001" not in env_text,
+          env_text[-300:])
+    profile = zhome / "logfare" / "source"
+    check("launcher/nokey: the migration is written back to the profile",
+          'ANTHROPIC_BASE_URL="https://logfare.ai/v1"' in profile.read_text(),
+          profile.read_text())
+    check("launcher/nokey: the previous profile is kept as a backup",
+          (zhome / "logfare" / "source.bak").is_file()
+          and 'http://localhost:4001' in (zhome / "logfare" / "source.bak").read_text())
+
+    # An explicit proxy request is honoured: the profile is left alone and the
+    # service manager is what the launch asks for.
+    (zhome / "logfare" / "source").write_text(
+        'export ANTHROPIC_BASE_URL="http://localhost:4001"\n'
+        'export ANTHROPIC_AUTH_TOKEN=""\n'
+    )
+    proxy_marker.unlink(missing_ok=True)
+    env_proxy = dict(env)
+    env_proxy["ZIMZILLA_NO_PROXY"] = "0"
+    env_log.unlink(missing_ok=True)
+    rc, out, err = run([str(root / "packaging" / "zimzilla"), "--version"],
+                       env=env_proxy, cwd="/")
+    check("launcher/proxy: an explicit proxy request still starts the proxy",
+          rc == 0 and proxy_marker.is_file(), err.strip()[-400:])
+    env_text = env_log.read_text() if env_log.is_file() else ""
+    check("launcher/proxy: the :4001 profile is left as it was",
+          "ANTHROPIC_BASE_URL=http://localhost:4001" in env_text,
+          env_text[-300:])
+    check("launcher/proxy: the profile on disk is untouched",
+          'http://localhost:4001' in (zhome / "logfare" / "source").read_text())
 
     # No profile at all: still start, on the direct default.
     home2 = td / "launcher-noprofile-home"

@@ -38,7 +38,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/think", "toggle showing the model's own reasoning"),
     ("/effort", "raise or lower how hard the model thinks: low | medium | high | off"),
     ("/theme", "switch palette: green | amber | cyan | system"),
-    ("/zim-logfare", "switch upstream to Logfare (bundled proxy, all models)"),
+    ("/zim-logfare", "switch upstream to Logfare (direct, all models)"),
     ("/zim-tokenjuice", "Token Juice — unlimited quota paused, back in a few days"),
     ("/tokenjuice-api-setup", "your own tj_ key — or fall back to the shared one"),
     ("/zim-source", "show upstream sources and status"),
