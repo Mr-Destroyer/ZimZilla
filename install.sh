@@ -108,6 +108,74 @@ hash_file() {
   fi
 }
 
+# Bring an existing checkout up to the upstream head, without throwing away
+# work that belongs to the operator.
+#
+# Returns 0 when the checkout now matches upstream, 3 when local work means it
+# was deliberately left alone, 2 when the upstream could not be reached.
+#
+# `git pull --ff-only` is the ordinary path. When it refuses, the cause is one
+# of three, and only the first can be repaired without touching the operator's
+# own work:
+#
+#   * the upstream history was rewritten — a filtered history, a re-created
+#     repository. The checkout then shares no commit with upstream, so every
+#     fast-forward aborts for ever. That is how an install ends up frozen at
+#     the commit it was cloned at, missing every command shipped since
+#     (`/effort`, `/obfuscate`, and whatever comes next), while the installer
+#     still prints "installed." and exits 0 — the operator re-runs it, reads
+#     success, and the command is simply not there. Nothing of the operator's
+#     is at stake in a *clean* checkout, so it is reset onto the upstream head
+#     and the abandoned head is kept in a ref in case anything in it mattered.
+#   * the operator has local commits on top of a history upstream still shares.
+#     Those are replayed onto the upstream head — and if that conflicts, the
+#     branch is put back exactly as it was and the install is reported as not
+#     updated.
+#   * local edits, or a network that is down. Never discarded, never merged
+#     behind the operator's back: the checkout is left alone and said so.
+update_checkout() {
+  local dir="$1" target
+  local -a gitc=(git -C "$dir")
+
+  if "${gitc[@]}" pull --ff-only --quiet </dev/null >/dev/null 2>&1; then
+    return 0
+  fi
+  "${gitc[@]}" fetch --quiet origin </dev/null >/dev/null 2>&1 || return 2
+
+  target="$("${gitc[@]}" rev-parse --verify --quiet 'refs/remotes/origin/HEAD^{commit}' 2>/dev/null || true)"
+  [[ -n "$target" ]] || target="$("${gitc[@]}" rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
+  [[ -n "$target" ]] || target="$("${gitc[@]}" rev-parse --verify --quiet 'refs/remotes/origin/master^{commit}' 2>/dev/null || true)"
+  [[ -n "$target" ]] || return 2
+
+  # Already there: a failed pull with nothing to pull is not a failure.
+  if [[ "$("${gitc[@]}" rev-parse --quiet --verify HEAD 2>/dev/null || true)" == "$target" ]]; then
+    return 0
+  fi
+
+  # Tracked-file changes belong to the operator. Untracked files cannot be lost
+  # by a reset, so they do not block one.
+  if [[ -n "$("${gitc[@]}" status --porcelain --untracked-files=no 2>/dev/null || true)" ]]; then
+    return 3
+  fi
+
+  # Related history: the checkout carries commits of its own on top of what
+  # upstream still has. Replay them; on conflict, restore the branch untouched.
+  if "${gitc[@]}" merge-base HEAD "$target" >/dev/null 2>&1; then
+    if "${gitc[@]}" rebase --quiet "$target" </dev/null >/dev/null 2>&1; then
+      return 0
+    fi
+    "${gitc[@]}" rebase --abort </dev/null >/dev/null 2>&1 || true
+    return 3
+  fi
+
+  # Unrelated history: a rewritten upstream. Keep the head being abandoned, so
+  # the reset is recoverable, then move onto upstream.
+  "${gitc[@]}" update-ref \
+    "refs/zimzilla/pre-update-$(date -u +%Y%m%dT%H%M%SZ)" HEAD 2>/dev/null || true
+  "${gitc[@]}" reset --hard --quiet "$target" </dev/null >/dev/null 2>&1 || return 2
+  return 0
+}
+
 bold "╭──────────────────────────────────────────────╮"
 bold "│  ZIMZILLA · install                        │"
 bold "╰──────────────────────────────────────────────╯"
@@ -136,13 +204,39 @@ ok "git and $("$PY" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])')"
 # --- 1. get the source -------------------------------------------------------
 
 step "Fetching ZimZilla"
+STALE_NOTE=""
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  # An existing install. Fast-forward only — never merge, never touch local
-  # edits; a failed pull is a warning, not a stop, because the launcher's own
-  # update check will report the same thing at run time.
-  spin "updated $INSTALL_DIR" \
-    git -C "$INSTALL_DIR" pull --ff-only --quiet </dev/null \
-    || warn "could not update $INSTALL_DIR (local changes or offline) — using what is there"
+  # An existing install. `update_checkout` fast-forwards when it can and
+  # recovers when the upstream history has been rewritten; it never discards
+  # local work, and it never lets a checkout that did *not* update pass as one
+  # that did — that silence is what leaves an install without `/effort` while
+  # the operator is told the update worked.
+  _was="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  _rc=0
+  spin "updated $INSTALL_DIR" update_checkout "$INSTALL_DIR" || _rc=$?
+  _now="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  case "$_rc" in
+    0)
+      [[ "$_now" == "$_was" ]] || note "$_was → $_now"
+      # A reset onto rewritten history left the old head in a ref. Say where,
+      # so "the update moved me off a commit I had" is answerable.
+      _kept="$(git -C "$INSTALL_DIR" for-each-ref --sort=-creatordate \
+                 --format='%(refname)' refs/zimzilla/ 2>/dev/null | head -n 1 || true)"
+      if [[ -n "$_kept" && "$(git -C "$INSTALL_DIR" rev-parse "$_kept" 2>/dev/null || true)" \
+            == "$(git -C "$INSTALL_DIR" rev-parse "$_was" 2>/dev/null || true)" ]]; then
+        note "the upstream history was rewritten — old head kept at $_kept"
+      fi
+      ;;
+    3)
+      warn "local work in $INSTALL_DIR — left exactly as it was, still at $_now"
+      note "stash or commit it, then re-run this installer, to pick up new commands"
+      STALE_NOTE="this install was NOT updated — it still runs $_now"
+      ;;
+    *)
+      warn "could not reach the upstream — using what is there ($_now)"
+      STALE_NOTE="this install may be out of date — it runs $_now and the upstream was unreachable"
+      ;;
+  esac
 elif [[ -e "$INSTALL_DIR" ]]; then
   die "$INSTALL_DIR exists but is not a git checkout — move it aside and re-run."
 else
@@ -246,10 +340,24 @@ fi
 
 # --- done --------------------------------------------------------------------
 
+# An install that did not update is not a silent one. The banner is what the
+# operator actually reads at the end of a `curl … | bash`, so the state of the
+# code is printed here rather than left to be discovered as a missing command.
+if [[ -n "${STALE_NOTE:-}" ]]; then
+  printf '\n'
+  warn "$STALE_NOTE"
+  note "fix that, then re-run: $INSTALL_DIR/install.sh"
+fi
+
+_code_sha="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+_code_branch="$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+
 printf '\n'
 bold "╭──────────────────────────────────────────────╮"
 bold "│  installed.                                  │"
 bold "╰──────────────────────────────────────────────╯"
+printf '\n'
+printf '    code:  \033[36m%s\033[0m on %s\n' "$_code_sha" "$_code_branch"
 printf '\n'
 printf '    \033[36mzimzilla\033[0m                 # launch, from anywhere\n'
 printf '    \033[36mzimzilla -C ~/proj\033[0m       # run against another directory\n'

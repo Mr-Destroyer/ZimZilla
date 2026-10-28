@@ -245,6 +245,81 @@ def test_diverged(base: Path) -> None:
     check("diverged: the local file survives", (clone / "mine.txt").exists())
 
 
+def test_rewritten_upstream(base: Path) -> None:
+    """An upstream whose history was rewritten still gets the checkout moved.
+
+    This is the install that never updates again: the clone shares no commit
+    with the new history, so ``--ff-only`` refuses every time, for ever. Left
+    alone, the harness boots on the commit it was cloned at and every command
+    shipped since is missing from it — which reads as "the new command does not
+    exist" rather than "this install is stale". A clean tree has nothing to
+    lose, so the checkout is re-pointed at the upstream head and the abandoned
+    head is kept in a ref.
+    """
+    origin, clone = make_repos(base)
+    seed = base / "seed"
+    old_head = head_of(clone)
+
+    # Rewrite the upstream: a brand-new root commit with no parent, carrying
+    # the same files plus one new module — the shape a filtered history has.
+    git(seed, "checkout", "--orphan", "rewritten")
+    (seed / "newfeat.py").write_text("# shipped after the rewrite\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "-m", "rewritten history")
+    git(seed, "push", "--force", "origin", "rewritten:main")
+    want = git(seed, "rev-parse", "HEAD")
+    check("rewritten: the fixture really shares no history",
+          subprocess.run(["git", "-C", str(seed), "merge-base", "HEAD", old_head],
+                         capture_output=True).returncode != 0)
+
+    r = update.inspect(clone)
+    check("rewritten: inspect notifies", r.action == "notify", r.action)
+    check("rewritten: flagged as a rewrite", r.rewritten is True, f"{r.rewritten}")
+    check("rewritten: inspect leaves HEAD alone", head_of(clone) == old_head)
+
+    r = update.apply(clone, r)
+    check("rewritten: apply moves onto the new history",
+          r.action == "updated", f"{r.action}: {r.message}")
+    check("rewritten: asks for a re-exec", r.should_reexec is True)
+    check("rewritten: HEAD is the new tip", head_of(clone) == want,
+          f"{head_of(clone)[:8]} != {want[:8]}")
+    check("rewritten: the new file is on disk", (clone / "newfeat.py").exists())
+    check("rewritten: no merge commit was created",
+          git(clone, "rev-list", "--count", "--merges", "HEAD") == "0")
+    check("rewritten: the abandoned head is kept in a ref",
+          r.backup_ref != "" and git(clone, "rev-parse", r.backup_ref) == old_head,
+          r.backup_ref)
+
+    # And it formats as a rewrite, naming the ref rather than dumping the
+    # upstream's whole history as a change list.
+    buf = io.StringIO()
+    update.format_result(r, stream=buf)
+    out = buf.getvalue()
+    check("rewritten: the message says so", "rewritten" in out, out.strip())
+    check("rewritten: names the ref the old head is in",
+          r.backup_ref in out, out.strip())
+
+
+def test_rewritten_upstream_dirty(base: Path) -> None:
+    """A rewritten upstream with local edits is still left alone."""
+    origin, clone = make_repos(base)
+    seed = base / "seed"
+    old_head = head_of(clone)
+    (clone / "README.md").write_text("edited by hand\n")
+
+    git(seed, "checkout", "--orphan", "rewritten")
+    (seed / "newfeat.py").write_text("# shipped after the rewrite\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "-m", "rewritten history")
+    git(seed, "push", "--force", "origin", "rewritten:main")
+
+    r = update.inspect(clone)
+    check("rewritten+dirty: blocked", r.action == "blocked", r.action)
+    check("rewritten+dirty: HEAD is untouched", head_of(clone) == old_head)
+    check("rewritten+dirty: the edit survives",
+          (clone / "README.md").read_text() == "edited by hand\n")
+
+
 def test_deps_changed(base: Path) -> None:
     origin, clone = make_repos(base)
     seed = base / "seed"
@@ -372,6 +447,8 @@ def main() -> int:
         test_behind_modified_tracked(base / "c")
         test_behind_untracked(base / "c2")
         test_diverged(base / "d")
+        test_rewritten_upstream(base / "d2")
+        test_rewritten_upstream_dirty(base / "d3")
         test_deps_changed(base / "e")
         test_not_a_repo(base / "f")
         test_no_upstream(base / "g")

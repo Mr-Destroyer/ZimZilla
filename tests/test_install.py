@@ -82,6 +82,34 @@ def make_source(td: Path) -> Path:
     return src
 
 
+def head_of(repo: Path) -> str:
+    """The commit *repo* is on, or "" if it is not a checkout."""
+    proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def rewrite_upstream(src: Path) -> str:
+    """Replace *src*'s history with a fresh root commit and return its sha.
+
+    The shape of a filtered or re-created upstream: the same files, no commit
+    in common with anything cloned from the old history. The new commit adds
+    ``zimzilla/effort.py``, standing in for a command shipped after the
+    rewrite — the thing an old install would never see.
+    """
+    ident = ["-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "-C", str(src), "checkout", "-q", "--orphan", "rewritten"],
+                   check=True)
+    (src / "zimzilla").mkdir(exist_ok=True)
+    (src / "zimzilla" / "effort.py").write_text("# shipped after the rewrite\n")
+    subprocess.run(["git", *ident, "-C", str(src), "add", "-A"], check=True)
+    subprocess.run(["git", *ident, "-C", str(src), "commit", "-qm", "rewritten"],
+                   check=True)
+    subprocess.run(["git", "-C", str(src), "branch", "-M", "rewritten", "main"],
+                   check=True)
+    return head_of(src)
+
+
 # ---------------------------------------------------------------------------
 # install.sh — the layout it lays down
 # ---------------------------------------------------------------------------
@@ -118,6 +146,83 @@ def test_install_layout(td: Path) -> dict:
           f"{install_dir}/packaging/zimzilla" in shim, shim.strip())
 
     return {"home": home, "install_dir": install_dir, "bin_dir": bin_dir, "src": src}
+
+
+def test_install_updates_a_rewritten_upstream(td: Path) -> None:
+    """Re-running the installer onto a rewritten upstream must move the checkout.
+
+    This is the failure the installer used to hide: a checkout cloned before the
+    upstream history was rewritten shares no commit with it, so `pull --ff-only`
+    aborts for ever. The old code warned, carried on, and printed "installed." —
+    so an install stayed at the commit it was cloned at, missing every command
+    shipped since, with no signal that the update had not happened.
+    """
+    base = td / "rewrite"
+    base.mkdir()
+    home = base / "home"
+    home.mkdir()
+    src = make_source(base)
+    env = base_env(home)
+    env["ZIMZILLA_REPO"] = f"file://{src}"
+    env["ZIMZILLA_SKIP_DEPS"] = "1"
+    env["ZIMZILLA_SKIP_SETUP"] = "1"
+    install_dir = home / ".local" / "share" / "zimzilla"
+    script = (ROOT / "install.sh").read_text()
+
+    rc, out, err = run(["bash"], env=env, cwd=ROOT, stdin=script)
+    check("rewrite: the first install lands",
+          rc == 0 and (install_dir / ".git").is_dir(), err.strip()[-300:])
+    before = head_of(install_dir)
+
+    want = rewrite_upstream(src)
+
+    rc, out, err = run(["bash"], env=env, cwd=ROOT, stdin=script)
+    check("rewrite: re-running the installer exits 0", rc == 0, err.strip()[-400:])
+    check("rewrite: the checkout moved onto the new history",
+          head_of(install_dir) == want,
+          f"{head_of(install_dir)[:8]} != {want[:8]}")
+    check("rewrite: the module shipped after the rewrite is on disk",
+          (install_dir / "zimzilla" / "effort.py").exists(),
+          str(sorted(p.name for p in (install_dir / "zimzilla").iterdir()))
+          if (install_dir / "zimzilla").is_dir() else "no package dir")
+    check("rewrite: the abandoned head is kept in a ref",
+          before in subprocess.run(
+              ["git", "-C", str(install_dir), "for-each-ref",
+               "--format=%(objectname)", "refs/zimzilla/"],
+              capture_output=True, text=True).stdout)
+    check("rewrite: the banner names the code it installed", want[:7] in out,
+          out.strip()[-300:])
+
+
+def test_install_leaves_local_edits_alone(td: Path) -> None:
+    """A checkout with local edits is reported as not updated, and not touched."""
+    base = td / "dirty"
+    base.mkdir()
+    home = base / "home"
+    home.mkdir()
+    src = make_source(base)
+    env = base_env(home)
+    env["ZIMZILLA_REPO"] = f"file://{src}"
+    env["ZIMZILLA_SKIP_DEPS"] = "1"
+    env["ZIMZILLA_SKIP_SETUP"] = "1"
+    install_dir = home / ".local" / "share" / "zimzilla"
+    script = (ROOT / "install.sh").read_text()
+
+    rc, out, err = run(["bash"], env=env, cwd=ROOT, stdin=script)
+    check("dirty: the first install lands", rc == 0, err.strip()[-300:])
+    before = head_of(install_dir)
+
+    # An edit to a tracked file — work a reset would destroy.
+    (install_dir / "requirements.txt").write_text("# no deps in this test\n# mine\n")
+    rewrite_upstream(src)
+
+    rc, out, err = run(["bash"], env=env, cwd=ROOT, stdin=script)
+    check("dirty: the installer still exits 0", rc == 0, err.strip()[-400:])
+    check("dirty: HEAD is untouched", head_of(install_dir) == before)
+    check("dirty: the edit survives",
+          (install_dir / "requirements.txt").read_text().endswith("# mine\n"))
+    check("dirty: the run says the install was not updated",
+          "NOT updated" in out + err, (out + err).strip()[-400:])
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +484,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td_str:
         td = Path(td_str)
         ctx = test_install_layout(td)
+        test_install_updates_a_rewritten_upstream(td)
+        test_install_leaves_local_edits_alone(td)
         test_launcher_prefers_bundled_venv(ctx)
         test_launcher_falls_back_to_path_python(td)
         test_setup_installs_without_a_key_and_without_prompting(td)

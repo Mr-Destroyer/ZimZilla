@@ -145,7 +145,10 @@ same on both. `start-litellm.sh` also stops a stale proxy by port rather than by
 pidfile, so a crashed session does not leave `:4001` claimed.
 
 If `~/.local/bin` is not on your `PATH`, the installer prints the line to add.
-Re-running the same command updates an existing install.
+Re-running the same command updates an existing install — including one whose
+checkout can no longer fast-forward because the upstream history was rewritten;
+it prints the commit it ended up on (`code: <sha> on main`) and says plainly if
+local edits stopped the update instead of reporting success either way.
 
 The installer finishes by running `./setup.sh`, which configures the route
 without asking you anything — and without inventing a credential. No Logfare key
@@ -281,8 +284,27 @@ What it will and will not do:
 | **New commits, edited tracked files** | reports them and **does not pull** — your uncommitted work is never touched, stashed or reset |
 | **Untracked files** | ignored — a fast-forward cannot lose them, so they do not block the update |
 | **Your branch has diverged** | reports it and **does not pull** — never merges, never rebases |
+| **The upstream history was rewritten** | moves the checkout onto the new history and keeps the abandoned head at `refs/zimzilla/pre-update-…` — no fast-forward is possible across unrelated histories, so leaving it alone would freeze the install at whatever it was cloned at |
 | **Offline, no remote, not a checkout** | says nothing and boots normally |
 | **`requirements.txt` changed** | updates, then installs the new dependencies into its own venv and restarts; a bring-your-own venv is told to `pip install -r requirements.txt` |
+
+The rewrite row is not a corner case. When a repository's history is filtered or
+re-created, every checkout made before it shares no commit with the new one, and
+`--ff-only` refuses for ever — the install keeps booting on the commit it was
+cloned at, and every command shipped since is missing from it. That is what a
+"the new command does not exist" report usually is. A clean tree has nothing of
+yours to lose, so that one case is repaired rather than reported; anything you
+have edited, staged or committed is still left exactly as it is.
+
+An install that predates this repair cannot fix itself — the code that would do
+it is the code it never received. Re-run the installer once:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mr-Destroyer/ZimZilla/main/install.sh | bash
+```
+
+It now moves such a checkout onto the current history and prints the commit it
+installed (`code: <sha> on main`) so the result is verifiable at a glance.
 
 If you are developing ZimZilla itself, `ZIMZILLA_NO_UPDATE=1` in your shell
 profile is the setting you want — otherwise a commit you push from elsewhere

@@ -16,6 +16,15 @@ update means executing code fetched from the remote at startup:
 
 * ``--ff-only`` — never a merge commit, never a rebase. A diverged branch is
   reported, not resolved.
+* One refusal is not like the others. When the upstream history has been
+  *rewritten* — a filtered history, a re-created repository — the checkout
+  shares no commit with it and no fast-forward is possible, not now and not
+  ever. Reporting that and booting anyway is what leaves an install frozen at
+  the commit it was cloned at, silently missing every command shipped since
+  (``/effort``, ``/obfuscate``, and whatever comes next). A *clean* tree has
+  nothing of the operator's to lose, so that one case re-points the checkout
+  onto the upstream head and keeps the abandoned head in a ref. Everything
+  else is still reported and left alone.
 * A dirty tree means no pull at all. This checkout is also the operator's
   development tree, so uncommitted work is normal, not an error, and nothing
   here may stash, reset or otherwise touch it.
@@ -33,6 +42,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +76,13 @@ class UpdateResult:
     commits: list[str] = field(default_factory=list)
     message: str = ""
     deps_changed: bool = False
+    #: Whether the upstream shares no history with this checkout, so that no
+    #: fast-forward was ever possible. Set by ``inspect`` when it is detected
+    #: and by ``apply`` when it acts on it.
+    rewritten: bool = False
+    #: The ref an abandoned head was kept in, when a rewrite forced the
+    #: checkout onto a new history. Empty otherwise.
+    backup_ref: str = ""
     #: Whether the checkout carries its own venv (built by install.sh). Such an
     #: install refreshes the venv itself on the next launch, so a dependency
     #: change is announced differently than for a bring-your-own venv.
@@ -137,6 +154,36 @@ def _upstream(root: Path, timeout: float = GIT_TIMEOUT) -> str | None:
     return name or None
 
 
+def _unrelated(root: Path, timeout: float = GIT_TIMEOUT) -> bool:
+    """Whether HEAD and its upstream share no commit at all.
+
+    That is the signature of a rewritten upstream: a filtered history, a
+    re-created repository, or a fork that was never related to this one. It
+    matters because it is the one divergence ``--ff-only`` can never resolve —
+    there is no common ancestor to move from — so an install in this state
+    stays at whatever it was cloned at until someone intervenes.
+    """
+    code, _ = _git(root, "merge-base", "HEAD", "@{u}", timeout=timeout)
+    # A non-zero exit is "no merge base" — not an error to report.
+    return code != 0
+
+
+def _deps_changed(root: Path, before: str, after: str,
+                  timeout: float = GIT_TIMEOUT) -> bool:
+    """Whether requirements.txt differs across ``before..after``.
+
+    Compared over the two commits rather than against the working tree, so an
+    unrelated local edit to the file cannot produce a false positive. Works
+    across unrelated histories too — it is a diff of two trees.
+    """
+    if not before or not after or before == after:
+        return False
+    code, _ = _git(root, "diff", "--quiet", before, after, "--", DEPS_FILE,
+                   timeout=timeout)
+    # diff --quiet exits 1 when there IS a difference.
+    return code == 1
+
+
 def _is_dirty(root: Path, timeout: float = GIT_TIMEOUT) -> bool:
     """Whether the tree has uncommitted changes that a pull could disturb.
 
@@ -201,6 +248,19 @@ def inspect(root: Path, timeout: float = GIT_TIMEOUT) -> UpdateResult:
             message="local changes present — not updating (commit or stash them to update)",
         )
 
+    # No shared commit: the upstream history was rewritten, so nothing about
+    # this checkout is "N commits behind" in the ordinary sense — the whole
+    # history is new. Say that, because it changes what happens next.
+    if _unrelated(root, timeout):
+        return UpdateResult(
+            action="notify",
+            behind=behind,
+            commits=commits,
+            rewritten=True,
+            message=("the upstream history was rewritten — this checkout shares "
+                     "no commit with it"),
+        )
+
     return UpdateResult(
         action="notify",
         behind=behind,
@@ -231,7 +291,9 @@ def apply(root: Path, result: UpdateResult, timeout: float = GIT_TIMEOUT) -> Upd
 
     ``--ff-only`` is the second guard: if anything has diverged the pull
     refuses and we report that instead of creating a merge commit the operator
-    did not ask for.
+    did not ask for. The one refusal that is *not* reported but repaired is an
+    upstream sharing no history with this checkout — see below, and
+    ``_repoint``.
     """
     if _is_dirty(root, timeout):
         return UpdateResult(
@@ -245,6 +307,21 @@ def apply(root: Path, result: UpdateResult, timeout: float = GIT_TIMEOUT) -> Upd
 
     code, out = _git(root, "pull", "--ff-only", "--quiet", timeout=timeout)
     if code != 0:
+        # Two different refusals wear the same exit code, and only one of them
+        # is repairable without touching the operator's work.
+        #
+        # An unrelated history can never fast-forward, so leaving it alone
+        # means leaving it stale for good: the harness boots on the commit it
+        # was cloned at, every launch prints the same refusal, and every
+        # command shipped since is simply absent. The tree is clean here (both
+        # this call and `inspect` checked), so nothing of the operator's is at
+        # stake — the head is kept in a ref and the checkout is moved onto the
+        # upstream history.
+        #
+        # A related history that refused is a real divergence — local commits
+        # the operator owns. That is reported, never resolved.
+        if _unrelated(root, timeout):
+            return _repoint(root, result, before, timeout)
         return UpdateResult(
             action="blocked",
             behind=result.behind,
@@ -254,22 +331,49 @@ def apply(root: Path, result: UpdateResult, timeout: float = GIT_TIMEOUT) -> Upd
 
     after = _head(root, timeout)
 
-    # Did the dependency file move across the range we just pulled? Compared
-    # over old..new rather than against the working tree, so an unrelated local
-    # edit to requirements.txt cannot produce a false positive.
-    deps_changed = False
-    if before and after and before != after:
-        code, _ = _git(root, "diff", "--quiet", before, after, "--", DEPS_FILE,
-                       timeout=timeout)
-        # diff --quiet exits 1 when there IS a difference.
-        deps_changed = code == 1
-
     return UpdateResult(
         action="updated",
         behind=result.behind,
         commits=result.commits,
         message=f"updated by {result.behind} commit{'s' if result.behind != 1 else ''}",
-        deps_changed=deps_changed,
+        deps_changed=_deps_changed(root, before, after, timeout),
+        bundled_venv=_has_bundled_venv(root),
+        should_reexec=True,
+    )
+
+
+def _repoint(root: Path, result: UpdateResult, before: str,
+             timeout: float = GIT_TIMEOUT) -> UpdateResult:
+    """Move a clean checkout onto an upstream that shares no history with it.
+
+    Reached only when a fast-forward is impossible for ever, so the choice is
+    between this and never updating again. The head being abandoned is kept in
+    a ref under ``refs/zimzilla/`` — nothing is destroyed, and the message
+    names it, so "the update moved me off a commit I had" is answerable.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    ref = f"refs/zimzilla/pre-update-{stamp}"
+    _git(root, "update-ref", ref, "HEAD", timeout=timeout)
+
+    code, out = _git(root, "reset", "--hard", "--quiet", "@{u}", timeout=timeout)
+    if code != 0:
+        return UpdateResult(
+            action="blocked",
+            behind=result.behind,
+            commits=result.commits,
+            rewritten=True,
+            message=f"could not move onto the rewritten upstream: {out}",
+        )
+
+    after = _head(root, timeout)
+    return UpdateResult(
+        action="updated",
+        behind=result.behind,
+        commits=result.commits,
+        rewritten=True,
+        backup_ref=ref,
+        message="upstream history was rewritten — moved onto the new history",
+        deps_changed=_deps_changed(root, before, after, timeout),
         bundled_venv=_has_bundled_venv(root),
         should_reexec=True,
     )
@@ -326,8 +430,16 @@ def format_result(result: UpdateResult, stream=None) -> None:
 
     line("  ⟩ UPDATE")
     line(f"  ◈ {result.message}")
-    for c in result.commits[:10]:
-        line(f"    {c}")
+    if result.rewritten:
+        # The commit list would be the upstream's entire history here — every
+        # commit in it is "new" to a checkout that shares none of them — so it
+        # is not a list of changes, it is noise. What matters is where the old
+        # head went.
+        if result.backup_ref:
+            line(f"  · the previous head is kept at {result.backup_ref}")
+    else:
+        for c in result.commits[:10]:
+            line(f"    {c}")
     if result.deps_changed:
         if result.bundled_venv:
             line(f"  · {DEPS_FILE} changed — the venv refreshes itself on restart")
