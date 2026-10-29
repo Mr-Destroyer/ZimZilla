@@ -83,6 +83,12 @@ STATUS_PATH = "/v1/status"
 #: The endpoint every entry must advertise to be offered as a chat model.
 CHAT_ENDPOINT = "chat/completions"
 
+#: The endpoint an entry must advertise to be offered as an image generator.
+#: The image catalog is the same status payload filtered differently — see
+#: ``fetch_image_models``. Keeping the filter here, next to its chat twin, is
+#: what stops the two lists drifting into each other.
+IMAGE_ENDPOINT = "images/generations"
+
 #: A fetched catalog older than this is refetched rather than trusted. Logfare's
 #: line-up changes on the order of weeks, but its *health* changes by the hour,
 #: so this is short enough for the status column to mean something.
@@ -123,9 +129,14 @@ class Model:
 #: partition it by.
 _CACHE: list[tuple[list[Model], float]] = []
 
+#: The image catalog, cached separately. It is fetched from the same endpoint
+#: but filtered on a different one of the entry's ``endpoints``; sharing
+#: ``_CACHE`` would make a chat fetch answer an image question with chat models.
+_IMAGE_CACHE: list[tuple[list[Model], float]] = []
 
-def _parse_models(payload: dict) -> list[Model]:
-    """The chat-capable entries, in the order the API returned them.
+
+def _parse_models(payload: dict, endpoint: str = CHAT_ENDPOINT) -> list[Model]:
+    """The entries advertising *endpoint*, in the order the API returned them.
 
     A malformed entry is skipped rather than allowed to take the catalog down:
     this runs inside a TUI command, and half a model list beats an exception.
@@ -138,7 +149,7 @@ def _parse_models(payload: dict) -> list[Model]:
         if not mid:
             continue
         endpoints = entry.get("endpoints") or []
-        if not isinstance(endpoints, list) or CHAT_ENDPOINT not in endpoints:
+        if not isinstance(endpoints, list) or endpoint not in endpoints:
             continue
         try:
             uptime = float(entry.get("uptime_percent") or 0.0)
@@ -163,6 +174,22 @@ def _parse_models(payload: dict) -> list[Model]:
     return out
 
 
+def _fetch_payload(hours: int, timeout: float) -> tuple[dict | None, str]:
+    """The status payload, or ``(None, message)``. Never raises."""
+    url = f"{DEFAULT_BASE_URL}{STATUS_PATH}?hours={int(hours)}"
+    req = urllib.request.Request(url, headers={"accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code} from {HOST}"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, f"could not reach {HOST}: {e}"
+    if not isinstance(payload, dict):
+        return None, f"{HOST} returned an unexpected status payload"
+    return payload, ""
+
+
 def fetch_models(*, hours: int = 24, timeout: float = 20.0,
                  use_cache: bool = True) -> tuple[list[Model] | None, str]:
     """Fetch Logfare's chat catalog. Returns ``(models, error)``.
@@ -177,15 +204,9 @@ def fetch_models(*, hours: int = 24, timeout: float = 20.0,
         if (time.monotonic() - at) < CACHE_TTL:
             return models, ""
 
-    url = f"{DEFAULT_BASE_URL}{STATUS_PATH}?hours={int(hours)}"
-    req = urllib.request.Request(url, headers={"accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code} from {HOST}"
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return None, f"could not reach {HOST}: {e}"
+    payload, err = _fetch_payload(hours, timeout)
+    if payload is None:
+        return None, err
 
     models = _parse_models(payload)
     _CACHE[:] = [(models, time.monotonic())]
@@ -195,6 +216,37 @@ def fetch_models(*, hours: int = 24, timeout: float = 20.0,
 def model_ids(**kw) -> tuple[list[str] | None, str]:
     """Every chat model id, catalog order preserved — what ``/model`` offers."""
     models, err = fetch_models(**kw)
+    if models is None:
+        return None, err
+    return [m.id for m in models], ""
+
+
+def fetch_image_models(*, hours: int = 24, timeout: float = 20.0,
+                       use_cache: bool = True) -> tuple[list[Model] | None, str]:
+    """Fetch Logfare's image catalog. Returns ``(models, error)``.
+
+    The same public status payload as :func:`fetch_models`, filtered on
+    ``images/generations`` instead of ``chat/completions``. Cached separately:
+    a chat catalog is not an image catalog, and serving one for the other would
+    offer a model the endpoint does not have.
+    """
+    if use_cache and _IMAGE_CACHE:
+        models, at = _IMAGE_CACHE[0]
+        if (time.monotonic() - at) < CACHE_TTL:
+            return models, ""
+
+    payload, err = _fetch_payload(hours, timeout)
+    if payload is None:
+        return None, err
+
+    models = _parse_models(payload, endpoint=IMAGE_ENDPOINT)
+    _IMAGE_CACHE[:] = [(models, time.monotonic())]
+    return models, ""
+
+
+def image_model_ids(**kw) -> tuple[list[str] | None, str]:
+    """Every image model id, catalog order preserved."""
+    models, err = fetch_image_models(**kw)
     if models is None:
         return None, err
     return [m.id for m in models], ""
@@ -242,8 +294,9 @@ def cached_ids() -> list[str] | None:
 
 
 def clear_cache() -> None:
-    """Drop the cached catalog. Called when the endpoint changes."""
+    """Drop both cached catalogs. Called when the endpoint changes."""
     _CACHE.clear()
+    _IMAGE_CACHE.clear()
 
 
 def health_for(model: str) -> Model | None:

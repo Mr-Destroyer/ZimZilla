@@ -104,7 +104,11 @@ MODES: dict[str, dict] = {
         "label": "PLAN",
         "blurb": "read-only · plan, do not change",
         "auto": set(),
-        "deny": {"bash", "write_file", "edit_file"},
+        # Image generation writes a file, so it is a change like any other.
+        # It is not in GATED_TOOLS (it writes only inside the jail, the same
+        # posture as the paid LDXHub jobs), which is why plan mode has to deny
+        # it explicitly rather than relying on the permission gate.
+        "deny": {"bash", "write_file", "edit_file", "generate_image"},
     },
     "zim": {
         "label": "ZIM",

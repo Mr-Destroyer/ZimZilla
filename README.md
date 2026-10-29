@@ -733,6 +733,7 @@ the file up too.
 | `list_dir` | no | List a directory. |
 | `search_web` | no | Search the web. |
 | `web_fetch` | no | Pull down a URL. |
+| `generate_image` | no | Generate an image from a prompt and save it under `images/` (needs a Logfare key). |
 
 When a mode makes a tool ask first, you get a modal showing the exact command
 or a colour diff of the change, and three keys:
@@ -1422,6 +1423,8 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/shodan-router-search [cc]` | exposed routers, firewalls and VPNs |
 | `/shodan-vuln-search <query>` | hosts Shodan has flagged with a known CVE |
 | `/shodan-search <query>` | run any Shodan query verbatim — then analyse |
+| `/image-gen <prompt>` | generate an image and save it under `images/` |
+| `/image-gen --model M --size WxH <prompt>` | pick a model or shape — `--models` lists what is up |
 | `/phish <host>` | clone a login page, serve it, harvest creds into zim-pane |
 | `/payload <ext>` | analyse an extension, build a payload, print the listener |
 | `/payload <ext> --dry-run` | print the exact msfvenom command, build nothing |

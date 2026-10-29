@@ -147,6 +147,11 @@ def _detail(name: str, args: dict, max_len: int | None = 200) -> str:
         return f"{args.get('pattern','')} @ {args.get('path','.')}"
     if name == "grep":
         return f"/{args.get('pattern','')}/ @ {args.get('path','.')}"
+    if name == "generate_image":
+        prompt = str(args.get("prompt", ""))
+        if max_len is None or len(prompt) <= max_len:
+            return prompt
+        return prompt[: max_len - 1] + "…"
     return ""
 
 

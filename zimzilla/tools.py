@@ -183,6 +183,53 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        # Text-to-image, for the working model rather than only the operator.
+        # The model reaches it mid-turn the way it reaches any other tool, so a
+        # request like "make me a diagram of this" does not have to be handed
+        # back to the operator as a shell command they must run themselves.
+        #
+        # Withheld until an image key exists (``IMAGEGEN_TOOLS``): advertising a
+        # tool whose every call fails with "no key" wastes a turn per attempt.
+        # Not in ``GATED_TOOLS`` — it writes one file inside the jail, which is
+        # the same posture as the paid LDXHub jobs, and it is denied outright
+        # in plan mode (see ``config.MODES``).
+        "name": "generate_image",
+        "description": (
+            "Generate an image from a text prompt and save it in the working "
+            "directory (under images/ unless dest says otherwise). Returns the "
+            "saved path. Use it when the operator asks for a picture, icon, "
+            "diagram, mockup or illustration. The prompt should describe the "
+            "image in full — subject, style, lighting and composition — "
+            "because the image model does not see this conversation. Images "
+            "cost money per call, so generate once and iterate only on a "
+            "real request."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "What the image should show. Be specific.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Image model id. Omit for flux-1-schnell; "
+                                   "the /image-gen --models list shows the rest.",
+                },
+                "size": {
+                    "type": "string",
+                    "description": "WxH, e.g. 1024x1024 (default) or 1536x1024.",
+                },
+                "dest": {
+                    "type": "string",
+                    "description": "Optional path to write to. Defaults to a "
+                                   "name derived from the prompt under images/.",
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
         # The one tool that exists only during a hunt. A wave agent confirms a
         # bug in the middle of its turn and, until this existed, had no way to
         # say so: findings were read out of the agent's FINAL text by
@@ -485,6 +532,11 @@ LDXHUB_TOOLS = {
     "ldxhub_structflow", "ldxhub_analyze", "ldxhub_extract",
     "ldxhub_convert", "ldxhub_refine",
 }
+
+#: Text-to-image needs a key for an image-capable route. Withheld until
+#: ``imagegen.available()`` — a tool the model can see but never call wastes a
+#: turn on every attempt, the same reason the LDXHub job tools are withheld.
+IMAGEGEN_TOOLS = {"generate_image"}
 
 #: ``ldxhub_list`` is deliberately *not* in the gated set. The catalogs are
 #: public and unauthenticated, so listing them works before a key exists —
@@ -952,6 +1004,41 @@ def _tool_web_fetch(args: dict, cfg) -> ToolResult:
     return ToolResult(
         _truncate(header + text, cfg.max_output_chars),
         meta={"url": final_url},
+    )
+
+
+def _tool_generate_image(args: dict, cfg) -> ToolResult:
+    """Generate one image and report where it landed.
+
+    The heavy lifting is in ``imagegen``; this only coerces the model's
+    arguments, because tool input is never schema-validated. A failure is an
+    ordinary tool error, not an exception: the model should read the reason and
+    decide what to do (fix the size, drop a field, or tell the operator a key is
+    missing) rather than have the turn die.
+    """
+    from . import imagegen
+
+    prompt = _text(args.get("prompt", "")).strip()
+    if not prompt:
+        return ToolResult("a prompt is required", is_error=True)
+    model = _text(args.get("model", "")).strip() or None
+    size = _text(args.get("size", "")).strip() or None
+    dest = _text(args.get("dest", "")).strip() or None
+    try:
+        image = imagegen.generate(
+            prompt,
+            model=model,
+            size=size,
+            dest=dest,
+            cfg=cfg,
+            unsafe=cfg.unsafe,
+        )
+    except imagegen.ImageGenError as e:
+        return ToolResult(f"image generation failed: {e}", is_error=True)
+
+    return ToolResult(
+        imagegen.describe(image, cfg.workdir),
+        meta={"path": str(image.path), "model": image.model, "size": image.size},
     )
 
 
@@ -1546,6 +1633,7 @@ _DISPATCH = {
     "list_dir": _tool_list_dir,
     "search_web": _tool_web_search,
     "web_fetch": _tool_web_fetch,
+    "generate_image": _tool_generate_image,
     "report_finding": _tool_report_finding,
     "hunt_findings": _tool_hunt_findings,
     "agent_peers": _tool_agent_peers,
@@ -1577,6 +1665,10 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
     if name == "web_fetch":
         u = str(args.get("url", ""))
         return u if len(u) <= max_len else u[: max_len - 1] + "…"
+    if name == "generate_image":
+        prompt = str(args.get("prompt", ""))
+        label = "image: " + prompt
+        return label if len(label) <= max_len else label[: max_len - 1] + "…"
     if name == "report_finding":
         sev = str(args.get("severity", "info")).upper()
         title = str(args.get("title", ""))

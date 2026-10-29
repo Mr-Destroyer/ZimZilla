@@ -551,6 +551,12 @@ class Agent:
         from . import ldxhub as ldx_mod
         if not ldx_mod.has_key():
             deny = deny | tools_mod.LDXHUB_TOOLS
+        # Image generation needs a key for an image-capable route. Same
+        # reasoning as the LDXHub job tools: an advertised tool that can only
+        # fail is worse than one the model never sees.
+        from . import imagegen as imagegen_mod
+        if not imagegen_mod.available(self.cfg):
+            deny = deny | tools_mod.IMAGEGEN_TOOLS
         schemas = tools_mod.TOOL_SCHEMAS + tools_mod.PEER_SCHEMAS
         return [t for t in schemas if t["name"] not in deny]
 
@@ -578,6 +584,11 @@ class Agent:
             from . import ldxhub as ldx_mod
             if not ldx_mod.has_key():
                 return "the LDXHub tools need an API key — run /ldxhub-api-setup"
+        if name in tools_mod.IMAGEGEN_TOOLS:
+            from . import imagegen as imagegen_mod
+            if not imagegen_mod.available(self.cfg):
+                return ("the image generator needs a Logfare key — "
+                        "run /logfare-api-setup <key>")
         return None
 
     # ---- history ----------------------------------------------------------

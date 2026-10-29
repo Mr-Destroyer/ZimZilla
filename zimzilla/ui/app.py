@@ -2244,6 +2244,7 @@ class ZimZillaApp(App):
             "shodan-vuln-search": lambda a: self._cmd_shodan_search("vuln", a),
             "shodan-search": lambda a: self._cmd_shodan_search("raw", a),
             "phish": lambda a: self._cmd_phish(a),
+            "image-gen": lambda a: self._cmd_image_gen(a),
             "payload": lambda a: self._cmd_payload(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
             "scope-validator": lambda a: self._cmd_scope_validator(a),
@@ -2391,6 +2392,8 @@ class ZimZillaApp(App):
             ("/shodan-router-search [cc]", "exposed routers, firewalls and VPNs"),
             ("/shodan-vuln-search <q>", "hosts Shodan flagged with a known CVE"),
             ("/shodan-search <query>", "run any Shodan query verbatim, then analyse"),
+            ("/image-gen <prompt>", "generate an image and save it under images/"),
+            ("/image-gen --models", "list the image models the route serves"),
             ("/phish <host>", "clone a login page, serve it, harvest creds"),
             ("/payload <ext>", "analyse an extension, build a payload, print the listener"),
             ("/payload <ext> --dry-run", "print the exact msfvenom command, build nothing"),
@@ -6150,6 +6153,103 @@ class ZimZillaApp(App):
         self.query_one(ChatPane).write_block(t)
         self._launch_phish(target)
 
+    # ---- /image-gen --------------------------------------------------------
+    def _cmd_image_gen(self, args) -> None:
+        """/image-gen [--model M] [--size WxH] [--dest PATH] <prompt>.
+
+        Deterministic, not a model turn: the prompt goes straight to the image
+        API and the bytes land on disk. The model gets the same capability as
+        the ``generate_image`` tool — this is the operator's direct path to it.
+        """
+        from .. import imagegen as image_mod
+
+        opts, err = image_mod.parse_args(list(args))
+        if err:
+            self._sys_line(err, warn=True)
+            self._sys_line(image_mod.usage_lines()[0])
+            return
+        if opts.help:
+            for line in image_mod.usage_lines():
+                self._sys_line(line)
+            return
+        if opts.list_models:
+            self._sys_line("image models: fetching the catalog…")
+            self._fetch_image_models()
+            return
+        if not opts.prompt:
+            for line in image_mod.usage_lines():
+                self._sys_line(line)
+            return
+        if image_mod.credentials(self.cfg) is None:
+            self._sys_line(
+                "no image route — store a Logfare key with "
+                "/logfare-api-setup <key>", warn=True)
+            return
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        model = opts.model or image_mod.DEFAULT_MODEL
+        size = opts.size or image_mod.DEFAULT_SIZE
+        self._sys_line(f"image-gen: {opts.prompt}")
+        self._sys_line(f"  model {model} · size {size} · this can take a minute")
+        self._run_image_gen(opts)
+
+    @work(exclusive=True, thread=True)
+    def _run_image_gen(self, opts) -> None:
+        """The blocking request, off the UI thread, then a call back on it."""
+        from .. import imagegen as image_mod
+
+        try:
+            image = image_mod.generate(
+                opts.prompt,
+                model=opts.model,
+                size=opts.size,
+                dest=opts.dest,
+                cfg=self.cfg,
+                unsafe=self.cfg.unsafe,
+            )
+        except image_mod.ImageGenError as e:
+            self.call_from_thread(self._sys_line, f"image-gen: {e}", True)
+            return
+        except Exception as e:  # noqa: BLE001 - a command must not take the app down
+            self.call_from_thread(
+                self._sys_line, f"image-gen: {type(e).__name__}: {e}", True)
+            return
+        self.call_from_thread(self._show_image_gen, image)
+
+    def _show_image_gen(self, image) -> None:
+        from ..sandbox import display_path
+
+        rel = display_path(self.cfg.workdir, image.path)
+        self._sys_line(f"image saved: {rel}", ok=True)
+        self._sys_line(image.summary())
+        if image.revised_prompt:
+            self._sys_line(f"revised prompt: {image.revised_prompt}")
+        self._sys_line(f"open it: xdg-open {rel}")
+
+    @work(exclusive=True, thread=True)
+    def _fetch_image_models(self) -> None:
+        from .. import imagegen as image_mod
+
+        models, err = image_mod.list_models()
+        self.call_from_thread(self._show_image_models, models, err)
+
+    def _show_image_models(self, models, err: str) -> None:
+        p = self.palette
+        if models is None:
+            self._sys_line(f"could not fetch the image catalog: {err}", warn=True)
+            return
+        t = Text()
+        t.append("  ◈ IMAGE MODELS\n\n", style=f"bold {p.accent}")
+        if not models:
+            t.append("  the catalog is empty — no image model is up right now\n",
+                     style=p.dim)
+        for m in models:
+            t.append(f"  {m.id:<24}", style=f"bold {p.primary}")
+            t.append(m.blurb + "\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
     # ---- /payload ----------------------------------------------------------
     def _cmd_payload(self, args) -> None:
         """/payload <ext> — analyse an extension, build a payload, print the listener.
@@ -8721,6 +8821,7 @@ class ZimZillaApp(App):
             ("/shodan-vuln-search", "hosts with a known CVE", "shodan-vuln-search"),
             ("/shodan-search", "any Shodan query, then analyse", "shodan-search"),
             ("/phish", "clone a login page and harvest creds", "phish"),
+            ("/image-gen", "generate an image from a prompt", "image-gen"),
             ("/payload", "build a payload for a file extension", "payload"),
             ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
             ("/ad", "Active Directory campaign — gated and interlocked", "ad"),

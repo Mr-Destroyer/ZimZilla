@@ -254,4 +254,5 @@ TOOL_ICONS = {
     "list_dir": "▤",
     "search_web": "⌕",
     "web_fetch": "⇣",
+    "generate_image": "▦",
 }
