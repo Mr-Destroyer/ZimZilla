@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import shutil
+import textwrap
 import threading
 import time
 from datetime import datetime
@@ -14,6 +15,8 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the import graph flat
     from ..termcolors import TerminalColors
 
+from rich.console import Group
+from rich.table import Table
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -843,6 +846,213 @@ class FindingsPanel(ModalScreen[None]):
             t.append("\n")
             t.append_text(R.finding_detail(f, p))
         return t
+
+
+#: The `/help` reference, grouped. Each entry is
+#: ``(key, label, blurb, [(command, description), ...])``.
+#:
+#: Grouped rather than one long list because the flat version had grown past
+#: eighty rows: the operator had to read all of it to find one command, and
+#: related commands (every upstream switch, every Shodan search) were scattered
+#: in the order they happened to be added. The key is also what `/help <key>`
+#: filters on, so a section has a name short enough to type.
+HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
+    ("session", "SESSION", "start here · the session itself", [
+        ("/help", "this reference"),
+        ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored"),
+        ("/clear", "wipe the transcript and conversation history"),
+        ("/scope", "show allow.yaml / out-of-scope.yaml status"),
+        ("/exit", "leave the harness (Ctrl+D also works)"),
+    ]),
+    ("model", "MODEL & THINKING", "which model answers · and how hard it thinks", [
+        ("/model [name]", "show or switch the model"),
+        ("/effort [low|medium|high|off]", "raise or lower how hard the model thinks"),
+        ("/think", "toggle showing the model's own reasoning"),
+        ("/limits", "context window, round caps, timeouts, and their source"),
+        ("/compact", "summarise history to free context"),
+        ("/cost", "session token and cost breakdown"),
+    ]),
+    ("upstreams", "UPSTREAMS", "where the tokens come from", [
+        ("/zim-source", "show upstream sources and their status"),
+        ("/zim-logfare", "switch upstream to Logfare (direct, all models)"),
+        ("/zim-tokenjuice", "Token Juice — unlimited quota paused, back in a few days"),
+        ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
+        ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
+        ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
+        ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
+        ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
+        ("/zim-iteracompute [proxy]", "switch upstream to IteraCompute (direct; `proxy` → :4002)"),
+        ("/zim-infronai [proxy]", "switch upstream to InfronAI (direct; `proxy` to go via :4003)"),
+        ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
+        ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
+        ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
+        ("/openai-endpoint <url> [model]", "talk Chat Completions to any OpenAI-compatible endpoint"),
+    ]),
+    ("keys", "KEYS & CATALOGS", "store a key · see what it can reach", [
+        ("/tokenjuice-api-setup [key|clear]", "your own tj_ key — or fall back to the shared one"),
+        ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
+        ("/tokenharbour-models", "fetch the live catalog; show what is free"),
+        ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
+        ("/unorouter-api-setup [key]", "store your UnoRouter API key (optional)"),
+        ("/unorouter-models", "the live free catalog — what is free and usable"),
+        ("/aihubmix-api-setup [key]", "store your AIHubMix API key (optional)"),
+        ("/aihubmix-models", "the live free catalog — what is free and usable"),
+        ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
+        ("/beatapi-models", "the live free catalog — what is free and usable"),
+        ("/iteracompute-api-setup [key]", "store your IteraCompute API key"),
+        ("/iteracompute-models", "the live free catalog — what is free and usable"),
+        ("/infronai-api-setup [key]", "store your InfronAI API key"),
+        ("/infronai-models", "the live free catalog — what is free and usable"),
+        ("/nvidia-api-setup [key]", "store your NVIDIA API key (free developer tier)"),
+        ("/nvidia-models", "the live catalog — what this harness can drive"),
+        ("/antseed-models", "AntSeed's free models, and the peer to pin"),
+        ("/logfare-api-setup [key]", "use your own Logfare key (none ships)"),
+        ("/logfare-models", "fetch the live catalog; show what is up"),
+        ("/ldxhub-api-setup [key]", "store your LDXHub API key (document jobs)"),
+        ("/ldxhub-models [service]", "LDXHub models/engines — pick the default per service"),
+        ("/models", "free models of an upstream — /models [source]"),
+    ]),
+    ("recon", "RECON", "open-source intelligence and exposure", [
+        ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
+        ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
+        ("/leadgen <niche> <location>", "passive local lead gen — audit, drafts, never sends"),
+        ("/shodan-api-setup <key>", "store your Shodan API key"),
+        ("/shodan-cam-search [cc]", "exposed IP cameras, then analyse the result"),
+        ("/shodan-scada-search [cc]", "exposed ICS / SCADA (PLCs, RTUs, HMIs)"),
+        ("/shodan-db-search [cc]", "exposed databases — Mongo, ES, Redis, SQL"),
+        ("/shodan-rdp-search [cc]", "exposed RDP and VNC services"),
+        ("/shodan-router-search [cc]", "exposed routers, firewalls and VPNs"),
+        ("/shodan-vuln-search <q>", "hosts Shodan flagged with a known CVE"),
+        ("/shodan-search <query>", "run any Shodan query verbatim, then analyse"),
+    ]),
+    ("offensive", "OFFENSIVE", "payloads · phishing · cracking · AD", [
+        ("/phish <host>", "clone a login page, serve it, harvest creds"),
+        ("/payload <ext>", "analyse an extension, build a payload, print the listener"),
+        ("/payload <ext> --dry-run", "print the exact msfvenom command, build nothing"),
+        ("/payload <ext> --handler", "the msfconsole listener only"),
+        ("/obfuscate <file>", "run a payload through one or more msfvenom encoders"),
+        ("/crack <file|dir>", "crack hashes offline — CPU only, budgeted"),
+        ("/crack <file|dir> --deep", "add the rule set that takes hours"),
+        ("/ad <domain> --ack <domain>", "AD campaign — gated, interlocks on"),
+        ("/ad tools", "what AD tooling this host actually has"),
+        ("/scope-validator", "paste a programme overview → scope files + ranked targets"),
+    ]),
+    ("hunts", "HUNTS & REPORTING", "multi-agent campaigns and their output", [
+        ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
+        ("/bug-hunt <target> --wave N", "run wave N specifically"),
+        ("/stop-hunt", "end a running hunt (works while busy)"),
+        ("/summary-hunt", "the hunt report (works while busy)"),
+        ("/report-bug-hunt", "evidence-only report, every wave"),
+        ("/findings", "the finding tracker (works while busy)"),
+    ]),
+    ("artifacts", "ARTIFACTS & MEDIA", "reverse-engineer a binary · generate an image", [
+        ("/reverse-engineer <file>", "map an artifact, then choose what to change"),
+        ("/reverse-engineer <file> --map", "map it only — no model turn, nothing sent"),
+        ("/reverse-engineer-tools [kind]", "RE tooling: what is here, what is missing"),
+        ("/image-gen <prompt>", "generate an image and save it under images/"),
+        ("/image-gen --models", "list the image models the route serves"),
+    ]),
+    ("workspace", "WORKSPACE", "panes · sessions · parallel work", [
+        ("/panes", "re-open this session under tmux — ctrl+b h/v split"),
+        ("/zim-opencode", "open opencode behind a fresh rotating IP"),
+        ("/save [name]", "write the session to disk"),
+        ("/load [name]", "restore a saved session"),
+        ("/team <task>", "fan the task out across parallel agents"),
+    ]),
+    ("appearance", "APPEARANCE", "how the harness looks", [
+        ("/rain", "toggle the matrix-rain background"),
+        ("/theme green|amber|cyan|system", "switch the color theme"),
+    ]),
+]
+
+
+def _help_stacked(groups, mode: str, width: int, p) -> Text:
+    """The reference for a narrow pane: one command per line, hanging indent.
+
+    The two-column grid needs room for a command column *and* a description
+    column. Below about seventy cells the description is squeezed to a word or
+    two per line, which reads worse than a plain list. Here the command leads
+    and the description wraps underneath it, indented past the command, so the
+    eye still finds the start of each entry.
+    """
+    # Two cells short of the pane: Rich's own word wrap would otherwise split a
+    # line that measured exactly `width`, and a continuation at column zero is
+    # the one thing this layout exists to avoid.
+    wrap_at = max(24, width - 2)
+    t = Text()
+
+    def labelled(label: str, text: str) -> None:
+        head = f"  ◈ {label}"
+        prefix = head + "  "
+        lines = textwrap.wrap(
+            text, width=wrap_at, initial_indent=prefix,
+            subsequent_indent="    ", break_long_words=False,
+            break_on_hyphens=False,
+        ) or [prefix]
+        t.append(head, style=f"bold {p.accent}")
+        t.append(lines[0][len(head):] + "\n", style=p.dim)
+        for line in lines[1:]:
+            t.append(line + "\n", style=p.dim)
+
+    for i, (_key, label, blurb, rows) in enumerate(groups):
+        if i:
+            t.append("\n")
+        head = f"  ◈ {label}"
+        prefix = head + "   "
+        if blurb:
+            lines = textwrap.wrap(
+                blurb, width=wrap_at, initial_indent=prefix,
+                subsequent_indent="    ", break_long_words=False,
+                break_on_hyphens=False,
+            ) or [prefix]
+            t.append(head, style=f"bold {p.accent}")
+            t.append(lines[0][len(head):] + "\n", style=p.dim)
+            for line in lines[1:]:
+                t.append(line + "\n", style=p.dim)
+        else:
+            t.append(head + "\n", style=f"bold {p.accent}")
+
+        for name, desc in rows:
+            prefix = f"  {name} — "
+            lines = textwrap.wrap(
+                desc, width=wrap_at, initial_indent=prefix,
+                subsequent_indent="    ", break_long_words=False,
+                break_on_hyphens=False,
+            ) or [prefix]
+            for line in lines:
+                if line.startswith(prefix):
+                    t.append(f"  {name}", style=f"bold {p.primary}")
+                    t.append(" — ", style=p.dim)
+                    t.append(line[len(prefix):] + "\n", style=p.dim)
+                else:
+                    t.append(line + "\n", style=p.dim)
+
+    t.append("\n")
+    labelled("MODES", "how much the agent may do")
+    for name, spec in MODES.items():
+        active = name == mode
+        if active and spec.get("loud"):
+            style = f"bold white on {p.red}"
+        elif active:
+            style = f"bold {p.accent}"
+        else:
+            style = p.primary
+        mark = "●" if active else "○"
+        prefix = f"  {mark} {name} — "
+        lines = textwrap.wrap(
+            spec["blurb"], width=wrap_at, initial_indent=prefix,
+            subsequent_indent="    ", break_long_words=False,
+            break_on_hyphens=False,
+        ) or [prefix]
+        t.append(f"  {mark} {name}", style=style)
+        t.append(" — " + lines[0][len(prefix):] + "\n", style=p.dim)
+        for line in lines[1:]:
+            t.append(line + "\n", style=p.dim)
+
+    t.append("\n")
+    labelled("MENTIONS", "@path attaches a file's contents · type / or @ for the popup")
+    labelled("KEYS", "↑↓ move · Tab accept · Esc close · Ctrl+C stop · Ctrl+D exit")
+    return t
 
 
 class ZimZillaApp(App):
@@ -2323,109 +2533,105 @@ class ZimZillaApp(App):
         fn(args)
 
     def _cmd_help(self, args=None) -> None:
+        """The command reference, grouped.
+
+        With no argument it shows every section; with a group key
+        (``/help recon``) it shows one. The filter is what keeps the reference
+        navigable now that it is longer than a screen: the flat list made the
+        operator read all eighty rows to find the one command they wanted.
+        """
         p = self.palette
-        rows = [
-            ("/help", "this help"),
-            ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored"),
-            ("/clear", "wipe the transcript and conversation history"),
-            ("/model [name]", "show or switch the model"),
-            ("/cost", "session token and cost breakdown"),
-            ("/scope", "show allow.yaml / out-of-scope.yaml status"),
-            ("/rain", "toggle the matrix-rain background"),
-            ("/think", "toggle showing the model's own reasoning"),
-            ("/effort [low|medium|high|off]", "raise or lower how hard the model thinks"),
-            ("/theme green|amber|cyan|system", "switch the color theme"),
-            ("/zim-logfare", "switch upstream to Logfare (direct, all models)"),
-            ("/zim-tokenjuice", "Token Juice — unlimited quota paused, back in a few days"),
-            ("/tokenjuice-api-setup [key|clear]", "your own tj_ key — or fall back to the shared one"),
-            ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
-            ("/zim-openrouter", "switch upstream to OpenRouter   (hosted)"),
-            ("/zim-unorouter", "switch upstream to UnoRouter    (hosted, free models)"),
-            ("/zim-aihubmix", "switch upstream to AIHubMix     (hosted, free models)"),
-            ("/zim-beatapi", "switch upstream to BeatAPI      (hosted, free models)"),
-            ("/zim-iteracompute [proxy]", "switch upstream to IteraCompute (direct; `proxy` to go via :4002)"),
-            ("/zim-infronai [proxy]", "switch upstream to InfronAI (direct; `proxy` to go via :4003)"),
-            ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
-            ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
-            ("/zim-source", "show upstream sources and their status"),
-            ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
-            ("/openai-endpoint <url> [model]", "talk Chat Completions to any OpenAI-compatible endpoint"),
-            ("/tokenharbour-api-setup <key>", "store your TokenHarbour API key"),
-            ("/tokenharbour-models", "fetch the live catalog; show what is free"),
-            ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
-            ("/unorouter-api-setup [key]", "store your UnoRouter API key (optional)"),
-            ("/unorouter-models", "the live free catalog — what is free and usable"),
-            ("/aihubmix-api-setup [key]", "store your AIHubMix API key (optional)"),
-            ("/aihubmix-models", "the live free catalog — what is free and usable"),
-            ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
-            ("/beatapi-models", "the live free catalog — what is free and usable"),
-            ("/iteracompute-api-setup [key]", "store your IteraCompute API key"),
-            ("/iteracompute-models", "the live free catalog — what is free and usable"),
-            ("/infronai-api-setup [key]", "store your InfronAI API key"),
-            ("/infronai-models", "the live free catalog — what is free and usable"),
-            ("/nvidia-api-setup [key]", "store your NVIDIA API key (free developer tier)"),
-            ("/nvidia-models", "the live catalog — what this harness can drive"),
-            ("/antseed-models", "AntSeed's free models, and the peer to pin"),
-            ("/models", "free models of an upstream — /models [source]"),
-            ("/logfare-api-setup [key]", "use your own Logfare key (none ships)"),
-            ("/logfare-models", "fetch the live catalog; show what is up"),
-            ("/ldxhub-api-setup [key]", "store your LDXHub API key (document jobs)"),
-            ("/ldxhub-models [service]", "LDXHub models/engines — pick the default per service"),
-            ("/reverse-engineer <file>", "map an artifact, then choose what to change"),
-            ("/reverse-engineer <file> --map", "map it only — no model turn, nothing sent"),
-            ("/reverse-engineer-tools [kind]", "RE tooling: what is here, what is missing"),
-            ("/panes", "re-open this session under tmux — ctrl+b h/v split"),
-            ("/zim-opencode", "open opencode behind a fresh rotating IP"),
-            ("/save [name]", "write the session to disk"),
-            ("/load [name]", "restore a saved session"),
-            ("/compact", "summarise history to free context"),
-            ("/limits", "context window, round caps, timeouts — and where each comes from"),
-            ("/team <task>", "fan the task out across parallel agents"),
-            ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
-            ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
-            ("/leadgen <niche> <location>", "passive local lead gen — audit, drafts, never sends"),
-            ("/shodan-api-setup <key>", "store your Shodan API key"),
-            ("/shodan-cam-search [cc]", "exposed IP cameras, then analyse the result"),
-            ("/shodan-scada-search [cc]", "exposed ICS / SCADA (PLCs, RTUs, HMIs)"),
-            ("/shodan-db-search [cc]", "exposed databases — Mongo, ES, Redis, SQL"),
-            ("/shodan-rdp-search [cc]", "exposed RDP and VNC services"),
-            ("/shodan-router-search [cc]", "exposed routers, firewalls and VPNs"),
-            ("/shodan-vuln-search <q>", "hosts Shodan flagged with a known CVE"),
-            ("/shodan-search <query>", "run any Shodan query verbatim, then analyse"),
-            ("/image-gen <prompt>", "generate an image and save it under images/"),
-            ("/image-gen --models", "list the image models the route serves"),
-            ("/phish <host>", "clone a login page, serve it, harvest creds"),
-            ("/payload <ext>", "analyse an extension, build a payload, print the listener"),
-            ("/payload <ext> --dry-run", "print the exact msfvenom command, build nothing"),
-            ("/payload <ext> --handler", "the msfconsole listener only"),
-            ("/scope-validator", "paste a programme overview → allow.yaml, out-of-scope.yaml, ranked targets"),
-            ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
-            ("/bug-hunt <target> --wave N", "run wave N specifically"),
-            ("/ad <domain> --ack <domain>", "AD campaign — gated, interlocks on"),
-            ("/ad tools", "what AD tooling this host actually has"),
-            ("/crack <file|dir>", "crack hashes offline — CPU only, budgeted"),
-            ("/crack <file|dir> --deep", "add the rule set that takes hours"),
-            ("/stop-hunt", "end a running hunt       (works while busy)"),
-            ("/summary-hunt", "the hunt report          (works while busy)"),
-            ("/report-bug-hunt", "evidence-only report, every wave"),
-            ("/findings", "the finding tracker      (works while busy)"),
-            ("/exit", "leave the harness        (Ctrl+D also works)"),
-        ]
-        t = Text()
-        t.append("  COMMANDS\n\n", style=f"bold {p.accent}")
-        for name, desc in rows:
-            t.append(f"  {name:<24}", style=f"bold {p.primary}")
-            t.append(desc + "\n", style=p.dim)
-        t.append("\n  MODES\n\n", style=f"bold {p.accent}")
+        wanted = " ".join(args or []).strip().lower()
+        groups = list(HELP_GROUPS)
+        if wanted and wanted not in ("all", "*"):
+            groups = [g for g in groups
+                      if g[0] == wanted or g[0].startswith(wanted)
+                      or wanted in g[1].lower()]
+            if not groups:
+                self._sys_line(
+                    f"no help group: {wanted} — /help lists them",
+                    warn=True)
+                return
+
+        try:
+            width = self.query_one(ChatPane).content_size.width or 80
+        except Exception:  # noqa: BLE001 - a help screen must still render
+            width = 80
+
+        total = sum(len(rows) for _key, _label, _blurb, rows in groups)
+        head = Text()
+        head.append("  ◈ ", style=f"bold {p.accent}")
+        head.append("COMMAND REFERENCE", style=f"bold {p.accent}")
+        if wanted and wanted not in ("all", "*") and len(groups) == 1:
+            head.append("  ·  " + groups[0][1], style=f"bold {p.primary}")
+        head.append("\n")
+        hint = (f"{total} commands · {len(groups)} "
+                f"{'group' if len(groups) == 1 else 'groups'}"
+                " · /help <group> filters · /help all shows everything")
+        for line in textwrap.wrap(hint, width=max(24, width - 2),
+                                  initial_indent="  ", subsequent_indent="  ",
+                                  break_long_words=False):
+            head.append(line + "\n", style=p.dim)
+
+        # A narrow pane cannot give a command column and a description column
+        # enough room at once; the stacked form keeps the description readable
+        # by putting it underneath, indented past the command.
+        if width < 70:
+            self.query_one(ChatPane).write_block(
+                Group(head, _help_stacked(groups, self.cfg.mode, width, p)))
+            return
+
+        # One grid for commands, modes and the key hints, so every description
+        # starts in the same column. A wrapped description then hangs under its
+        # own column instead of running back to the left margin, which is what
+        # made the old list read as a wall.
+        table = Table(show_header=False, box=None, pad_edge=True,
+                      expand=True, padding=(0, 2))
+        table.add_column(no_wrap=True)
+        table.add_column(ratio=1)
+
+        for _key, label, blurb, rows in groups:
+            table.add_row(
+                Text(f"◈ {label}", style=f"bold {p.accent}"),
+                Text(blurb, style=p.dim),
+            )
+            for name, desc in rows:
+                table.add_row(
+                    Text(name, style=f"bold {p.primary}"),
+                    Text(desc, style=p.dim),
+                )
+            table.add_row(Text(""), Text(""))
+
+        table.add_row(
+            Text("◈ MODES", style=f"bold {p.accent}"),
+            Text("how much the agent may do", style=p.dim),
+        )
         for name, spec in MODES.items():
-            mstyle = f"bold {p.red}" if spec.get("loud") else f"bold {p.primary}"
-            t.append(f"  {name:<10}", style=mstyle)
-            t.append(spec["blurb"] + "\n", style=p.dim)
-        t.append("\n  MENTIONS  ", style=f"bold {p.accent}")
-        t.append("@path attaches a file's contents   ·   type / or @ for the popup\n", style=p.dim)
-        t.append("  KEYS  ", style=f"bold {p.accent}")
-        t.append("↑↓ select · Tab accept · Esc close · Ctrl+C interrupt · Ctrl+D exit\n", style=p.dim)
-        self.query_one(ChatPane).write_block(t)
+            active = name == self.cfg.mode
+            if active and spec.get("loud"):
+                style = f"bold white on {p.red}"
+            elif active:
+                style = f"bold {p.accent}"
+            else:
+                style = p.primary
+            table.add_row(
+                Text(("● " if active else "○ ") + name, style=style),
+                Text(spec["blurb"], style=p.dim),
+            )
+
+        table.add_row(Text(""), Text(""))
+        table.add_row(
+            Text("◈ MENTIONS", style=f"bold {p.accent}"),
+            Text("@path attaches a file's contents · type / or @ for the popup",
+                 style=p.dim),
+        )
+        table.add_row(
+            Text("◈ KEYS", style=f"bold {p.accent}"),
+            Text("↑↓ move · Tab accept · Esc close · Ctrl+C stop · Ctrl+D exit",
+                 style=p.dim),
+        )
+
+        self.query_one(ChatPane).write_block(Group(head, table))
 
     def _cmd_mode(self, args) -> None:
         p = self.palette

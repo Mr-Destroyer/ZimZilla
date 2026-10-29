@@ -1396,7 +1396,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 
 | Command | Effect |
 |---|---|
-| `/help` | command reference |
+| `/help [group]` | command reference, grouped — `/help recon`, `/help keys`, `/help all` |
 | `/mode [name]` | show or switch mode |
 | `/model [name]` | show or switch the model |
 | `/cost` | session token + cost breakdown |

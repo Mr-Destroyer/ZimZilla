@@ -409,6 +409,10 @@ async def test_ui(tmp: Path) -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
+        # Hermetic from the first check: the remembered level lives in
+        # ZIMZILLA_HOME, and a real ~/.zimzilla/effort (the operator's own
+        # preference) would otherwise leak into the request-body checks below.
+        E.ZIMZILLA_HOME = tmp / "zim-home"
         test_registry_shape(tmp)
         test_validation(tmp)
         test_body_per_protocol(tmp)
