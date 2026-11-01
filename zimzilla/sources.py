@@ -51,6 +51,15 @@ points the session straight at it. Its key is the operator's own developer key
 (``/nvidia-api-setup``), never shipped, and its catalog is public — see
 :mod:`zimzilla.nvidia` for what that catalog does and does not say.
 
+Zro (MoonMath.ai, ``zro.moonmath.ai``) is a hosted gateway like TokenHarbour,
+but it is the one that makes the split explicit: it serves Messages natively at
+the host root *and* Chat Completions under ``/v1``. ZimZilla uses the native
+Messages surface, so there is no translation and no proxy — ``/zim-moonmath``
+points the session at ``https://zro.moonmath.ai`` and nothing else has to
+exist. Its catalog is public and priced, which is what lets
+``/moonmath-models`` show the Free plan's models before a key is set; see
+:mod:`zimzilla.moonmath`.
+
 The other upstreams (TokenHarbour, OpenRouter, UnoRouter, AIHubMix, BeatAPI,
 AntSeed) are remote or operator-started, and live in their own modules; this one
 is the local proxy plumbing and the selection record
@@ -405,12 +414,29 @@ NVIDIA_MODELS: tuple[str, ...] = (
     "meta/muse-glimmer-30b",                   # 14.5s with tools
 )
 
+#: Zro's declared fallback. Its real catalog is fetched from the public
+#: ``/models`` route (see ``moonmath.py``); this is what ``/model`` shows before
+#: that fetch. The catalog carried three chat models when this was written, and
+#: the docs also list two security variants and an ``auto`` router, so the
+#: declared list is the documented surface rather than a snapshot of one
+#: fetch — a starting point, not the truth. Anything retired answers 404, and a
+#: switch re-reads the live catalog before it lands.
+MOONMATH_MODELS: tuple[str, ...] = (
+    "deepseek-v4.1-flash",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "dolly1-security",
+    "dolly2-security",
+    "auto",
+)
+
 MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "logfare": LOGFARE_MODELS,
     "tokenjuice": TOKENJUICE_MODELS,
     "iteracompute": ITERACOMPUTE_MODELS,
     "infronai": INFRONAI_MODELS,
     "nvidia": NVIDIA_MODELS,
+    "moonmath": MOONMATH_MODELS,
 }
 
 
@@ -437,7 +463,10 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
     Logfare's, TokenHarbour's and OpenRouter's lists are fetched, not declared,
     so they come from a catalog cache rather than MODELS_BY_KEY. A cold cache
     yields None, and the caller falls back to the declared list — which is why
-    the per-source *-models commands exist to warm it.
+    the per-source *-models commands exist to warm it. Zro is the exception: its
+    declared list is a documented fallback, so a cold cache answers that instead
+    of None and ``/model`` offers this provider's surface rather than whatever
+    Logfare happens to serve.
     """
     key = active_key(base_url)
     if key is None:
@@ -464,6 +493,13 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import logfare as lf_mod
         cached = lf_mod.cached_ids()
         return tuple(cached) if cached else None
+    if key == "moonmath":
+        # Fetched from the gateway's public catalog. The declared fallback is
+        # better than the default registry's list here — it is the documented
+        # surface of *this* provider — so it answers a cold cache.
+        from . import moonmath as mm_mod
+        cached = mm_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     if key in DIRECT_ONLY:
         # Declared, not fetched — but a switch probes the Models route, and what
         # the upstream actually answered is better than the declared fallback.
@@ -846,8 +882,8 @@ def switchable(exclude: str | None = None) -> list[str]:
     found = discover()
     out: list[str] = []
     for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
-                "tokenharbour", "infronai", "iteracompute", "antseed",
-                "nvidia", "tokenjuice", "logfare"):
+                "tokenharbour", "moonmath", "infronai", "iteracompute",
+                "antseed", "nvidia", "tokenjuice", "logfare"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -883,12 +919,13 @@ def _gateway_module(key: str):
     """
     from . import aihubmix as ah_mod
     from . import beatapi as bp_mod
+    from . import moonmath as mm_mod
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
-        "beatapi": bp_mod, "tokenharbour": th_mod,
+        "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
     }.get(key)
 
 
@@ -952,7 +989,7 @@ def _state_file() -> Path:
 #: buyer is started and stopped by the operator, so requiring it to be up at
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
-                          "aihubmix", "beatapi"})
+                          "aihubmix", "beatapi", "moonmath"})
 
 
 def current_key() -> str | None:
@@ -1005,6 +1042,7 @@ def active_key(base_url: str) -> str | None:
     from . import beatapi as bp_mod
     from . import infronai as inf_mod
     from . import iteracompute as ic_mod
+    from . import moonmath as mm_mod
     from . import nvidia as nv_mod
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
@@ -1019,6 +1057,11 @@ def active_key(base_url: str) -> str | None:
         return "aihubmix"
     if bp_mod.is_beatapi(base_url):
         return "beatapi"
+    # Zro is hosted and Anthropic-native, identified by host like the other
+    # gateways — the Messages base URL is the bare host, so there is no port or
+    # path to match on.
+    if mm_mod.is_moonmath(base_url):
+        return "moonmath"
     # Checked by port before the generic regex for the same reason AntSeed is:
     # it is a local proxy, and identifying it by its own predicate keeps the
     # port in one module rather than spelling it here too. It also means the
