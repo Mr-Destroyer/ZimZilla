@@ -181,8 +181,8 @@ waiting for a ZimZilla release.
 
 Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-nvidia`,
 `/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`,
-`/zim-beatapi` and `/zim-antseed`, each with your own credential, a shared one,
-or none at all.
+`/zim-beatapi`, `/zim-moonmath` and `/zim-antseed`, each with your own
+credential, a shared one, or none at all.
 
 To configure setup yourself later, or to install somewhere other than the
 default:
@@ -749,7 +749,7 @@ or a colour diff of the change, and three keys:
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, or Chat Completions to an endpoint that serves it, so it can run
 against a hosted gateway, a direct upstream or a local proxy without any code
-caring which. Eleven sources are wired up:
+caring which. Twelve sources are wired up:
 
 | Source | Endpoint | Key | How it starts |
 |---|---|---|---|
@@ -763,12 +763,14 @@ caring which. Eleven sources are wired up:
 | **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
 | **AIHubMix** | `aihubmix.com` | yours | hosted — nothing to start |
 | **BeatAPI** | `direct.beatapi.io` | yours | hosted — nothing to start |
+| **Zro (MoonMath.ai)** | `zro.moonmath.ai` | yours (`sk-…`) | hosted, native Messages — free daily allowance on the Flash models |
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-tokenharbour`, `/zim-openrouter`,
-`/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi` or `/zim-antseed`; the choice
-is remembered, so the next launch comes back to the one that was working.
+`/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi`, `/zim-moonmath` or
+`/zim-antseed`; the choice is remembered, so the next launch comes back to the
+one that was working.
 
 Logfare, Token Juice and NVIDIA are reached **directly** — their upstreams serve
 Chat Completions themselves, so there is no proxy to start. IteraCompute and
@@ -853,6 +855,62 @@ budget came back as 104 thinking frames and no answer at all. The harness's
 default ceiling (32768) has room, and it doubles the budget once when a reply is
 spent entirely on thinking, so you only meet this if you lower `max_tokens`
 yourself.
+
+### Zro (MoonMath.ai), a hosted gateway on the native Messages protocol
+
+`/moonmath-api-setup <sk-… key>` writes `~/.zimzilla/moonmath/source` (mode
+600) and applies it to the session you are in — no restart. `/zim-moonmath`
+switches onto `https://zro.moonmath.ai`. Keys come from https://zro.moonmath.ai;
+the same key works for the gateway's Chat Completions, Responses and Messages
+surfaces, so the `zro` CLI can point Claude Code, Codex and an OpenAI SDK at it
+at once. The provider brands itself Zro, so `/zro-moonmath-api-setup` and
+`/zro-moonmath-models` are accepted as aliases.
+
+This one is **hosted and native**: the upstream serves `POST /v1/messages`
+itself, so there is no proxy to start and nothing is translated. `/zim-source`
+lists it as `hosted`, and `proxy` after `/zim-moonmath` has nothing to turn on.
+The base URL is the **bare host** — `https://zro.moonmath.ai` — because the
+Anthropic SDK appends `/v1/messages` to whatever it is handed; spelling `/v1`
+there produces `/v1/v1/messages` and a 404 on every turn while the catalog still
+works.
+
+The catalog is **public and priced**, read from `GET /models` with no
+credential, so `/moonmath-models` and the `/model` picker answer before any key
+is set. It publishes a rate, a context window, an output ceiling, modalities and
+features for every entry — 1M context across the three chat models served on
+2026-11-01:
+
+| Model | Free plan | Context | Max output |
+|---|---|---|---|
+| `deepseek-v4.1-flash` | **yes** | 1M | 64K |
+| `glm-5.3-flash` | **yes** | 1M | 64K |
+| `glm-5.3` | no | 1M | 131K |
+
+That is what the public catalog listed on 2026-11-01. The provider's docs also
+advertise two `dolly*-security` variants (uncensored, for authorized red-team
+work) and an `auto` router that bills at whichever tier answers; all three are
+in the offline fallback list and appear in `/model` as soon as the catalog
+carries them. An unpriced virtual router is never reported as free — a missing
+price is not a zero price.
+
+**Free here means the Free plan's included daily usage, not a zero price.** The
+catalog lists a rate for every model, because on a paid plan the same ids bill
+at it; once the day's allowance is spent a turn answers `402`, not a bill.
+`/moonmath-models` marks the two included ids and says so, and `/cost` reads
+`free` for them. The default is `deepseek-v4.1-flash`: free on that plan, 1M
+context, tool use and reasoning.
+
+The credential probe is a real one, unlike NVIDIA's: `GET /v1/models` answers
+`401` without a key, so `/moonmath-api-setup` proves a key with one
+authenticated, read-only request — no tokens spent. A `402` (budget), `429`
+(rate limit) or `5xx` still counts as a working key. Only `401`/`403` fails it.
+The failures are shaped differently and mean different things: `401` = missing
+or revoked key, `402` = spend quota or plan budget exhausted, `403` = this key
+is not permitted to use that model, `404` = unknown model, `429` = rate limited.
+
+Both spellings of an id work on the wire — `glm-5.3` and `zro/glm-5.3` — and
+ZimZilla prices and sizes either one identically. The catalog publishes the bare
+id, so that is what `/model` offers.
 
 ### Two wire protocols, and skipping the proxy
 
