@@ -40,6 +40,7 @@ from .. import iteracompute as ic_mod
 from .. import ldxhub as ldx_mod
 from .. import leadgen as leadgen_mod
 from .. import logfare as lf_mod
+from .. import moonmath as mm_mod
 from .. import nvidia as nv_mod
 from .. import opencode as oc_mod
 from .. import osint as osint_mod
@@ -881,6 +882,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
         ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
         ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
+        ("/zim-moonmath", "switch upstream to Zro (hosted, free daily models)"),
         ("/zim-iteracompute [proxy]", "switch upstream to IteraCompute (direct; `proxy` → :4002)"),
         ("/zim-infronai [proxy]", "switch upstream to InfronAI (direct; `proxy` to go via :4003)"),
         ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
@@ -899,6 +901,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/aihubmix-models", "the live free catalog — what is free and usable"),
         ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
         ("/beatapi-models", "the live free catalog — what is free and usable"),
+        ("/moonmath-api-setup [key]", "store your Zro (MoonMath.ai) API key"),
+        ("/moonmath-models", "the live free catalog — the Free plan's models"),
         ("/iteracompute-api-setup [key]", "store your IteraCompute API key"),
         ("/iteracompute-models", "the live free catalog — what is free and usable"),
         ("/infronai-api-setup [key]", "store your InfronAI API key"),
@@ -2371,6 +2375,8 @@ class ZimZillaApp(App):
         "unorouter-api-setup", "unorouter-models", "zim-unorouter",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
+        "moonmath-api-setup", "moonmath-models", "zim-moonmath",
+        "zro-moonmath-api-setup", "zro-moonmath-models", "zim-zro-moonmath",
         "iteracompute-api-setup", "iteracompute-models", "zim-iteracompute",
         "infronai-api-setup", "infronai-models", "zim-infronai",
         "nvidia-api-setup", "nvidia-models", "zim-nvidia",
@@ -2499,6 +2505,18 @@ class ZimZillaApp(App):
             "zim-beatapi": lambda a: self._cmd_zim_gateway("beatapi"),
             "beatapi-api-setup": lambda a: self._cmd_gateway_key("beatapi", a),
             "beatapi-models": lambda a: self._cmd_models(["beatapi"]),
+            # Zro is a hosted gateway on the native Messages protocol, so its
+            # three commands go through the shared gateway handlers. The
+            # `zro-` spellings are accepted as aliases: the provider brands
+            # itself Zro, and a command named for the brand should not read as
+            # missing on the one machine that has it set up.
+            "zim-moonmath": lambda a: self._cmd_zim_gateway("moonmath"),
+            "zim-zro-moonmath": lambda a: self._cmd_zim_gateway("moonmath"),
+            "moonmath-api-setup": lambda a: self._cmd_gateway_key("moonmath", a),
+            "zro-moonmath-api-setup": lambda a: self._cmd_gateway_key(
+                "moonmath", a),
+            "moonmath-models": lambda a: self._cmd_models(["moonmath"]),
+            "zro-moonmath-models": lambda a: self._cmd_models(["moonmath"]),
             "zim-iteracompute": lambda a: self._cmd_zim_source("iteracompute", a),
             "iteracompute-api-setup": lambda a: self._cmd_gateway_key(
                 "iteracompute", a),
@@ -3411,7 +3429,8 @@ class ZimZillaApp(App):
         self._sys_line(
             "Token Juice unlimited quota finished — it will be back in a few "
             "days. Till then use the other unlimited sources: "
-            "/zim-tokenharbour, /zim-nvidia, /zim-beatapi", warn=True)
+            "/zim-tokenharbour, /zim-nvidia, /zim-beatapi, /zim-moonmath",
+            warn=True)
 
     # /zim-logfare and /zim-tokenjuice repoint the session at a different
     # upstream. Both go down independently, so this is the failover: the key,
@@ -3509,6 +3528,7 @@ class ZimZillaApp(App):
                  "/iteracompute-api-setup"),
                 ("infronai", inf_mod, "InfronAI", "/infronai-api-setup"),
                 ("nvidia", nv_mod, "NVIDIA NIM", "/nvidia-api-setup"),
+                ("moonmath", mm_mod, "Zro", "/moonmath-api-setup"),
             ):
                 # IteraCompute and InfronAI have local proxies, so when their
                 # profiles exist they are already listed above by discover() —
@@ -3572,6 +3592,7 @@ class ZimZillaApp(App):
                      "                 /zim-unorouter,  /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
+                     "                 /zim-moonmath,\n"
                      "                 or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
@@ -4179,6 +4200,11 @@ class ZimZillaApp(App):
             return ah_mod, "AIHubMix"
         if kind == "beatapi":
             return bp_mod, "BeatAPI"
+        # A hosted gateway on the native Messages protocol, like TokenHarbour —
+        # the upstream serves ``/v1/messages`` itself, so nothing is translated
+        # and nothing is started.
+        if kind == "moonmath":
+            return mm_mod, "Zro (MoonMath.ai)"
         # Not a hosted gateway: IteraCompute has no Messages endpoint, so it is
         # a local proxy source — `/zim-iteracompute` goes through
         # `_cmd_zim_source` like Logfare, and (since the harness speaks Chat
@@ -4452,8 +4478,19 @@ class ZimZillaApp(App):
                 return
             t.append("  set it with  ", style=p.dim)
             t.append(f"/{kind}-api-setup <key>\n", style=f"bold {p.primary}")
+            if kind == "moonmath":
+                # The alias the operator may have typed instead, and where the
+                # key itself comes from. Both are cheap to say once here rather
+                # than leaving a second spelling to be discovered.
+                t.append("  alias        ", style=p.dim)
+                t.append("/zro-moonmath-api-setup <key>\n", style=p.dim)
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://zro.moonmath.ai\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{mod.KEY_PREFIX}  · free daily usage on the Flash "
+                         "models\n", style=p.dim)
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
-                        "iteracompute", "infronai", "nvidia"):
+                        "iteracompute", "infronai", "nvidia", "moonmath"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -4496,6 +4533,15 @@ class ZimZillaApp(App):
             self.agent._client = None
             self._sys_line("applied to this session — no restart", ok=True)
             return
+        if kind == "moonmath" and mm_mod.is_moonmath(self.cfg.base_url):
+            # Same failure, one gateway over: a hosted gateway's key is read
+            # into ``cfg`` when the switch happens, so writing it to the profile
+            # while the session is already on Zro leaves the old credential in
+            # force. Re-apply from the profile that was just rewritten.
+            if mm_mod.apply_to(self.cfg) is not None:
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+                return
         self._sys_line(f"switch to it with /zim-{kind}")
 
     def _cmd_ldxhub_key(self, args) -> None:
@@ -4827,10 +4873,12 @@ class ZimZillaApp(App):
                     "this endpoint is not a known upstream — /zim-source lists "
                     "them, or name one: /models openrouter", warn=True)
                 return
+        # The brand spelling, accepted wherever the source key is typed.
+        key = {"zro-moonmath": "moonmath", "zro": "moonmath"}.get(key, key)
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",
-                 "iteracompute", "infronai", "nvidia"}
+                 "moonmath", "iteracompute", "infronai", "nvidia"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -4912,6 +4960,12 @@ class ZimZillaApp(App):
             # matches this account's reachable models.
             creds = inf_mod.load_credentials()
             return inf_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "moonmath":
+            # Keyless as well, and genuinely so: /models on the host is the
+            # public catalog, and fetch_models sends no credential at all. The
+            # key only matters for sending a turn.
+            creds = mm_mod.load_credentials()
+            return mm_mod.usable_free_models(creds[0] if creds else "")
         if kind == "nvidia":
             # Keyless as well: /v1/models is public. Sent when present so the
             # listing is made with the credential the turns will use. The
@@ -4953,6 +5007,7 @@ class ZimZillaApp(App):
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
                  "nvidia": "NVIDIA NIM",
+                 "moonmath": "ZRO (MOONMATH.AI)",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
         t = Text()
@@ -4999,6 +5054,13 @@ class ZimZillaApp(App):
                     "publishes none. An empty list means the endpoint\n"
                     "  answered with no chat-capable entries — not that the "
                     "key is wrong)\n", style=p.dim)
+            if kind == "moonmath":
+                t.append(
+                    "  (the catalog is public and live. 'free' here is the Free "
+                    "plan's\n  included daily usage, not a zero price — the "
+                    "catalog lists a rate for\n  every model. An empty list "
+                    "means the catalog answered with no chat\n  entries, not "
+                    "that the key is wrong)\n", style=p.dim)
         else:
             for m in models:
                 mark = "◉" if m.id == self.cfg.model else "○"
@@ -5141,6 +5203,18 @@ class ZimZillaApp(App):
             t.append(
                 "  ids are provider/model and go on the wire unchanged — no "
                 "prefix to add\n", style=p.dim)
+        if kind == "moonmath":
+            # Two facts a reader of this list would otherwise get wrong, both
+            # read from the provider's own pricing page and catalog.
+            t.append(
+                "  free = the Free plan's included daily usage, reset every "
+                "day. The\n  catalog still lists a rate for these ids — on a "
+                "paid plan they bill at it,\n  and once the daily allowance is "
+                "spent a turn answers 402, not a bill\n", style=p.dim)
+            t.append(
+                "  the gateway serves Messages natively, so there is no proxy "
+                "and no\n  translation; both the bare id and the zro/ alias "
+                "are accepted on the wire\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
         self._refresh_model_choices()
 
@@ -8982,6 +9056,11 @@ class ZimZillaApp(App):
              "beatapi-api-setup"),
             ("/beatapi-models", "the live free catalog — what is free and usable",
              "beatapi-models"),
+            ("/zim-moonmath", "switch upstream to Zro (MoonMath.ai)", "zim-moonmath"),
+            ("/moonmath-api-setup", "store your Zro (MoonMath.ai) API key",
+             "moonmath-api-setup"),
+            ("/moonmath-models", "the Free plan's models — what is free and usable",
+             "moonmath-models"),
             ("/iteracompute-api-setup", "store your IteraCompute API key",
              "iteracompute-api-setup"),
             ("/iteracompute-models", "the live free catalog — what is free and usable",
