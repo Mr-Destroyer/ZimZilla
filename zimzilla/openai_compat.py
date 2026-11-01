@@ -88,6 +88,11 @@ ANTHROPIC_HOSTS = (
     "aihubmix.com",
     "beatapi.io",
     "gw.ldxhub.io",
+    # Zro serves the Messages protocol natively at its bare host; the OpenAI
+    # surfaces live under /v1, which the path rule already covers. Naming the
+    # host here keeps ``https://zro.moonmath.ai`` from ever being read as a Chat
+    # Completions endpoint by a future heuristic.
+    "zro.moonmath.ai",
 )
 
 #: Hosts that are Chat Completions by construction. Not exhaustive, and not
