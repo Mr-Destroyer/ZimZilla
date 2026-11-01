@@ -712,6 +712,10 @@ def test_tui_surfaces() -> None:
           '"moonmath": "ZRO (MOONMATH.AI)"' in app_src)
     check("tui: the startup warm-up runs for it",
           "self._warm_moonmath_catalog()" in app_src)
+    check("tui: the setup command proves the key it stored",
+          "self._verify_moonmath_key(key)" in app_src)
+    check("tui: the probe reports through the transcript",
+          "def _report_moonmath_key(self, ok: bool, detail: str)" in app_src)
     check("tui: the module is imported by the app",
           "from .. import moonmath as mm_mod" in app_src)
     check("tui: /models completion offers it", '"moonmath"]' in comp_src,

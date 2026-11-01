@@ -4147,6 +4147,29 @@ class ZimZillaApp(App):
         """
         mm_mod.fetch_models()
 
+    @work(exclusive=True, thread=True)
+    def _verify_moonmath_key(self, token: str) -> None:
+        """Prove a just-stored Zro key with one read-only request. Blocking.
+
+        Runs on the worker thread: ``/moonmath-api-setup`` must not stall the
+        UI on a network call, and the answer is worth having before the first
+        turn rather than after it.
+        """
+        ok, detail = mm_mod.verify_key(token)
+        self.call_from_thread(self._report_moonmath_key, ok, detail)
+
+    def _report_moonmath_key(self, ok: bool, detail: str) -> None:
+        """Say what the probe found, without claiming more than it proved.
+
+        ``ok`` is False only for a rejected key or an unreachable host; a 402,
+        429 or 5xx comes back True with the reason in ``detail``, so the line
+        names the check rather than declaring the key good or bad.
+        """
+        if ok:
+            self._sys_line(f"Zro key check: {detail}", ok=True)
+        else:
+            self._sys_line(f"Zro key check failed: {detail}", warn=True)
+
     def _show_logfare_models(self, models, err: str) -> None:
         p = self.palette
         if models is None:
@@ -4572,6 +4595,12 @@ class ZimZillaApp(App):
         path = mod.save_key(key, current)
         mod.clear_cache()             # a new key invalidates the old catalog
         self._sys_line(f"{label} key saved (…{key[-4:]}) to {path}", ok=True)
+        if kind == "moonmath":
+            # Zro is the one gateway whose Models route is keyed: it answers
+            # 401 without a credential, so one read-only GET proves the key
+            # that was just stored instead of leaving the operator to meet the
+            # 401 on their first turn. Off the UI thread — it is a network call.
+            self._verify_moonmath_key(key)
         if kind == "nvidia" and nv_mod.is_nvidia(self.cfg.base_url):
             # The route is direct and the client already holds the *old* token,
             # which it read from the profile at switch time. Without this the
