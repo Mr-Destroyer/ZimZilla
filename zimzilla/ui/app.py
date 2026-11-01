@@ -2775,6 +2775,11 @@ class ZimZillaApp(App):
         # instead of billing a model at DEFAULT_PRICE.
         nv_catalog = (nv_mod.cached_models()
                       if active == "nvidia" else None)
+        # Zro's is fetched too, and is the one catalog that carries a real price
+        # *and* a free-plan flag at once — so it is what makes /model list the
+        # free daily models first and price the rest correctly.
+        mm_catalog = (mm_mod.cached_models()
+                      if active == "moonmath" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -2787,7 +2792,8 @@ class ZimZillaApp(App):
                 src = sources_mod.discover().get(active)
                 hosted = {"tokenharbour": "TokenHarbour", "openrouter": "OpenRouter",
                           "unorouter": "UnoRouter", "aihubmix": "AIHubMix",
-                          "beatapi": "BeatAPI", "antseed": "AntSeed"}
+                          "beatapi": "BeatAPI", "antseed": "AntSeed",
+                          "moonmath": "Zro (MoonMath.ai)"}
                 label = src.label if src else hosted.get(active, active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
@@ -2799,7 +2805,8 @@ class ZimZillaApp(App):
             order = self._model_display_order(
                 models,
                 th_catalog or as_catalog or uno_catalog or ah_catalog
-                or bp_catalog or ic_catalog or inf_catalog or nv_catalog)
+                or bp_catalog or ic_catalog or inf_catalog or nv_catalog
+                or mm_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -2815,7 +2822,7 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {shown:<26}", style=style)
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
-                                        inf_catalog, nv_catalog)
+                                        inf_catalog, nv_catalog, mm_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -2881,6 +2888,13 @@ class ZimZillaApp(App):
                     "developer tier, not a per-model\n"
                     "  price. The catalog lists more than the account can call\n",
                     style=p.dim)
+            elif active == "moonmath":
+                t.append(
+                    f"  catalog {_catalog_clause(mm_mod.catalog_age(), mm_mod.CACHE_TTL)}"
+                    " — /moonmath-models shows the\nfree ones; free means the "
+                    "Free plan's daily allowance, and every model\n"
+                    "  still carries a published rate\n",
+                    style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -2905,6 +2919,12 @@ class ZimZillaApp(App):
         # the membership test. Without this, every free AntSeed model would be
         # refused by the very check that exists to catch typos.
         check_name = name.split("@", 1)[1] if (active == "antseed" and "@" in name) else name
+        # Zro accepts its ids bare and `zro/`-prefixed, so a name typed in the
+        # spelling the provider's own docs use has to be checked against the
+        # catalog's bare ids rather than refused as "not served" for carrying a
+        # prefix the gateway ignores.
+        if active == "moonmath" and check_name.lower().startswith("zro/"):
+            check_name = check_name[4:]
         # Logfare is in this tuple for the same reason as the others, and its
         # absence was the same bug a third time: its list is FETCHED, so with a
         # cold or expired cache `models` is the hardcoded KNOWN_MODELS fallback,
@@ -2916,7 +2936,7 @@ class ZimZillaApp(App):
         # wrong answer was the common case rather than the corner.
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi",
-                      "iteracompute", "infronai", "nvidia") and (
+                      "moonmath", "iteracompute", "infronai", "nvidia") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -2991,6 +3011,15 @@ class ZimZillaApp(App):
                     fetched = [m for m in (got or []) if m.chat] or None
                 else:
                     fetched = list(nv_catalog)
+            elif active == "moonmath":
+                # Keyless and public: /models on the host needs no credential.
+                # Fetched when the cache is cold or expired so a live model is
+                # not refused against a stale list.
+                if mm_catalog is None:
+                    got, _ = mm_mod.fetch_models()
+                    fetched = [m for m in (got or []) if m.chat] or None
+                else:
+                    fetched = list(mm_catalog)
             elif active == "logfare":
                 if lf_catalog is None:
                     # The status API is public — no key, so this works before
@@ -3015,6 +3044,8 @@ class ZimZillaApp(App):
                     inf_catalog = fetched
                 elif active == "nvidia":
                     nv_catalog = fetched
+                elif active == "moonmath":
+                    mm_catalog = fetched
                 elif active == "logfare":
                     lf_catalog = fetched
                 models = tuple(m.id for m in fetched)
@@ -3072,7 +3103,7 @@ class ZimZillaApp(App):
     def _model_note(self, name: str, catalog, lf_catalog=None,
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
                     ic_catalog=None, inf_catalog=None,
-                    nv_catalog=None) -> str:
+                    nv_catalog=None, mm_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -3109,6 +3140,8 @@ class ZimZillaApp(App):
             live = inf_mod.price_for(name, inf_catalog)
         if live is None:
             live = nv_mod.price_for(name, nv_catalog)
+        if live is None:
+            live = mm_mod.price_for(name, mm_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
