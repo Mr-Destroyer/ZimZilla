@@ -197,6 +197,7 @@ _CREDENTIAL_PROFILES = (
     ("unorouter", "UnoRouter", "ANTHROPIC_AUTH_TOKEN"),
     ("aihubmix", "AIHubMix", "ANTHROPIC_AUTH_TOKEN"),
     ("beatapi", "BeatAPI", "ANTHROPIC_AUTH_TOKEN"),
+    ("moonmath", "Zro", "ANTHROPIC_AUTH_TOKEN"),
     ("iteracompute", "IteraCompute", "ANTHROPIC_AUTH_TOKEN"),
     ("ldxhub", "LDXHub", "LDXHUB_API_KEY"),
     ("shodan", "Shodan", "SHODAN_API_KEY"),
