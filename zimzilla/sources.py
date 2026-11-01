@@ -576,7 +576,24 @@ def catalog_models(key: str) -> list | None:
     if key == "nvidia":
         from . import nvidia as nv_mod
         return nv_mod.cached_models()
+    if key == "moonmath":
+        from . import moonmath as mm_mod
+        return mm_mod.cached_models()
     return None
+
+
+def _matches(entry, model: str) -> bool:
+    """Whether a catalog *entry* is the model *model* names.
+
+    Exact id first, then any alias the source's own module exposes. Zro
+    publishes bare ids (``glm-5.3``) but accepts a ``zro/`` prefix on the wire,
+    and a turn sent as ``zro/glm-5.3`` has to price and size exactly like the
+    bare id — otherwise the alias would silently fall back to this harness's
+    estimate table and a free model would be billed.
+    """
+    if getattr(entry, "id", None) == model:
+        return True
+    return model in (getattr(entry, "aliases", ()) or ())
 
 
 def context_window_for(base_url: str, model: str) -> int | None:
@@ -603,7 +620,7 @@ def context_window_for(base_url: str, model: str) -> int | None:
     if not cached:
         return None
     for entry in cached:
-        if getattr(entry, "id", None) != model:
+        if not _matches(entry, model):
             continue
         window = getattr(entry, "context_length", None)
         if isinstance(window, int) and window > 0:
@@ -640,7 +657,7 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
     if not cached:
         return None
     for entry in cached:
-        if getattr(entry, "id", None) != model:
+        if not _matches(entry, model):
             continue
         if getattr(entry, "free", False):
             return (0.0, 0.0)
@@ -678,7 +695,7 @@ def max_output_for(base_url: str, model: str) -> int | None:
     if not cached:
         return None
     for entry in cached:
-        if getattr(entry, "id", None) != model:
+        if not _matches(entry, model):
             continue
         for attr in ("max_output", "max_output_tokens"):
             value = getattr(entry, attr, None)
