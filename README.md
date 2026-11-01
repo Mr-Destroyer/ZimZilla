@@ -1504,6 +1504,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-beatapi` | switch upstream to BeatAPI — hosted, free models, native Messages |
 | `/beatapi-api-setup <key>` | store your BeatAPI API key |
 | `/beatapi-models` | the live free catalog — what is free and usable |
+| `/zim-moonmath` | switch upstream to Zro (MoonMath.ai) — hosted, native Messages, free daily models |
+| `/moonmath-api-setup <key>` | store your Zro API key (alias: `/zro-moonmath-api-setup`) |
+| `/moonmath-models` | the live free catalog — the Free plan's models |
 | `/zim-iteracompute [proxy]` | switch upstream to IteraCompute — direct Chat Completions; `proxy` for :4002 |
 | `/iteracompute-api-setup <key>` | store your IteraCompute API key |
 | `/iteracompute-models` | the live free catalog — what is free and usable |
@@ -1513,7 +1516,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
 | `/logfare-api-setup [key]` | use your own Logfare key; none ships in the repository |
-| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `iteracompute`, `infronai`, `antseed` |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/reverse-engineer <file>` | map an artifact (`.apk`, `.zip`, `.exe`, `.sh`, binary), then ask what you want changed |
 | `/reverse-engineer <file> --map` | map it only — no model turn, nothing sent |
