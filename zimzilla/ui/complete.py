@@ -51,6 +51,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
     ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
     ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
+    ("/zim-moonmath", "switch upstream to Zro (hosted, free daily models)"),
     ("/zim-iteracompute", "switch upstream to IteraCompute (local proxy, free models)"),
     ("/zim-infronai", "switch upstream to InfronAI (local proxy, free models)"),
     ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
@@ -64,6 +65,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/aihubmix-models", "the live free catalog — what is free and usable"),
     ("/beatapi-api-setup", "store your BeatAPI API key"),
     ("/beatapi-models", "the live free catalog — what is free and usable"),
+    ("/moonmath-api-setup", "store your Zro (MoonMath.ai) API key"),
+    ("/moonmath-models", "the Free plan's models — what is free and usable"),
     ("/iteracompute-api-setup", "store your IteraCompute API key"),
     ("/iteracompute-models", "the live free catalog — what is free and usable"),
     ("/infronai-api-setup", "store your InfronAI API key"),
@@ -375,7 +378,8 @@ class CompletionPopup(VerticalScroll):
                     # /models accepts.
                     "models": ["logfare", "tokenjuice", "tokenharbour",
                                "openrouter", "unorouter", "antseed", "aihubmix",
-                               "beatapi", "iteracompute", "infronai", "nvidia"],
+                               "beatapi", "iteracompute", "infronai", "nvidia",
+                               "moonmath"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so
