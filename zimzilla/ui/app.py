@@ -1521,6 +1521,11 @@ class ZimZillaApp(App):
         # instead of the ~57 chat entries the endpoint actually lists.
         elif sources_mod.active_key(self.cfg.base_url) == "nvidia":
             self._warm_nvidia_catalog()
+        # And Zro's, whose catalog is public and carries the prices /model
+        # prints — a cold cache would show the harness's estimate for models
+        # the gateway prices for itself.
+        elif sources_mod.active_key(self.cfg.base_url) == "moonmath":
+            self._warm_moonmath_catalog()
         # Replay anything the user typed while the boot animation was running.
         text = "".join(typed or [])
         inp.focus()
@@ -4130,6 +4135,17 @@ class ZimZillaApp(App):
         """
         creds = nv_mod.load_credentials()
         nv_mod.fetch_models(creds[0] if creds else "")
+
+    @work(exclusive=True, thread=True)
+    def _warm_moonmath_catalog(self) -> None:
+        """Fetch Zro's catalog once at startup, silently.
+
+        Silent for the same reason the other warm-ups are: a launch that cannot
+        reach the public catalog is still a working launch, /model falls back to
+        the declared list, and /moonmath-models reports the failure on demand.
+        A catalog that is merely fresh is not news.
+        """
+        mm_mod.fetch_models()
 
     def _show_logfare_models(self, models, err: str) -> None:
         p = self.palette
