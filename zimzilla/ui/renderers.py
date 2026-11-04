@@ -664,8 +664,13 @@ def finding_detail(f: dict, palette: Palette, *, indent: int = 2) -> Text:
 # reported, the target is the size a summary is expected to land at, and the
 # elapsed clock is the wall time of the request. Only the motion is decoration.
 
-#: Braille spinner, the same family the rest of the harness uses.
-COMPACT_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+#: Braille spinner, the same family the rest of the harness uses. Ten frames of
+#: one cell turning in place: at ~12fps the eye reads it as continuous motion,
+#: and every frame is the same width, so the text beside it never shifts.
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+#: Compaction reuses the same wheel rather than shipping a second, subtly
+#: different spinner — one animation language for the whole harness.
+COMPACT_SPINNER = SPINNER_FRAMES
 #: The four things compaction does, top to bottom. The bar per row is the
 #: transcript shrinking, and each row lags the one above it so the field reads
 #: as a wave folding down the column rather than four independent gauges.

@@ -1530,6 +1530,7 @@ class ZimZillaApp(App):
         text = "".join(typed or [])
         inp.focus()
         self.set_interval(1.0, self._tick_status)
+        self.set_interval(self.SPIN_TICK, self._tick_spin)
         self.set_interval(0.55, self._flash_cursor)
         self.set_interval(0.25, self._tick_rails)
         self._sync_rails()
@@ -1649,6 +1650,18 @@ class ZimZillaApp(App):
             bar.render_bar()
         self._sample_throughput()
 
+    def _tick_spin(self) -> None:
+        """Advance the busy wheel one frame. Idle ticks do no work at all.
+
+        A turn with no tokens arriving has nothing else repainting the bar, so
+        without this the only thing on screen is a still line and the words
+        changing every few seconds — which is what "frozen" looks like even
+        when the request is healthy.
+        """
+        bar = self._status_bar()
+        if bar is not None:
+            bar.tick_spin()
+
     def _sample_throughput(self) -> None:
         """Feed the waveform a tokens-per-second sample from the token delta.
 
@@ -1720,14 +1733,39 @@ class ZimZillaApp(App):
             chat.set_reasoning(self._reason_buf)
 
     async def _verb_spinner(self) -> None:
+        """Rotate the hacker verb while the wheel turns at ``SPIN_TICK``.
+
+        The words change slowly on purpose. They used to step every 0.35s,
+        which read as text flicker rather than motion — and with nothing else
+        moving, a silent turn looked like a still screen. The wheel is the
+        animation now; this only renames what it is doing, at a pace a person
+        can read.
+        """
         bar = self._status_bar()
         i = 0
         while self.busy:
-            if bar is not None and not bar.hold:
+            # A concrete activity ("bash grep …", "switching to X") is more
+            # useful than a mood word, and it is the only thing on screen while
+            # that tool runs — so the verb only renames a thinking state, never
+            # a running one. The wheel keeps turning either way; it is on its
+            # own tick, not this loop's.
+            thinking = bar is None or bar.activity in THINKING_VERBS or \
+                bar.activity in ("thinking", "")
+            if bar is not None and not bar.hold and thinking:
                 bar.activity = THINKING_VERBS[i % len(THINKING_VERBS)]
                 bar.render_bar()
             i += 1
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(self.VERB_SECONDS)
+
+    # ---- busy spinner -------------------------------------------------------
+    #: One wheel step every 0.08s — 12.5fps, the cadence the reference TUI's
+    #: spinner runs at. Fast enough to read as rotation, and repainting one line
+    #: of text at that rate costs nothing beside the stream it accompanies.
+    SPIN_TICK = 0.08
+    #: How long one hacker verb stays up. Far slower than the wheel: the motion
+    #: carries "still working"; the word only colours it. At 0.35s the two were
+    #: fighting, and the bar read as flickering text rather than a spinner.
+    VERB_SECONDS = 2.4
 
     # ---- compaction animation ---------------------------------------------
     #: Frames per second for the compaction panel and the rail sweep. 0.09s is

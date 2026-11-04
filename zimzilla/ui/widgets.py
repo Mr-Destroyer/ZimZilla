@@ -618,6 +618,11 @@ class StatusBar(Static):
         #: third of a second.
         self.hold = False
         self._compact_frame = 0
+        #: Frame of the busy spinner. Advanced by the app's fast tick, not by
+        #: the verb rotation: the wheel has to keep turning while a silent turn
+        #: is waiting on the upstream, or the bar looks frozen for as long as
+        #: the request takes.
+        self._spin_frame = 0
 
     def set_activity(self, activity: str, busy: bool = False,
                      hold: bool = False) -> None:
@@ -635,6 +640,20 @@ class StatusBar(Static):
         if self.busy:
             self._verb_index = (self._verb_index + 1) % len(verbs)
             self.activity = verbs[self._verb_index]
+
+    def tick_spin(self) -> None:
+        """Advance the busy spinner one frame.
+
+        Cheap when idle: no repaint is queued unless something is moving. The
+        frame is counted rather than derived from the clock so the animation is
+        purely additive — the same reason the boot emblem takes its time as a
+        parameter — and it stays smooth when the bar is repainted for other
+        reasons (a token delta, a tool activity) between ticks.
+        """
+        if not self.busy or self.hold:
+            return
+        self._spin_frame += 1
+        self.render_bar()
 
     def render_bar(self) -> None:
         p = self.palette
@@ -667,7 +686,10 @@ class StatusBar(Static):
             spin = COMPACT_SPINNER[self._compact_frame % len(COMPACT_SPINNER)]
             t.append(f"{spin} {self.activity}", style=f"bold {p.amber}")
         elif self.busy:
-            t.append(f"⟳ {self.activity}", style=f"bold {p.accent}")
+            from .renderers import SPINNER_FRAMES
+            spin = SPINNER_FRAMES[self._spin_frame % len(SPINNER_FRAMES)]
+            t.append(f"{spin} ", style=f"bold {p.accent}")
+            t.append(self.activity, style=f"bold {p.primary}")
         else:
             t.append(f"● {self.activity}", style=p.dim)
         self.update(t)
