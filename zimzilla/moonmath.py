@@ -390,6 +390,13 @@ def apply_to(cfg) -> tuple[str, str] | None:
     ``auth_token`` when it is set, and a stale ``api_key`` from another
     provider would be a credential for the wrong service sitting in memory.
 
+    The model is the profile's when it names one; when it does not, ``cfg`` is
+    left as it is. That is deliberate: ``apply_to`` also runs on the
+    launch-time restore, where the model may be an explicit ``--model`` the
+    operator typed, and overriding it here would silently discard the choice.
+    A *switch* that has no model to apply lands on :func:`default_free_model`
+    in the caller instead, where that intent is unambiguous.
+
     Returns ``None`` when no key can be found anywhere, and leaves *cfg* alone.
     """
     creds = load_credentials()

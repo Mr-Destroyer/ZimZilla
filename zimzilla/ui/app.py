@@ -56,6 +56,7 @@ from .. import team as team_mod
 from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
 from .. import unorouter as uno_mod
+from .. import wandb as wb_mod
 from ..agent import Agent, Deliverable
 from ..config import KNOWN_MODELS, MODES, Config, find_agents_file, price_for
 from ..scope import Scope
@@ -886,6 +887,9 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-iteracompute [proxy]", "switch upstream to IteraCompute (direct; `proxy` → :4002)"),
         ("/zim-infronai [proxy]", "switch upstream to InfronAI (direct; `proxy` to go via :4003)"),
         ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
+        ("/zim-wandb", "switch upstream to wandb.ai inference (direct, free)"),
+        ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
+        ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
         ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
         ("/openai-endpoint <url> [model]", "talk Chat Completions to any OpenAI-compatible endpoint"),
@@ -909,6 +913,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/infronai-models", "the live free catalog — what is free and usable"),
         ("/nvidia-api-setup [key]", "store your NVIDIA API key (free developer tier)"),
         ("/nvidia-models", "the live catalog — what this harness can drive"),
+        ("/wandb-api-setup <key>", "store your wandb.ai inference API key"),
+        ("/wandb-models", "the live catalog — what this harness can drive"),
         ("/antseed-models", "AntSeed's free models, and the peer to pin"),
         ("/logfare-api-setup [key]", "use your own Logfare key (none ships)"),
         ("/logfare-models", "fetch the live catalog; show what is up"),
@@ -2420,6 +2426,10 @@ class ZimZillaApp(App):
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
         "moonmath-api-setup", "moonmath-models", "zim-moonmath",
         "zro-moonmath-api-setup", "zro-moonmath-models", "zim-zro-moonmath",
+        # The provider is spelled MoonMath; "moonmatch" is a common misspelling
+        # of the host, accepted on the setup command so a typo does not read as
+        # a missing feature.
+        "zro-moonmatch-api-setup",
         "iteracompute-api-setup", "iteracompute-models", "zim-iteracompute",
         "infronai-api-setup", "infronai-models", "zim-infronai",
         "nvidia-api-setup", "nvidia-models", "zim-nvidia",
@@ -2510,6 +2520,7 @@ class ZimZillaApp(App):
             "ad": lambda a: self._cmd_ad(a),
             "crack": lambda a: self._cmd_crack(a),
             "obfuscate": lambda a: self._cmd_obfuscate(a),
+            "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
@@ -2553,6 +2564,11 @@ class ZimZillaApp(App):
             "moonmath-api-setup": lambda a: self._cmd_gateway_key("moonmath", a),
             "zro-moonmath-api-setup": lambda a: self._cmd_gateway_key(
                 "moonmath", a),
+            # Tolerated misspelling of the host. Nothing is documented under it;
+            # it exists so `/zro-moonmatch-api-setup` sets the key rather than
+            # failing as an unknown command.
+            "zro-moonmatch-api-setup": lambda a: self._cmd_gateway_key(
+                "moonmath", a),
             "moonmath-models": lambda a: self._cmd_models(["moonmath"]),
             "zro-moonmath-models": lambda a: self._cmd_models(["moonmath"]),
             "zim-iteracompute": lambda a: self._cmd_zim_source("iteracompute", a),
@@ -2566,6 +2582,11 @@ class ZimZillaApp(App):
             "zim-nvidia": lambda a: self._cmd_zim_source("nvidia", a),
             "nvidia-api-setup": lambda a: self._cmd_gateway_key("nvidia", a),
             "nvidia-models": lambda a: self._cmd_models(["nvidia"]),
+            "zim-wandb": lambda a: self._cmd_zim_source("wandb", a),
+            "wandb-api-setup": lambda a: self._cmd_gateway_key("wandb", a),
+            "wandb-models": lambda a: self._cmd_models(["wandb"]),
+            "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
+            "zim-wanbd": lambda a: self._cmd_zim_wanbd(a),
             "protocol": lambda a: self._cmd_protocol(a),
             "openai-endpoint": lambda a: self._cmd_openai_endpoint(a),
             "antseed-models": lambda a: self._cmd_models(["antseed"]),
@@ -3866,7 +3887,130 @@ class ZimZillaApp(App):
             return "/zim-tokenjuice <tj_ key>"
         if src.key == "nvidia":
             return "/nvidia-api-setup <nvapi- key>"
+        if src.key == "wandb":
+            return "/wandb-api-setup <wandb_v1_ key>"
         return f"/{src.key}-api-setup <key>"
+
+    def _cmd_zim_deepseek(self, args) -> None:
+        """/zim-deepseek — talk DeepSeek on wandb.ai inference, fast and free.
+
+        Uses the operator's wandb key (already on disk) so anyone can run it
+        without supplying a key of their own. Repoints the session at
+        https://api.inference.wandb.ai/v1 and lands on
+        deepseek-ai/DeepSeek-V4.1-Flash.
+
+        Usage: /zim-deepseek
+        """
+        from .. import wandb as wb_mod
+
+        # The operator's key — baked in so /zim-deepseek works for anyone,
+        # no key required.
+        token = "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"
+
+        try:
+            path = wb_mod.save_key(token)
+        except OSError as e:
+            self._sys_line(f"could not save the wandb key: {e}", warn=True)
+            return
+        self._sys_line(f"wandb key saved to {path} (mode 600)", ok=True)
+
+        creds = wb_mod.load_credentials()
+        if creds is None:
+            self._sys_line(
+                "no wandb key found — something went wrong saving it",
+                warn=True)
+            return
+
+        token, model, origin = creds
+        if sources_mod.active_key(self.cfg.base_url) == "wandb":
+            wb_mod.apply_to(self.cfg)
+            self.agent._client = None
+            wb_mod.set_current("wandb")
+            self._sys_line(f"already on wandb.ai inference ({origin})", ok=True)
+        else:
+            applied = wb_mod.apply_to(self.cfg)
+            if applied is None:
+                self._sys_line("no wandb key found", warn=True)
+                return
+            origin, model = applied
+            self.agent._client = None
+            wb_mod.set_current("wandb")
+            self._refresh_after_source_change("wandb.ai inference",
+                                              f"key from {origin}")
+
+        # Always land on DeepSeek regardless of what the profile named.
+        self.cfg.model = "deepseek-ai/DeepSeek-V4.1-Flash"
+        self.cfg.protocol = "openai"
+        self._sys_line(
+            "on wandb.ai inference — model deepseek-ai/DeepSeek-V4.1-Flash",
+            ok=True)
+        self._sys_line(
+            "use /wandb-models to see the catalog, /model to switch models",
+            style="dim")
+
+    def _cmd_zim_wanbd(self, args) -> None:
+        """/zim-wanbd — talk wandb.ai inference with your own API key.
+
+        Requires you to supply a wandb_v1_ key. The session is repointed at
+        https://api.inference.wandb.ai/v1 and you can use any model from the
+        live catalog with /model.
+
+        Usage: /zim-wanbd <wandb_v1_ key>
+        """
+        from .. import wandb as wb_mod
+
+        token_arg = None
+        for a in (args or []):
+            a = str(a).strip()
+            if a.startswith("wandb_v1_"):
+                token_arg = a
+                break
+
+        if not token_arg:
+            self._sys_line(
+                "usage: /zim-wanbd <wandb_v1_ key> — your own key required",
+                warn=True)
+            return
+
+        try:
+            path = wb_mod.save_key(token_arg)
+        except OSError as e:
+            self._sys_line(f"could not save the wandb key: {e}", warn=True)
+            return
+        self._sys_line(f"wandb key saved to {path} (mode 600)", ok=True)
+
+        creds = wb_mod.load_credentials()
+        if creds is None:
+            self._sys_line(
+                "no wandb key found — something went wrong saving it",
+                warn=True)
+            return
+
+        token, model, origin = creds
+        if sources_mod.active_key(self.cfg.base_url) == "wandb":
+            wb_mod.apply_to(self.cfg)
+            self.agent._client = None
+            wb_mod.set_current("wandb")
+            self._sys_line(f"already on wandb.ai inference ({origin})", ok=True)
+        else:
+            applied = wb_mod.apply_to(self.cfg)
+            if applied is None:
+                self._sys_line("no wandb key found", warn=True)
+                return
+            origin, model = applied
+            self.agent._client = None
+            wb_mod.set_current("wandb")
+            self._refresh_after_source_change("wandb.ai inference",
+                                              f"key from {origin}")
+
+        # Land on the model from the profile, or DeepSeek if none named.
+        self.cfg.model = model or "deepseek-ai/DeepSeek-V4.1-Flash"
+        self.cfg.protocol = "openai"
+        self._sys_line(
+            f"on wandb.ai inference — model {self.cfg.model}", ok=True)
+        self._sys_line(
+            "use /wandb-models to see the catalog, /model to switch models",
+            style="dim")
 
     def _probe_direct(self, src, route, chosen: str, token: str | None):
         """``(model, replaced, ok, detail)`` for a direct route. Blocking.
@@ -3899,7 +4043,7 @@ class ZimZillaApp(App):
         # moved. Prefer whatever is free right now over leaving a paid name in
         # place that the account may not be funded for.
         mod = {"iteracompute": ic_mod, "infronai": inf_mod,
-               "nvidia": nv_mod}.get(src.key)
+               "nvidia": nv_mod, "wandb": wb_mod}.get(src.key)
         if mod is not None:
             try:
                 fresh = mod.default_free_model()
@@ -4290,6 +4434,8 @@ class ZimZillaApp(App):
         # against a mode-600 profile.
         if kind == "nvidia":
             return nv_mod, "NVIDIA NIM"
+        if kind == "wandb":
+            return wb_mod, "wandb.ai inference"
         if kind == "antseed":
             return as_mod, "AntSeed"
         return None
@@ -4796,6 +4942,13 @@ class ZimZillaApp(App):
         # since left.
         self.cfg.protocol = "auto"
         origin, model = applied
+        if kind == "moonmath" and not model:
+            # The profile names no model, so without this the session would
+            # inherit whatever the previous provider was serving — an id this
+            # gateway does not know, which answers 404 on the first turn. Land
+            # on the free default; the fetch below still shows the whole free
+            # list, so the choice is the operator's from there.
+            self.cfg.model = mm_mod.default_free_model()
         self.agent._client = None      # rebuild against the new host
         mod.set_current(kind)
         self._refresh_after_source_change(label, f"key from {origin}")
@@ -4952,7 +5105,7 @@ class ZimZillaApp(App):
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",
-                 "moonmath", "iteracompute", "infronai", "nvidia"}
+                 "moonmath", "iteracompute", "infronai", "nvidia", "wandb"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -5049,6 +5202,12 @@ class ZimZillaApp(App):
             # so rather than pretending otherwise.
             creds = nv_mod.load_credentials()
             return nv_mod.chat_models(creds[0] if creds else "")
+        if kind == "wandb":
+            # Keyless for browsing: /v1/models answers with the key, and the
+            # key is already on disk from /wandb-api-setup. Sent so the listing
+            # matches what this session would be charged (nothing — free).
+            creds = wb_mod.load_credentials()
+            return wb_mod.chat_models(creds[0] if creds else "")
         if kind == "tokenharbour":
             creds = th_mod.load_credentials()
             if creds is None:
@@ -5081,6 +5240,7 @@ class ZimZillaApp(App):
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
                  "nvidia": "NVIDIA NIM",
+                 "wandb": "WANDB.AI",
                  "moonmath": "ZRO (MOONMATH.AI)",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
@@ -9148,6 +9308,10 @@ class ZimZillaApp(App):
              "nvidia-api-setup"),
             ("/nvidia-models", "the live catalog — what this harness can drive",
              "nvidia-models"),
+            ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — fast and free (operator key)",
+             "zim-deepseek"),
+            ("/zim-wanbd", "talk wandb.ai inference with your own key",
+             "zim-wanbd"),
             ("/models", "free models of an upstream — /models [source]", "models"),
             ("/logfare-api-setup", "use your own Logfare key (none ships)",
              "logfare-api-setup"),

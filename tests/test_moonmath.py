@@ -595,6 +595,10 @@ def test_apply_to_and_default_endpoint(tmp: Path) -> None:
               mm.apply_to(cfg) is None and cfg.base_url == "https://logfare.ai/v1",
               cfg.base_url)
 
+        # An explicit choice — `--model`, or a switch made in-app — must survive
+        # the launch-time restore, which is why apply_to does not invent one.
+        cfg.model = "glm-5.3"
+
         mm.save_key("sk-test-key-abcdefghijkl")
         applied = mm.apply_to(cfg)
         check("apply: it returns the origin and model",
@@ -606,6 +610,10 @@ def test_apply_to_and_default_endpoint(tmp: Path) -> None:
               cfg.auth_token == "sk-test-key-abcdefghijkl")
         check("apply: the stale api_key is cleared", cfg.api_key == "",
               repr(cfg.api_key))
+        check("apply: an explicit model is not overwritten",
+              cfg.model == "glm-5.3", cfg.model)
+        check("apply: the profile's empty model is still reported",
+              applied is not None and applied[1] == "", str(applied))
 
         check("defaults: the built-in default is taken over",
               mm.applies_to_default_endpoint("http://localhost:4001"))
@@ -698,6 +706,17 @@ def test_tui_surfaces() -> None:
                 "zim-zro-moonmath"):
         check(f"tui: /{cmd} is an accepted alias", f'"{cmd}":' in app_src)
 
+    # The host is MoonMath, but "moonmatch" is a common misspelling of it. The
+    # setup command tolerates it rather than reporting the feature as missing.
+    check("tui: the misspelled setup command still sets the key",
+          '"zro-moonmatch-api-setup":' in app_src)
+    check("tui: the misspelled source name still lists free models",
+          '"zro-moonmatch": "moonmath"' in app_src)
+
+    # A switch with no model in the profile must not inherit the previous
+    # provider's id — that one is not served here and answers 404 on turn one.
+    check("tui: a switch with no model lands on the free default",
+          "self.cfg.model = mm_mod.default_free_model()" in app_src)
     check("tui: the gateway table knows it",
           'return mm_mod, "Zro (MoonMath.ai)"' in app_src)
     check("tui: the status pane lists it",

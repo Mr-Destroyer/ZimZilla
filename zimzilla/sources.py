@@ -192,6 +192,15 @@ TOKENJUICE_DIRECT = DirectRoute(
 #: there is no proxy name to translate. See :mod:`zimzilla.nvidia`.
 NVIDIA_DIRECT = DirectRoute(base_url="https://integrate.api.nvidia.com/v1")
 
+
+#: wandb's route, declared rather than read from a proxy config.
+#:
+#: ``api.inference.wandb.ai/v1`` speaks Chat Completions itself, so — like
+#: Token Juice and NVIDIA — there is no LiteLLM hop and nothing to start. The
+#: alias map is empty on purpose: the catalog's ids are already the ids that go
+#: on the wire. See :mod:`zimzilla.wandb`.
+WANDB_DIRECT = DirectRoute(base_url="https://api.inference.wandb.ai/v1")
+
 #: Logfare's route, declared rather than read from a proxy config.
 #:
 #: ``https://logfare.ai/v1`` serves Chat Completions itself, so the bundled
@@ -212,13 +221,14 @@ LOGFARE_DIRECT = DirectRoute(
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
 #: where they go.
-DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia"})
+DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia", "wandb"})
 
 #: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
 DECLARED_ROUTES: dict[str, DirectRoute] = {
     "logfare": LOGFARE_DIRECT,
     "tokenjuice": TOKENJUICE_DIRECT,
     "nvidia": NVIDIA_DIRECT,
+    "wandb": WANDB_DIRECT,
 }
 
 
@@ -414,6 +424,14 @@ NVIDIA_MODELS: tuple[str, ...] = (
     "meta/muse-glimmer-30b",                   # 14.5s with tools
 )
 
+#: wandb's declared fallback. Its real catalog is fetched from the public
+#: Models endpoint (see ``wandb.py``); this is what ``/model`` shows before
+#: that fetch. The single entry is the model measured to answer a chat turn
+#: in a few seconds — the one the operator asked for by name.
+WANDB_MODELS: tuple[str, ...] = (
+    "deepseek-ai/DeepSeek-V4.1-Flash",
+)
+
 #: Zro's declared fallback. Its real catalog is fetched from the public
 #: ``/models`` route (see ``moonmath.py``); this is what ``/model`` shows before
 #: that fetch. The catalog carried three chat models when this was written, and
@@ -437,6 +455,7 @@ MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "infronai": INFRONAI_MODELS,
     "nvidia": NVIDIA_MODELS,
     "moonmath": MOONMATH_MODELS,
+    "wandb": WANDB_MODELS,
 }
 
 
@@ -538,6 +557,10 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import infronai as inf_mod
         cached = inf_mod.cached_ids()
         return tuple(cached) if cached else None
+    if key == "wandb":
+        from . import wandb as wb_mod
+        cached = wb_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     return MODELS_BY_KEY.get(key) or None
 
 
@@ -576,6 +599,9 @@ def catalog_models(key: str) -> list | None:
     if key == "nvidia":
         from . import nvidia as nv_mod
         return nv_mod.cached_models()
+    if key == "wandb":
+        from . import wandb as wb_mod
+        return wb_mod.cached_models()
     if key == "moonmath":
         from . import moonmath as mm_mod
         return mm_mod.cached_models()
@@ -786,6 +812,14 @@ def _profile_candidates(key: str) -> list[Path]:
         return [
             ZIMZILLA_HOME / "nvidia" / "source",
         ]
+    if key == "wandb":
+        # No credential ships either, and none could: a wandb key is the
+        # operator's own inference key. Until /wandb-api-setup writes this
+        # file the source is not discovered, which is what makes /zim-wandb
+        # name the setup command instead of failing at request time.
+        return [
+            ZIMZILLA_HOME / "wandb" / "source",
+        ]
     return [
         ZIMZILLA_HOME / "tokenjuice" / "source",
         DEFAULT_HOME / "claude-source" / "deepseek-claude",
@@ -861,6 +895,12 @@ def discover() -> dict[str, Source]:
                     "nvidia/nemotron-3.5-lightning-30b-a3b")
     if nvidia:
         found["nvidia"] = nvidia
+    # Direct-only, like Token Juice and NVIDIA: no port and no proxy files, so
+    # the profile is the whole install. Absent until /wandb-api-setup has run.
+    wandb = _build("wandb", "wandb.ai inference", 0,
+                   "deepseek-ai/DeepSeek-V4.1-Flash")
+    if wandb:
+        found["wandb"] = wandb
     return found
 
 
@@ -1064,6 +1104,7 @@ def active_key(base_url: str) -> str | None:
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
+    from . import wandb as wb_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
     if or_mod.is_openrouter(base_url):
@@ -1095,6 +1136,8 @@ def active_key(base_url: str) -> str | None:
     # discover() to find — is still recognised as being on this source.
     if nv_mod.is_nvidia(base_url):
         return "nvidia"
+    if wb_mod.is_wandb(base_url):
+        return "wandb"
     # Checked before the port match, and by port rather than by name: the buyer
     # hands out a plain http://localhost:8377 with no "antseed" in it, and the
     # regex below would otherwise find port 8377, miss it in source_for_port()
