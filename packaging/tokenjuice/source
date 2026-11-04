@@ -14,7 +14,7 @@
 # route: the URL below is the upstream, not a localhost port.
 
 export ANTHROPIC_BASE_URL="https://api.tokenjuice.ai/v1"
-export ANTHROPIC_AUTH_TOKEN="tj_QKaFlDpyNV5VeSsuwpGeaNvM58POZ1lOe7ZBHjZpW5k"
+export ANTHROPIC_AUTH_TOKEN="tj_7Gcp8XE3buGGWgBOlzoBPLZG-YhGkMPdMzYF3ilDRlg"
 # The id the upstream serves. The snapshot suffix rotates; /zim-tokenjuice
 # re-reads the live catalog on every switch and moves to the current one.
 export ANTHROPIC_MODEL="deepseek-ai/DeepSeek-V4.1-Flash-1017"
