@@ -3945,8 +3945,7 @@ class ZimZillaApp(App):
             "on wandb.ai inference — model deepseek-ai/DeepSeek-V4.1-Flash",
             ok=True)
         self._sys_line(
-            "use /wandb-models to see the catalog, /model to switch models",
-            style="dim")
+            "use /wandb-models to see the catalog, /model to switch models")
 
     def _cmd_zim_wanbd(self, args) -> None:
         """/zim-wanbd — talk wandb.ai inference with your own API key.
@@ -4009,8 +4008,7 @@ class ZimZillaApp(App):
         self._sys_line(
             f"on wandb.ai inference — model {self.cfg.model}", ok=True)
         self._sys_line(
-            "use /wandb-models to see the catalog, /model to switch models",
-            style="dim")
+            "use /wandb-models to see the catalog, /model to switch models")
 
     def _probe_direct(self, src, route, chosen: str, token: str | None):
         """``(model, replaced, ok, detail)`` for a direct route. Blocking.
