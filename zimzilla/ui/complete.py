@@ -55,6 +55,9 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-iteracompute", "switch upstream to IteraCompute (local proxy, free models)"),
     ("/zim-infronai", "switch upstream to InfronAI (local proxy, free models)"),
     ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
+    ("/zim-wandb", "switch upstream to wandb.ai inference (direct, free)"),
+    ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
+    ("/zim-wanbd", "talk wandb.ai inference — your own key"),
     ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
@@ -73,6 +76,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/infronai-models", "the live free catalog — what is free and usable"),
     ("/nvidia-api-setup", "store your NVIDIA API key (free developer tier)"),
     ("/nvidia-models", "the live catalog — what this harness can drive"),
+    ("/wandb-api-setup", "store your wandb.ai inference API key"),
+    ("/wandb-models", "the live catalog — what this harness can drive"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
     ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
     ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
@@ -379,7 +384,7 @@ class CompletionPopup(VerticalScroll):
                     "models": ["logfare", "tokenjuice", "tokenharbour",
                                "openrouter", "unorouter", "antseed", "aihubmix",
                                "beatapi", "iteracompute", "infronai", "nvidia",
-                               "moonmath"],
+                               "moonmath", "wandb"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so
