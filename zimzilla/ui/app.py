@@ -876,7 +876,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
     ("upstreams", "UPSTREAMS", "where the tokens come from", [
         ("/zim-source", "show upstream sources and their status"),
         ("/zim-logfare", "switch upstream to Logfare (direct, all models)"),
-        ("/zim-tokenjuice", "Token Juice — unlimited quota paused, back in a few days"),
+        ("/zim-tokenjuice", "switch upstream to Token Juice (direct, shared key)"),
         ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
         ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
         ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
@@ -2481,12 +2481,7 @@ class ZimZillaApp(App):
             "reverse-engineer-tools": lambda a: self._cmd_reverse_engineer_tools(a),
             "zim-opencode": lambda a: self._cmd_zim_opencode(a),
             "zim-logfare": lambda a: self._cmd_zim_source("logfare", a),
-            # The upstream's unlimited quota is finished for now (see
-            # _cmd_tokenjuice_paused), so the switch itself is gated. The key
-            # half of the old dispatch — `/zim-tokenjuice <tj_ key>` — survives
-            # inside the pause: a key saved today is still the key the route
-            # takes the moment it comes back.
-            "zim-tokenjuice": lambda a: self._cmd_tokenjuice_paused(a),
+            "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice", a),
             # Two spellings, one handler. The shipped name carries the "e" its
             # siblings have (/zim-tokenjuice, /tokenjuice-api-setup in the
             # docs); the shorter one is accepted because it was asked for by
@@ -3437,39 +3432,6 @@ class ZimZillaApp(App):
         self._sys_line(f"theme switched to {name}", ok=True)
 
     # ---- upstream sources ------------------------------------------------
-    # Token Juice is parked: its unlimited quota is finished, so /zim-tokenjuice
-    # no longer switches anything. It answers with where the route went instead
-    # — the other unlimited sources — and, since a key may still be worth
-    # storing while the route is dark, the `<tj_ key>` argument is still saved.
-    # Delete this and restore the plain dispatch when the quota comes back.
-    def _cmd_tokenjuice_paused(self, args: list[str] | None = None) -> None:
-        """/zim-tokenjuice — Token Juice's unlimited quota has run out.
-
-        The switch is refused, and the alternatives named in the same breath, so
-        the operator gets a next step and not just a refusal. A ``tj_`` key is
-        still saved (that write is local, and the profile is what the route uses
-        the instant it is back), because the quota finishing is not a reason to
-        lose a key that was just handed over.
-        """
-        token_arg = next((str(a).strip() for a in (args or [])
-                          if sources_mod.is_tokenjuice_key(str(a))), None)
-        if token_arg:
-            try:
-                path = sources_mod.save_token(token_arg)
-            except OSError as e:
-                self._sys_line(f"could not save the Token Juice key: {e}",
-                               warn=True)
-                return
-            self._sys_line(
-                f"Token Juice key saved to {path} (mode 600) — it will be the "
-                f"key the route takes when the quota returns", ok=True)
-
-        self._sys_line(
-            "Token Juice unlimited quota finished — it will be back in a few "
-            "days. Till then use the other unlimited sources: "
-            "/zim-tokenharbour, /zim-nvidia, /zim-beatapi, /zim-moonmath",
-            warn=True)
-
     # /zim-logfare and /zim-tokenjuice repoint the session at a different
     # upstream. Both go down independently, so this is the failover: the key,
     # base_url and client are all rebuilt in place, and the choice is persisted
@@ -3531,12 +3493,6 @@ class ZimZillaApp(App):
                     # up" is still true and still worth knowing.
                     t.append(f"      under construction: {src.under_construction}\n",
                              style=p.amber)
-            # Token Juice is still discovered and still reachable, so its row
-            # above reads as switchable — say under it why /zim-tokenjuice
-            # refuses, rather than leaving two surfaces to disagree.
-            if "tokenjuice" in found:
-                t.append("      unlimited quota finished — /zim-tokenjuice is "
-                         "paused, back in a few days\n", style=p.amber)
             # TokenHarbour has no port and no local proxy, so it is listed from
             # its credential rather than from discover() — "proxy up" is not a
             # question you can ask a hosted gateway.
@@ -4952,7 +4908,9 @@ class ZimZillaApp(App):
                     "them, or name one: /models openrouter", warn=True)
                 return
         # The brand spelling, accepted wherever the source key is typed.
-        key = {"zro-moonmath": "moonmath", "zro": "moonmath"}.get(key, key)
+        # "moonmatch" is the tolerated misspelling of the host, alongside it.
+        key = {"zro-moonmath": "moonmath", "zro-moonmatch": "moonmath",
+               "zro": "moonmath"}.get(key, key)
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",

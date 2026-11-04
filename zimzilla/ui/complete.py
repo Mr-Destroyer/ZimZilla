@@ -41,7 +41,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-logfare", "switch upstream to Logfare (direct, all models)"),
     ("/logfare-api-setup", "use your own Logfare key (none ships)"),
     ("/logfare-models", "fetch the live catalog; show what is up"),
-    ("/zim-tokenjuice", "Token Juice — unlimited quota paused, back in a few days"),
+    ("/zim-tokenjuice", "switch upstream to Token Juice (direct, shared key)"),
     ("/tokenjuice-api-setup", "your own tj_ key — or fall back to the shared one"),
     ("/zim-source", "show upstream sources and status"),
     ("/protocol", "which wire protocol the endpoint speaks"),
