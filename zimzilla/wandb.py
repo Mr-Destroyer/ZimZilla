@@ -29,6 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 ZIMZILLA_HOME = Path(os.environ.get("ZIMZILLA_HOME") or (Path.home() / ".zimzilla"))
 
@@ -325,6 +326,20 @@ def cached_ids() -> list[str] | None:
 
 def clear_cache() -> None:
     _CACHE.clear()
+
+
+def looks_like_key(value: str) -> bool:
+    """A cheap sanity check before writing a key, so a typo fails loudly.
+
+    Deliberately loose -- the upstream decides what is valid, not us -- but
+    strict enough to catch a pasted shell line or a bare word. The
+    ``wandb_v1_`` prefix is *not* required: a real key of an unexpected shape
+    is worth more stored than rejected, and a wrong one only costs a single 401.
+    """
+    value = (value or "").strip()
+    if len(value) < 20 or any(c.isspace() for c in value):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._:\-]+", value))
 
 
 def model_for(model: str, models: list[Model] | None) -> Model | None:

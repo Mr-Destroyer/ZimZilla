@@ -940,7 +940,7 @@ def switchable(exclude: str | None = None) -> list[str]:
     out: list[str] = []
     for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
                 "tokenharbour", "moonmath", "infronai", "iteracompute",
-                "antseed", "nvidia", "tokenjuice", "logfare"):
+                "antseed", "nvidia", "tokenjuice", "logfare", "wandb"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -980,9 +980,11 @@ def _gateway_module(key: str):
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
+    from . import wandb as wb_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
         "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
+        "wandb": wb_mod,
     }.get(key)
 
 
@@ -1046,7 +1048,7 @@ def _state_file() -> Path:
 #: buyer is started and stopped by the operator, so requiring it to be up at
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
-                          "aihubmix", "beatapi", "moonmath"})
+                          "aihubmix", "beatapi", "moonmath", "wandb"})
 
 
 def current_key() -> str | None:

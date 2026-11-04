@@ -3645,7 +3645,7 @@ class ZimZillaApp(App):
                      "                 /zim-unorouter,  /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
-                     "                 /zim-moonmath,\n"
+                     "                 /zim-moonmath,  /zim-wandb,\n"
                      "                 or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
