@@ -92,6 +92,13 @@ class Model:
             )
         )
 
+    def blurb(self) -> str:
+        """A one-line description for the picker."""
+        bits: list[str] = ["free"]
+        if self.context_length:
+            bits.append(f"{self.context_length // 1000}k ctx")
+        return " · ".join(bits)
+
 
 # ---------------------------------------------------------------------------
 # keys and profiles
