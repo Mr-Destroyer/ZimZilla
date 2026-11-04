@@ -93,6 +93,7 @@ class Model:
             )
         )
 
+    @property
     def blurb(self) -> str:
         """A one-line description for the picker."""
         bits: list[str] = ["free"]
