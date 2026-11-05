@@ -178,7 +178,7 @@ async def test_filter(tmp: Path) -> None:
         await pilot.pause()
         blob = "\n".join(_lines(app))
         check("filter: all restores every section",
-              "OFFENSIVE" in blob and "RECON" in blob and "89 commands" in blob,
+              "OFFENSIVE" in blob and "RECON" in blob and "97 commands" in blob,
               blob[:300])
 
         fresh()

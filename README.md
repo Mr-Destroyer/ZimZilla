@@ -180,7 +180,8 @@ read from Logfare's own status API, so a model it adds later works without
 waiting for a ZimZilla release.
 
 Other upstreams are `/zim-iteracompute`, `/zim-infronai`, `/zim-nvidia`,
-`/zim-tokenharbour`, `/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`,
+`/zim-wandb`, `/zim-inferx`, `/zim-tokenharbour`, `/zim-openrouter`,
+`/zim-unorouter`, `/zim-aihubmix`,
 `/zim-beatapi`, `/zim-moonmath` and `/zim-antseed`, each with your own
 credential, a shared one, or none at all.
 
@@ -749,7 +750,7 @@ or a colour diff of the change, and three keys:
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, or Chat Completions to an endpoint that serves it, so it can run
 against a hosted gateway, a direct upstream or a local proxy without any code
-caring which. Twelve sources are wired up:
+caring which. Fourteen sources are wired up:
 
 | Source | Endpoint | Key | How it starts |
 |---|---|---|---|
@@ -758,6 +759,8 @@ caring which. Twelve sources are wired up:
 | **IteraCompute** | `:4002` | yours | direct (proxy on `:4002` if asked) — free Qwen tier |
 | **InfronAI** | `:4003` | yours | direct (proxy on `:4003` if asked) — free tier, $5 balance required |
 | **NVIDIA NIM** | `integrate.api.nvidia.com` | yours (`nvapi-…`) | direct, no proxy — free developer tier, 57 chat models |
+| **wandb.ai inference** | `api.inference.wandb.ai/v1` | yours (`wandb_v1_…`) | direct, no proxy — free preview, Chat Completions |
+| **InferX** | `model.inferx.net/endpoints/v1` | yours (`ix_…`) | direct, no proxy — tenant-scoped endpoint, key-gated catalog |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
 | **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
 | **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
@@ -767,15 +770,17 @@ caring which. Twelve sources are wired up:
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
-`/zim-infronai`, `/zim-nvidia`, `/zim-tokenharbour`, `/zim-openrouter`,
+`/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
+`/zim-tokenharbour`, `/zim-openrouter`,
 `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi`, `/zim-moonmath` or
 `/zim-antseed`; the choice is remembered, so the next launch comes back to the
 one that was working.
 
-Logfare, Token Juice and NVIDIA are reached **directly** — their upstreams serve
-Chat Completions themselves, so there is no proxy to start. IteraCompute and
-InfronAI still ship an optional local proxy, but are reached directly by
-default too; add `proxy` to go through it: `/zim-iteracompute proxy`.
+Logfare, Token Juice, NVIDIA, wandb and InferX are reached **directly** — their
+upstreams serve Chat Completions themselves, so there is no proxy to start.
+IteraCompute and InfronAI still ship an optional local proxy, but are reached
+directly by default too; add `proxy` to go through it:
+`/zim-iteracompute proxy`.
 
 Logfare is a full switch target: it serves every chat model on Logfare's
 catalog, and `/logfare-models` shows what is up right now. You need your own key
@@ -855,6 +860,43 @@ budget came back as 104 thinking frames and no answer at all. The harness's
 default ceiling (32768) has room, and it doubles the budget once when a reply is
 spent entirely on thinking, so you only meet this if you lower `max_tokens`
 yourself.
+
+### InferX, and a catalog that needs the key before you can read it
+
+`/inferx-api-setup <ix_… key>` writes `~/.zimzilla/inferx/source` (mode 600) and
+applies it to the session you are in — no restart. Keys come from
+https://model.inferx.net, where an endpoint is the tenant-scoped
+`https://model.inferx.net/endpoints/v1` yours was issued for; `/zim-inferx`
+switches onto it.
+
+Like NVIDIA this route is **direct with no proxy** — `/zim-source` shows
+`direct` where a proxied source shows a port, and `proxy` after `/zim-inferx`
+has nothing to turn on. The catalog's ids (`deepseek-v4.1-flash-1017`,
+`glm-5.3`, `kimi-k3`, `qwen3.8-max`, …) go on the wire unchanged, so `/model`
+offers exactly what the endpoint serves.
+
+Two things are the opposite of NVIDIA's, and both matter day to day:
+
+- The catalog is **key-gated**. `GET /models` answers `401` without a key — and
+  with a wrong one — so `/inferx-models` needs the key before it can list
+  anything, and the switch's probe is itself a credential check: a bad key stops
+  `/zim-inferx` with a message naming `/inferx-api-setup`, rather than landing
+  the session on a route that would `401` on the first turn.
+- Calls are metered against the **key's tenant allowance**, not billed per
+  model. InferX's own catalog page publishes no rate (its Input/Output/Cached
+  columns are empty), so `/cost` reads `free`; when the allowance is spent a
+  turn answers `429 "service failure: tenant … quota exceeded"` — the key is
+  still fine, and `/inferx-models` still answers. Measured on this box
+  2026-11-05: a first turn completed, and every chat call after it was that
+  `429`.
+
+The catalog is thin — four fields per entry, no window at all — so the
+**context window** comes from InferX's own catalog page for every id it lists
+(20K for `gpt-oss-20b`, 256K for `glm-5.3-flash`, 1M for the default
+`deepseek-v4.1-flash-1017`) and 256K otherwise. Never the harness's 1M
+fallback: guessing high against a 256K model is an overflow you meet mid-task.
+The list is fetched at the switch and again at launch, so `/model` shows the
+current catalog.
 
 ### Zro (MoonMath.ai), a hosted gateway on the native Messages protocol
 
@@ -1513,10 +1555,21 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-infronai [proxy]` | switch upstream to InfronAI — direct Chat Completions; `proxy` for :4003 |
 | `/infronai-api-setup <key>` | store your InfronAI API key |
 | `/infronai-models` | the live free catalog — what is free and usable |
+| `/zim-nvidia` | switch upstream to NVIDIA NIM — direct, free developer tier |
+| `/nvidia-api-setup <key>` | store your NVIDIA API key (`nvapi-…`, free at build.nvidia.com) |
+| `/nvidia-models` | the live catalog — chat models, and what the account can call |
+| `/zim-wandb` | switch upstream to wandb.ai inference — direct, free preview |
+| `/wandb-api-setup <key>` | store your wandb.ai inference API key (`wandb_v1_…`) |
+| `/wandb-models` | the live catalog — what this harness can drive |
+| `/zim-deepseek` | talk DeepSeek on wandb.ai inference — the operator key already on disk |
+| `/zim-wanbd <key>` | talk wandb.ai inference with your own key |
+| `/zim-inferx` | switch upstream to InferX — direct, tenant-scoped endpoint |
+| `/inferx-api-setup <key>` | store your InferX API key (`ix_…` from model.inferx.net) |
+| `/inferx-models` | the live catalog — chat models, and the window each one plans against |
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
 | `/logfare-api-setup [key]` | use your own Logfare key; none ships in the repository |
-| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `antseed` |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/reverse-engineer <file>` | map an artifact (`.apk`, `.zip`, `.exe`, `.sh`, binary), then ask what you want changed |
 | `/reverse-engineer <file> --map` | map it only — no model turn, nothing sent |
@@ -2657,6 +2710,7 @@ python tests/test_boot.py          # the boot screen — the logo spin, frame ge
 python tests/test_opencode.py      # /zim-opencode — the pool, rotation, retry policy, alias
 python tests/test_shodan.py        # /shodan-* — the key, the query, the result, the turn
 python tests/test_payload.py       # /payload — the table, the argv, the traps, the wiring
+python tests/test_inferx.py        # /inferx-* — the key-gated catalog, the tenant allowance, the wiring
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

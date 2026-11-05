@@ -35,6 +35,7 @@ from .. import crack as crack_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
 from .. import hunt as hunt_mod
+from .. import inferx as ix_mod
 from .. import infronai as inf_mod
 from .. import iteracompute as ic_mod
 from .. import ldxhub as ldx_mod
@@ -890,6 +891,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-wandb", "switch upstream to wandb.ai inference (direct, free)"),
         ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
+        ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
         ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
         ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
         ("/openai-endpoint <url> [model]", "talk Chat Completions to any OpenAI-compatible endpoint"),
@@ -915,6 +917,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/nvidia-models", "the live catalog — what this harness can drive"),
         ("/wandb-api-setup <key>", "store your wandb.ai inference API key"),
         ("/wandb-models", "the live catalog — what this harness can drive"),
+        ("/inferx-api-setup <key>", "store your InferX API key (model.inferx.net)"),
+        ("/inferx-models", "the live catalog — what this harness can drive"),
         ("/antseed-models", "AntSeed's free models, and the peer to pin"),
         ("/logfare-api-setup [key]", "use your own Logfare key (none ships)"),
         ("/logfare-models", "fetch the live catalog; show what is up"),
@@ -1527,6 +1531,11 @@ class ZimZillaApp(App):
         # instead of the ~57 chat entries the endpoint actually lists.
         elif sources_mod.active_key(self.cfg.base_url) == "nvidia":
             self._warm_nvidia_catalog()
+        # And InferX's, on the same terms: a cold cache offers the declared
+        # fallback, and this is the cheapest read that says whether the key on
+        # disk is still accepted — the Models route answers 401 without one.
+        elif sources_mod.active_key(self.cfg.base_url) == "inferx":
+            self._warm_inferx_catalog()
         # And Zro's, whose catalog is public and carries the prices /model
         # prints — a cold cache would show the harness's estimate for models
         # the gateway prices for itself.
@@ -2433,6 +2442,9 @@ class ZimZillaApp(App):
         "iteracompute-api-setup", "iteracompute-models", "zim-iteracompute",
         "infronai-api-setup", "infronai-models", "zim-infronai",
         "nvidia-api-setup", "nvidia-models", "zim-nvidia",
+        # Same reasoning again for InferX: its key is a mode-600 write, its
+        # catalog is a read, and the switch only repoints the client.
+        "inferx-api-setup", "inferx-models", "zim-inferx",
         "zim-antseed", "antseed-models",
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
@@ -2585,6 +2597,9 @@ class ZimZillaApp(App):
             "zim-wandb": lambda a: self._cmd_zim_source("wandb", a),
             "wandb-api-setup": lambda a: self._cmd_gateway_key("wandb", a),
             "wandb-models": lambda a: self._cmd_models(["wandb"]),
+            "zim-inferx": lambda a: self._cmd_zim_source("inferx", a),
+            "inferx-api-setup": lambda a: self._cmd_gateway_key("inferx", a),
+            "inferx-models": lambda a: self._cmd_models(["inferx"]),
             "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "zim-wanbd": lambda a: self._cmd_zim_wanbd(a),
             "protocol": lambda a: self._cmd_protocol(a),
@@ -2839,6 +2854,12 @@ class ZimZillaApp(App):
         # free daily models first and price the rest correctly.
         mm_catalog = (mm_mod.cached_models()
                       if active == "moonmath" else None)
+        # InferX's is fetched as well, and is read once here for the same
+        # reason: the fetch is the slow part and this is a render. Every entry
+        # is free on the tenant's quota, so this is what makes /model say
+        # "free (tenant quota)" instead of billing at the estimate table.
+        ix_catalog = (ix_mod.cached_models()
+                      if active == "inferx" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -2865,7 +2886,7 @@ class ZimZillaApp(App):
                 models,
                 th_catalog or as_catalog or uno_catalog or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
-                or mm_catalog)
+                or mm_catalog or ix_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -2881,7 +2902,8 @@ class ZimZillaApp(App):
                 t.append(f"  {mark} {shown:<26}", style=style)
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
-                                        inf_catalog, nv_catalog, mm_catalog)
+                                        inf_catalog, nv_catalog, mm_catalog,
+                                        ix_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -2947,6 +2969,13 @@ class ZimZillaApp(App):
                     "developer tier, not a per-model\n"
                     "  price. The catalog lists more than the account can call\n",
                     style=p.dim)
+            elif active == "inferx":
+                t.append(
+                    f"  catalog {_catalog_clause(ix_mod.catalog_age(), ix_mod.CACHE_TTL)}"
+                    " — /inferx-models shows the\nchat models; free means the "
+                    "key's tenant allowance, not a per-model\n"
+                    "  price — the catalog publishes none\n",
+                    style=p.dim)
             elif active == "moonmath":
                 t.append(
                     f"  catalog {_catalog_clause(mm_mod.catalog_age(), mm_mod.CACHE_TTL)}"
@@ -2995,7 +3024,8 @@ class ZimZillaApp(App):
         # wrong answer was the common case rather than the corner.
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi",
-                      "moonmath", "iteracompute", "infronai", "nvidia") and (
+                      "moonmath", "iteracompute", "infronai", "nvidia",
+                      "inferx") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -3070,6 +3100,17 @@ class ZimZillaApp(App):
                     fetched = [m for m in (got or []) if m.chat] or None
                 else:
                     fetched = list(nv_catalog)
+            elif active == "inferx":
+                # Key-gated rather than keyless — the credential is what makes
+                # this list exist — and filtered to chat entries the same way
+                # NVIDIA's is. Fetched when the cache is cold or expired so a
+                # live model is not refused against a stale list.
+                if ix_catalog is None:
+                    creds = ix_mod.load_credentials()
+                    got, _ = ix_mod.fetch_models(creds[0] if creds else "")
+                    fetched = [m for m in (got or []) if m.chat] or None
+                else:
+                    fetched = list(ix_catalog)
             elif active == "moonmath":
                 # Keyless and public: /models on the host needs no credential.
                 # Fetched when the cache is cold or expired so a live model is
@@ -3103,6 +3144,8 @@ class ZimZillaApp(App):
                     inf_catalog = fetched
                 elif active == "nvidia":
                     nv_catalog = fetched
+                elif active == "inferx":
+                    ix_catalog = fetched
                 elif active == "moonmath":
                     mm_catalog = fetched
                 elif active == "logfare":
@@ -3162,7 +3205,8 @@ class ZimZillaApp(App):
     def _model_note(self, name: str, catalog, lf_catalog=None,
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
                     ic_catalog=None, inf_catalog=None,
-                    nv_catalog=None, mm_catalog=None) -> str:
+                    nv_catalog=None, mm_catalog=None,
+                    ix_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -3201,6 +3245,8 @@ class ZimZillaApp(App):
             live = nv_mod.price_for(name, nv_catalog)
         if live is None:
             live = mm_mod.price_for(name, mm_catalog)
+        if live is None:
+            live = ix_mod.price_for(name, ix_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
@@ -3212,6 +3258,12 @@ class ZimZillaApp(App):
             # no per-model price. Falling through to the estimate table would
             # print $1.00/$3.00 beside a model that costs nothing.
             return "free (dev tier)"
+        if ix_mod.is_inferx(self.cfg.base_url):
+            # Same reasoning as the NVIDIA branch above: the call is covered by
+            # the key's tenant allowance rather than billed per token, and the
+            # catalog publishes no rate at all, so the estimate table would be
+            # printing a figure nothing here can know.
+            return "free (tenant quota)"
         pin, pout = price_for(name)
         note = f"${pin:.2f}/${pout:.2f} per Mtok"
         health = lf_mod.health_for(name) if lf_catalog else None
@@ -3582,6 +3634,7 @@ class ZimZillaApp(App):
                 ("infronai", inf_mod, "InfronAI", "/infronai-api-setup"),
                 ("nvidia", nv_mod, "NVIDIA NIM", "/nvidia-api-setup"),
                 ("moonmath", mm_mod, "Zro", "/moonmath-api-setup"),
+                ("inferx", ix_mod, "InferX", "/inferx-api-setup"),
             ):
                 # IteraCompute and InfronAI have local proxies, so when their
                 # profiles exist they are already listed above by discover() —
@@ -3599,7 +3652,7 @@ class ZimZillaApp(App):
                     # missing, so the port is the honest detail to show.
                     t.append(f":{_mod.PROXY_PORT}  {_label:<12} ",
                              style=p.primary)
-                elif _kind == "nvidia":
+                elif _kind in ("nvidia", "inferx"):
                     # Neither hosted-by-us nor proxied: the upstream is reached
                     # directly, so the row says so the way Token Juice's does.
                     # There is no port, and "proxy down" would be a lie.
@@ -3646,6 +3699,7 @@ class ZimZillaApp(App):
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
                      "                 /zim-moonmath,  /zim-wandb,\n"
+                     "                 /zim-inferx,\n"
                      "                 or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
@@ -3683,6 +3737,16 @@ class ZimZillaApp(App):
                 self._sys_line(
                     "NVIDIA is not set up on this machine — set your key with "
                     "/nvidia-api-setup <key> (free at build.nvidia.com)", warn=True)
+                return
+            if key == "inferx":
+                # And the same shape once more, with one extra consequence: the
+                # catalog is key-gated, so until this command writes a profile
+                # there is not even a model list to show — the Models route
+                # answers 401 without one.
+                self._sys_line(
+                    "InferX is not set up on this machine — set your key with "
+                    "/inferx-api-setup <ix_ key> (a tenant key from "
+                    "model.inferx.net)", warn=True)
                 return
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
@@ -3889,6 +3953,8 @@ class ZimZillaApp(App):
             return "/nvidia-api-setup <nvapi- key>"
         if src.key == "wandb":
             return "/wandb-api-setup <wandb_v1_ key>"
+        if src.key == "inferx":
+            return "/inferx-api-setup <ix_ key>"
         return f"/{src.key}-api-setup <key>"
 
     def _cmd_zim_deepseek(self, args) -> None:
@@ -4029,6 +4095,22 @@ class ZimZillaApp(App):
             # offered must be the chat-capable ones, not the raw 83.
             ok, detail = nv_mod.verify_key(token or "", chosen)
             ids = list(nv_mod.model_ids(token or "")[0] or [])
+        elif src.key == "inferx":
+            # The mirror image of NVIDIA's case: this Models route is
+            # **key-gated**, so the probe *is* the key check — no separate
+            # verify call, and a spent quota cannot fail a working key because
+            # only a 401/403 does. It is read through the module rather than
+            # `openai_compat.probe` so that the switch warms the same cache
+            # `/model` and `/inferx-models` read: one round-trip does both jobs,
+            # and the picker says "catalog fetched just now" rather than "not
+            # fetched yet" while showing the very list the switch just read.
+            models, err = ix_mod.fetch_models(token or "")
+            if models is None:
+                ok, detail, ids = False, err, []
+            else:
+                ok = True
+                detail = f"{len(models)} models"
+                ids = [m.id for m in models if m.chat]
         else:
             ok, detail = oa_mod.probe(route.base_url, token)
             ids = list(oa_mod.cached_ids(route.base_url))
@@ -4041,7 +4123,7 @@ class ZimZillaApp(App):
         # moved. Prefer whatever is free right now over leaving a paid name in
         # place that the account may not be funded for.
         mod = {"iteracompute": ic_mod, "infronai": inf_mod,
-               "nvidia": nv_mod, "wandb": wb_mod}.get(src.key)
+               "nvidia": nv_mod, "wandb": wb_mod, "inferx": ix_mod}.get(src.key)
         if mod is not None:
             try:
                 fresh = mod.default_free_model()
@@ -4273,6 +4355,19 @@ class ZimZillaApp(App):
         nv_mod.fetch_models(creds[0] if creds else "")
 
     @work(exclusive=True, thread=True)
+    def _warm_inferx_catalog(self) -> None:
+        """Fetch InferX's catalog once at startup, silently.
+
+        Silent for the same reason the other warm-ups are: a launch that cannot
+        reach the endpoint is still a working launch, /model falls back to the
+        declared list, and /inferx-models reports the failure on demand. The
+        key is sent because the catalog is key-gated — a keyless fetch would
+        answer 401 and warm nothing.
+        """
+        creds = ix_mod.load_credentials()
+        ix_mod.fetch_models(creds[0] if creds else "")
+
+    @work(exclusive=True, thread=True)
     def _warm_moonmath_catalog(self) -> None:
         """Fetch Zro's catalog once at startup, silently.
 
@@ -4434,6 +4529,12 @@ class ZimZillaApp(App):
             return nv_mod, "NVIDIA NIM"
         if kind == "wandb":
             return wb_mod, "wandb.ai inference"
+        # Direct-only and key-owned, like wandb one line up: `/zim-inferx` goes
+        # through `_cmd_zim_source`, and this is what lets
+        # `/inferx-api-setup` share the key-handling code — the same read/write
+        # against a mode-600 profile.
+        if kind == "inferx":
+            return ix_mod, "InferX"
         if kind == "antseed":
             return as_mod, "AntSeed"
         return None
@@ -4716,6 +4817,13 @@ class ZimZillaApp(App):
                 t.append("  keys start    ", style=p.dim)
                 t.append(f"{mod.KEY_PREFIX}  · free developer tier, ~40 req/min\n",
                          style=p.dim)
+            if kind == "inferx":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://model.inferx.net\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{mod.KEY_PREFIX}  · tenant-scoped — the catalog is "
+                         "key-gated too,\n                so /inferx-models "
+                         "needs it before it can list anything\n", style=p.dim)
             t.append(f"  stored in     {mod.PROFILE}\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
@@ -5103,7 +5211,8 @@ class ZimZillaApp(App):
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",
-                 "moonmath", "iteracompute", "infronai", "nvidia", "wandb"}
+                 "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
+                 "inferx"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -5206,6 +5315,13 @@ class ZimZillaApp(App):
             # matches what this session would be charged (nothing — free).
             creds = wb_mod.load_credentials()
             return wb_mod.chat_models(creds[0] if creds else "")
+        if kind == "inferx":
+            # Key-gated, like wandb and unlike NVIDIA: the Models route answers
+            # 401 without the credential, so the key from /inferx-api-setup is
+            # what makes this list exist at all — and the 401's message names
+            # that command rather than reporting a bare status.
+            creds = ix_mod.load_credentials()
+            return ix_mod.chat_models(creds[0] if creds else "")
         if kind == "tokenharbour":
             creds = th_mod.load_credentials()
             if creds is None:
@@ -5239,6 +5355,7 @@ class ZimZillaApp(App):
                  "infronai": "INFRONAI",
                  "nvidia": "NVIDIA NIM",
                  "wandb": "WANDB.AI",
+                 "inferx": "INFERX",
                  "moonmath": "ZRO (MOONMATH.AI)",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
@@ -5286,6 +5403,12 @@ class ZimZillaApp(App):
                     "publishes none. An empty list means the endpoint\n"
                     "  answered with no chat-capable entries — not that the "
                     "key is wrong)\n", style=p.dim)
+            if kind == "inferx":
+                t.append(
+                    "  (the catalog is live and key-gated: without the key "
+                    "the Models route\n  answers 401, so an empty list here "
+                    "means the credential was refused —\n  /inferx-api-setup "
+                    "is the fix)\n", style=p.dim)
             if kind == "moonmath":
                 t.append(
                     "  (the catalog is public and live. 'free' here is the Free "
@@ -5447,6 +5570,19 @@ class ZimZillaApp(App):
                 "  the gateway serves Messages natively, so there is no proxy "
                 "and no\n  translation; both the bare id and the zro/ alias "
                 "are accepted on the wire\n", style=p.dim)
+        if kind == "inferx":
+            # Two facts a reader of this list would otherwise get wrong, both
+            # measured against the live endpoint on 2026-11-05.
+            t.append(
+                "  free = the key's tenant allowance, not a per-model price: "
+                "the catalog\n  publishes no rate at all (its Input/Output "
+                "columns are empty). When the\n  allowance is spent a turn "
+                "answers 429 \"tenant … quota exceeded\" — the key\n  itself "
+                "is still fine, and this list still answers\n", style=p.dim)
+            t.append(
+                "  ids go on the wire unchanged, and the window comes from "
+                "InferX's own\n  catalog page (the API sends none); an id it "
+                "does not list plans against 256K\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
         self._refresh_model_choices()
 
@@ -9306,6 +9442,12 @@ class ZimZillaApp(App):
              "nvidia-api-setup"),
             ("/nvidia-models", "the live catalog — what this harness can drive",
              "nvidia-models"),
+            ("/zim-inferx", "switch upstream to InferX (direct, tenant key)",
+             "zim-inferx"),
+            ("/inferx-api-setup", "store your InferX API key",
+             "inferx-api-setup"),
+            ("/inferx-models", "the live catalog — what this harness can drive",
+             "inferx-models"),
             ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — fast and free (operator key)",
              "zim-deepseek"),
             ("/zim-wanbd", "talk wandb.ai inference with your own key",

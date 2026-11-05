@@ -60,6 +60,14 @@ exist. Its catalog is public and priced, which is what lets
 ``/moonmath-models`` show the Free plan's models before a key is set; see
 :mod:`zimzilla.moonmath`.
 
+InferX (``model.inferx.net``) is the same shape again — Chat Completions served
+by the upstream, no proxy, the profile is the whole install — with one
+difference that matters for the switch: its catalog is **key-gated**. Without a
+credential the Models route answers 401 rather than a list, so the probe
+``/zim-inferx`` makes is a real key check, and ``/inferx-models`` needs the key
+that ``/inferx-api-setup`` stores. Calls draw on the key's tenant quota rather
+than per-token billing; see :mod:`zimzilla.inferx`.
+
 The other upstreams (TokenHarbour, OpenRouter, UnoRouter, AIHubMix, BeatAPI,
 AntSeed) are remote or operator-started, and live in their own modules; this one
 is the local proxy plumbing and the selection record
@@ -201,6 +209,15 @@ NVIDIA_DIRECT = DirectRoute(base_url="https://integrate.api.nvidia.com/v1")
 #: on the wire. See :mod:`zimzilla.wandb`.
 WANDB_DIRECT = DirectRoute(base_url="https://api.inference.wandb.ai/v1")
 
+#: InferX's route, declared rather than read from a proxy config.
+#:
+#: ``model.inferx.net/endpoints/v1`` speaks Chat Completions itself, so — like
+#: Token Juice, NVIDIA and wandb — there is no LiteLLM hop and nothing to
+#: start. The alias map is empty on purpose: the catalog's ids are already the
+#: ids that go on the wire (``deepseek-v4.1-flash-1017``, ``glm-5.3``, …), and
+#: there is no proxy name to translate. See :mod:`zimzilla.inferx`.
+INFERX_DIRECT = DirectRoute(base_url="https://model.inferx.net/endpoints/v1")
+
 #: Logfare's route, declared rather than read from a proxy config.
 #:
 #: ``https://logfare.ai/v1`` serves Chat Completions itself, so the bundled
@@ -221,7 +238,8 @@ LOGFARE_DIRECT = DirectRoute(
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
 #: where they go.
-DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia", "wandb"})
+DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia", "wandb",
+                                         "inferx"})
 
 #: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
 DECLARED_ROUTES: dict[str, DirectRoute] = {
@@ -229,6 +247,7 @@ DECLARED_ROUTES: dict[str, DirectRoute] = {
     "tokenjuice": TOKENJUICE_DIRECT,
     "nvidia": NVIDIA_DIRECT,
     "wandb": WANDB_DIRECT,
+    "inferx": INFERX_DIRECT,
 }
 
 
@@ -432,6 +451,30 @@ WANDB_MODELS: tuple[str, ...] = (
     "deepseek-ai/DeepSeek-V4.1-Flash",
 )
 
+#: InferX's declared fallback — the whole catalog as measured on 2026-11-05,
+#: catalog order preserved. Unlike the other direct sources this one is *not* a
+#: curated subset: every id the key-gated ``/models`` route listed is a chat
+#: model, so the fallback is the list itself rather than a selection from it.
+#: The live fetch (see ``inferx.py``) replaces it as soon as the switch or a
+#: warm-up runs.
+INFERX_MODELS: tuple[str, ...] = (
+    "Agents-A1",
+    "Devstral-2-123B-Instruct-2512-int4-AutoRound",
+    "Qwen3-Coder-Next-FP8",
+    "Qwen3.6-35B-A3B-FP8",
+    "Qwen3.8-27B-FP8",
+    "gemma-4-31B-it-fp8",
+    "gpt-oss-20b",
+    "deepseek-v4-flash-0731",
+    "deepseek-v4.1-flash",
+    "deepseek-v4.1-flash-1017",
+    "deepseek-v4.1-flash-1017-basic",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "kimi-k3",
+    "qwen3.8-max",
+)
+
 #: Zro's declared fallback. Its real catalog is fetched from the public
 #: ``/models`` route (see ``moonmath.py``); this is what ``/model`` shows before
 #: that fetch. The catalog carried three chat models when this was written, and
@@ -456,6 +499,7 @@ MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "nvidia": NVIDIA_MODELS,
     "moonmath": MOONMATH_MODELS,
     "wandb": WANDB_MODELS,
+    "inferx": INFERX_MODELS,
 }
 
 
@@ -519,6 +563,25 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import moonmath as mm_mod
         cached = mm_mod.cached_ids()
         return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
+    if key == "inferx":
+        # Checked before the generic DIRECT_ONLY branch, like NVIDIA's: this
+        # source has its own module cache, and that is the list `/model` should
+        # offer — it is what the warm-up and `/inferx-models` fill, both of
+        # which read the catalog *with* the key. The generic branch below reads
+        # the probe cache instead, which is empty until a switch happens, and
+        # the catalog is key-gated so an empty cache is the normal state on a
+        # fresh launch.
+        from . import inferx as ix_mod
+        cached = ix_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
+    if key == "wandb":
+        # Same reasoning as InferX one branch up, and the same placement fix:
+        # wandb has its own module cache too, and this branch sat *below* the
+        # generic DIRECT_ONLY branch, which returns before reaching it — so
+        # `/wandb-models` warmed a cache `/model` never read.
+        from . import wandb as wb_mod
+        cached = wb_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     if key in DIRECT_ONLY:
         # Declared, not fetched — but a switch probes the Models route, and what
         # the upstream actually answered is better than the declared fallback.
@@ -557,10 +620,6 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import infronai as inf_mod
         cached = inf_mod.cached_ids()
         return tuple(cached) if cached else None
-    if key == "wandb":
-        from . import wandb as wb_mod
-        cached = wb_mod.cached_ids()
-        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     return MODELS_BY_KEY.get(key) or None
 
 
@@ -602,6 +661,9 @@ def catalog_models(key: str) -> list | None:
     if key == "wandb":
         from . import wandb as wb_mod
         return wb_mod.cached_models()
+    if key == "inferx":
+        from . import inferx as ix_mod
+        return ix_mod.cached_models()
     if key == "moonmath":
         from . import moonmath as mm_mod
         return mm_mod.cached_models()
@@ -678,6 +740,13 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # warm or cold. Returning None here would fall through to the estimate
         # table and bill a free model at DEFAULT_PRICE, which is the exact
         # discrepancy this function exists to prevent.
+        return (0.0, 0.0)
+    if key == "inferx" and not catalog_models(key):
+        # Same reasoning as NVIDIA, one route over: InferX bills the key's
+        # tenant allowance rather than the model, and its catalog publishes no
+        # rate at all (the public page's price columns are empty). A cold cache
+        # answering None would print a dollar figure for a model nothing here
+        # can price.
         return (0.0, 0.0)
     cached = catalog_models(key)
     if not cached:
@@ -820,6 +889,14 @@ def _profile_candidates(key: str) -> list[Path]:
         return [
             ZIMZILLA_HOME / "wandb" / "source",
         ]
+    if key == "inferx":
+        # Same shape as NVIDIA and wandb: the key is the operator's own, issued
+        # against their tenant endpoint. Until /inferx-api-setup writes this
+        # file the source is not discovered, which is what makes /zim-inferx
+        # name the setup command instead of failing at request time.
+        return [
+            ZIMZILLA_HOME / "inferx" / "source",
+        ]
     return [
         ZIMZILLA_HOME / "tokenjuice" / "source",
         DEFAULT_HOME / "claude-source" / "deepseek-claude",
@@ -901,6 +978,13 @@ def discover() -> dict[str, Source]:
                    "deepseek-ai/DeepSeek-V4.1-Flash")
     if wandb:
         found["wandb"] = wandb
+    # And again for InferX: direct-only, and — like wandb and unlike NVIDIA —
+    # its catalog needs the key, so without a profile there is nothing to list
+    # and the route is absent until /inferx-api-setup has run.
+    inferx = _build("inferx", "InferX", 0,
+                    "deepseek-v4.1-flash-1017")
+    if inferx:
+        found["inferx"] = inferx
     return found
 
 
@@ -940,7 +1024,8 @@ def switchable(exclude: str | None = None) -> list[str]:
     out: list[str] = []
     for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
                 "tokenharbour", "moonmath", "infronai", "iteracompute",
-                "antseed", "nvidia", "tokenjuice", "logfare", "wandb"):
+                "antseed", "nvidia", "tokenjuice", "logfare", "wandb",
+                "inferx"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -976,6 +1061,7 @@ def _gateway_module(key: str):
     """
     from . import aihubmix as ah_mod
     from . import beatapi as bp_mod
+    from . import inferx as ix_mod
     from . import moonmath as mm_mod
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
@@ -984,7 +1070,7 @@ def _gateway_module(key: str):
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
         "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
-        "wandb": wb_mod,
+        "wandb": wb_mod, "inferx": ix_mod,
     }.get(key)
 
 
@@ -1048,7 +1134,7 @@ def _state_file() -> Path:
 #: buyer is started and stopped by the operator, so requiring it to be up at
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
-                          "aihubmix", "beatapi", "moonmath", "wandb"})
+                          "aihubmix", "beatapi", "moonmath", "wandb", "inferx"})
 
 
 def current_key() -> str | None:
@@ -1099,6 +1185,7 @@ def active_key(base_url: str) -> str | None:
     from . import aihubmix as ah_mod
     from . import antseed as as_mod
     from . import beatapi as bp_mod
+    from . import inferx as ix_mod
     from . import infronai as inf_mod
     from . import iteracompute as ic_mod
     from . import moonmath as mm_mod
@@ -1140,6 +1227,11 @@ def active_key(base_url: str) -> str | None:
         return "nvidia"
     if wb_mod.is_wandb(base_url):
         return "wandb"
+    # Same reasoning as NVIDIA and wandb: reached directly, identified by host
+    # rather than by port, and checked before the generic host loop below so a
+    # session launched from an environment profile is still recognised.
+    if ix_mod.is_inferx(base_url):
+        return "inferx"
     # Checked before the port match, and by port rather than by name: the buyer
     # hands out a plain http://localhost:8377 with no "antseed" in it, and the
     # regex below would otherwise find port 8377, miss it in source_for_port()

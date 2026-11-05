@@ -120,6 +120,7 @@ OPENAI_HOSTS = (
     "api.iteracompute.com",
     "api.tokenjuice.ai",
     "logfare.ai",
+    "model.inferx.net",
 )
 
 
