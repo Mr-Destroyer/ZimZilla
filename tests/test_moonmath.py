@@ -737,7 +737,10 @@ def test_tui_surfaces() -> None:
           "def _report_moonmath_key(self, ok: bool, detail: str)" in app_src)
     check("tui: the module is imported by the app",
           "from .. import moonmath as mm_mod" in app_src)
-    check("tui: /models completion offers it", '"moonmath"]' in comp_src,
+    # Membership, not "last element": this pinned '"moonmath"]' and went red the
+    # moment the next provider was appended after it, which is a false alarm
+    # about a list that still offered moonmath the whole time.
+    check("tui: /models completion offers it", '"moonmath"' in comp_src,
           "the /models source list must offer moonmath")
     check("tui: the setup panel names the alias and where keys come from",
           "/zro-moonmath-api-setup" in app_src)
