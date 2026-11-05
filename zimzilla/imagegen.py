@@ -521,10 +521,14 @@ def generate(
     except SandboxError as e:
         raise ImageGenError(str(e)) from None
 
+    # NOTE: no "n" field. Logfare's images endpoint validates the body against
+    # a strict schema and rejects unknown properties outright:
+    #   HTTP 400 "Additional or unevaluated properties '/n' at '/' not allowed"
+    # The code below only ever reads the first entry anyway, so asking for more
+    # than one was never meaningful. Do not add it back.
     body = {
         "model": chosen_model,
         "prompt": text,
-        "n": 1,
         "size": chosen_size,
     }
     started = time.monotonic()

@@ -181,8 +181,10 @@ def test_generate_b64(tmp: Path) -> None:
     body = json.loads(calls[0][2])
     check("generate: the prompt and size are in the body",
           body.get("prompt") == "A green cat"
-          and body.get("size") == "1024x1024"
-          and body.get("n") == 1, str(body))
+          and body.get("size") == "1024x1024", str(body))
+    # Logfare rejects unknown body properties, so "n" must never be sent.
+    check("generate: no 'n' field is sent",
+          "n" not in body, str(body))
     check("generate: the model is in the body",
           body.get("model") == IG.DEFAULT_MODEL, str(body.get("model")))
     check("generate: the image is written", image.path.is_file())
