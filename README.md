@@ -761,6 +761,7 @@ caring which. Fourteen sources are wired up:
 | **NVIDIA NIM** | `integrate.api.nvidia.com` | yours (`nvapi-…`) | direct, no proxy — free developer tier, 57 chat models |
 | **wandb.ai inference** | `api.inference.wandb.ai/v1` | yours (`wandb_v1_…`) | direct, no proxy — free preview, Chat Completions |
 | **InferX** | `model.inferx.net/endpoints/v1` | yours (`ix_…`) | direct, no proxy — tenant-scoped endpoint, key-gated catalog |
+| **Inferbase** | `api.inferbase.ai/v1` | yours (`inf_…`) | direct, no proxy — free plan is a price band, priced catalog |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
 | **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
 | **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
@@ -771,13 +772,14 @@ caring which. Fourteen sources are wired up:
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
-`/zim-tokenharbour`, `/zim-openrouter`,
+`/zim-inferbase`, `/zim-tokenharbour`, `/zim-openrouter`,
 `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi`, `/zim-moonmath` or
 `/zim-antseed`; the choice is remembered, so the next launch comes back to the
 one that was working.
 
-Logfare, Token Juice, NVIDIA, wandb and InferX are reached **directly** — their
-upstreams serve Chat Completions themselves, so there is no proxy to start.
+Logfare, Token Juice, NVIDIA, wandb, InferX and Inferbase are reached
+**directly** — their upstreams serve Chat Completions themselves, so there is no
+proxy to start.
 IteraCompute and InfronAI still ship an optional local proxy, but are reached
 directly by default too; add `proxy` to go through it:
 `/zim-iteracompute proxy`.
@@ -897,6 +899,44 @@ The catalog is thin — four fields per entry, no window at all — so the
 fallback: guessing high against a 256K model is an overflow you meet mid-task.
 The list is fetched at the switch and again at launch, so `/model` shows the
 current catalog.
+
+### Inferbase, where "free" is a price band rather than a flag
+
+`/inferbase-api-setup <inf_… key>` writes `~/.zimzilla/inferbase/source` (mode
+600) and applies it to the session you are in — no restart. Keys come from
+https://inferbase.ai (Gateway › API keys); `/zim-inferbase` switches onto
+`https://api.inferbase.ai/v1`. Direct with no proxy, like NVIDIA and InferX.
+
+The free plan needs no card and covers 5,000 requests a month, but membership is
+a **price rule, not a model list**: a model is free when its published output
+rate is at or below **$2.00 per 1M tokens**. So `Model.free` is
+`price_out <= 2.00`, and the set moves as the catalog moves — `/inferbase-models`
+shows where the line falls today. A model above the band answers `402` with
+"outside the free plan's price band", which means the key is fine and the model
+is not. A model with **no published price is not free**: a missing price is not a
+zero price, and `/model` says `unpriced` rather than billing it at nothing.
+
+Two routes are read together, because neither is complete alone:
+
+- `GET /api/v1/inference/catalog` is **key-gated** and carries the type, the
+  context window and both rates per model. It is paginated, so it is fetched
+  explicitly with `page=1&page_size=100`.
+- `GET /v1/models` is **public** and lists the served ids — including the
+  non-chat ones (`bfl-flux-*`, `mistral-voxtral-mini-2507`) that the catalog
+  marks and `/inferbase-models` filters out.
+
+Measured on this box 2026-11-07: 134 models, 108 chat, 92 inside the band. The
+default is `auto`, which routes within the band by construction — so `/cost`
+reads `free` for it warm or cold, and the estimate table (which has never heard
+of `auto`) is never consulted. A pinned model gets its published rate as soon as
+the catalog is read: `deepseek-v4-flash:fp8` is free at 1M context, while
+`deepseek-r1-0528` reads `$0.5/$2.15`.
+
+The free plan is also capped at **10 requests per minute** on Inferbase's own
+models, which answers `429` with a `retry-after` — a window, not a burst, and the
+harness does not retry into it. `explain_error` keeps that apart from a `402`
+(different model) and a `401` (different key), because each calls for a
+different action.
 
 ### Zro (MoonMath.ai), a hosted gateway on the native Messages protocol
 
@@ -1566,10 +1606,13 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-inferx` | switch upstream to InferX — direct, tenant-scoped endpoint |
 | `/inferx-api-setup <key>` | store your InferX API key (`ix_…` from model.inferx.net) |
 | `/inferx-models` | the live catalog — chat models, and the window each one plans against |
+| `/zim-inferbase` | switch upstream to Inferbase — direct, free plan is a price band |
+| `/inferbase-api-setup <key>` | store your Inferbase API key (`inf_…` from inferbase.ai) |
+| `/inferbase-models` | the live catalog — every model, priced, free band first |
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
 | `/logfare-api-setup [key]` | use your own Logfare key; none ships in the repository |
-| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `antseed` |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `inferbase`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/reverse-engineer <file>` | map an artifact (`.apk`, `.zip`, `.exe`, `.sh`, binary), then ask what you want changed |
 | `/reverse-engineer <file> --map` | map it only — no model turn, nothing sent |
@@ -2711,6 +2754,7 @@ python tests/test_opencode.py      # /zim-opencode — the pool, rotation, retry
 python tests/test_shodan.py        # /shodan-* — the key, the query, the result, the turn
 python tests/test_payload.py       # /payload — the table, the argv, the traps, the wiring
 python tests/test_inferx.py        # /inferx-* — the key-gated catalog, the tenant allowance, the wiring
+python tests/test_inferbase.py     # /inferbase-* — the price band, the two routes, the wiring
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

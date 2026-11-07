@@ -35,6 +35,7 @@ from .. import crack as crack_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
 from .. import hunt as hunt_mod
+from .. import inferbase as ib_mod
 from .. import inferx as ix_mod
 from .. import infronai as inf_mod
 from .. import iteracompute as ic_mod
@@ -892,6 +893,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
+        ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
         ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
         ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
         ("/openai-endpoint <url> [model]", "talk Chat Completions to any OpenAI-compatible endpoint"),
@@ -919,6 +921,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/wandb-models", "the live catalog — what this harness can drive"),
         ("/inferx-api-setup <key>", "store your InferX API key (model.inferx.net)"),
         ("/inferx-models", "the live catalog — what this harness can drive"),
+        ("/inferbase-api-setup <key>", "store your Inferbase API key (api.inferbase.ai)"),
+        ("/inferbase-models", "the live catalog — every model, priced, free band first"),
         ("/antseed-models", "AntSeed's free models, and the peer to pin"),
         ("/logfare-api-setup [key]", "use your own Logfare key (none ships)"),
         ("/logfare-models", "fetch the live catalog; show what is up"),
@@ -1536,6 +1540,12 @@ class ZimZillaApp(App):
         # disk is still accepted — the Models route answers 401 without one.
         elif sources_mod.active_key(self.cfg.base_url) == "inferx":
             self._warm_inferx_catalog()
+        # And Inferbase's, which is the one catalog here that carries a window
+        # and a price per model — a cold cache would offer the declared
+        # free-band list with neither, and /model would print the estimate
+        # table's figure for a model the gateway prices for itself.
+        elif sources_mod.active_key(self.cfg.base_url) == "inferbase":
+            self._warm_inferbase_catalog()
         # And Zro's, whose catalog is public and carries the prices /model
         # prints — a cold cache would show the harness's estimate for models
         # the gateway prices for itself.
@@ -2445,6 +2455,8 @@ class ZimZillaApp(App):
         # Same reasoning again for InferX: its key is a mode-600 write, its
         # catalog is a read, and the switch only repoints the client.
         "inferx-api-setup", "inferx-models", "zim-inferx",
+        # And Inferbase's, for the same three reasons.
+        "inferbase-api-setup", "inferbase-models", "zim-inferbase",
         "zim-antseed", "antseed-models",
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
@@ -2600,6 +2612,9 @@ class ZimZillaApp(App):
             "zim-inferx": lambda a: self._cmd_zim_source("inferx", a),
             "inferx-api-setup": lambda a: self._cmd_gateway_key("inferx", a),
             "inferx-models": lambda a: self._cmd_models(["inferx"]),
+            "zim-inferbase": lambda a: self._cmd_zim_source("inferbase", a),
+            "inferbase-api-setup": lambda a: self._cmd_gateway_key("inferbase", a),
+            "inferbase-models": lambda a: self._cmd_models(["inferbase"]),
             "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "zim-wanbd": lambda a: self._cmd_zim_wanbd(a),
             "protocol": lambda a: self._cmd_protocol(a),
@@ -2860,6 +2875,12 @@ class ZimZillaApp(App):
         # "free (tenant quota)" instead of billing at the estimate table.
         ix_catalog = (ix_mod.cached_models()
                       if active == "inferx" else None)
+        # Inferbase's is fetched as well, and is the one catalog here that
+        # carries a real price AND a window per model — so it is what makes
+        # /model price a model at its published rate, call a free-band one
+        # free, and size the context gauge against the model's own window.
+        ib_catalog = (ib_mod.cached_models()
+                      if active == "inferbase" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -2886,7 +2907,7 @@ class ZimZillaApp(App):
                 models,
                 th_catalog or as_catalog or uno_catalog or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
-                or mm_catalog or ix_catalog)
+                or mm_catalog or ix_catalog or ib_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -2903,7 +2924,7 @@ class ZimZillaApp(App):
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
                                         inf_catalog, nv_catalog, mm_catalog,
-                                        ix_catalog)
+                                        ix_catalog, ib_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -2976,6 +2997,13 @@ class ZimZillaApp(App):
                     "key's tenant allowance, not a per-model\n"
                     "  price — the catalog publishes none\n",
                     style=p.dim)
+            elif active == "inferbase":
+                t.append(
+                    f"  catalog {_catalog_clause(ib_mod.catalog_age(), ib_mod.CACHE_TTL)}"
+                    " — /inferbase-models shows every\nmodel with its price; "
+                    "free means inside the plan's $2.00/1M output\n"
+                    "  band, and a model above it answers 402\n",
+                    style=p.dim)
             elif active == "moonmath":
                 t.append(
                     f"  catalog {_catalog_clause(mm_mod.catalog_age(), mm_mod.CACHE_TTL)}"
@@ -3025,7 +3053,7 @@ class ZimZillaApp(App):
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi",
                       "moonmath", "iteracompute", "infronai", "nvidia",
-                      "inferx") and (
+                      "inferx", "inferbase") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -3111,6 +3139,18 @@ class ZimZillaApp(App):
                     fetched = [m for m in (got or []) if m.chat] or None
                 else:
                     fetched = list(ix_catalog)
+            elif active == "inferbase":
+                # The priced catalog is key-gated and the public id list is
+                # not, so the key is sent when there is one and the module
+                # falls back to the public list when there is not. Fetched when
+                # the cache is cold or expired so a live model is not refused
+                # against a stale list.
+                if ib_catalog is None:
+                    creds = ib_mod.load_credentials()
+                    got, _ = ib_mod.fetch_models(creds[0] if creds else "")
+                    fetched = [m for m in (got or []) if m.chat] or None
+                else:
+                    fetched = list(ib_catalog)
             elif active == "moonmath":
                 # Keyless and public: /models on the host needs no credential.
                 # Fetched when the cache is cold or expired so a live model is
@@ -3146,6 +3186,8 @@ class ZimZillaApp(App):
                     nv_catalog = fetched
                 elif active == "inferx":
                     ix_catalog = fetched
+                elif active == "inferbase":
+                    ib_catalog = fetched
                 elif active == "moonmath":
                     mm_catalog = fetched
                 elif active == "logfare":
@@ -3206,7 +3248,7 @@ class ZimZillaApp(App):
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
                     ic_catalog=None, inf_catalog=None,
                     nv_catalog=None, mm_catalog=None,
-                    ix_catalog=None) -> str:
+                    ix_catalog=None, ib_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -3247,6 +3289,8 @@ class ZimZillaApp(App):
             live = mm_mod.price_for(name, mm_catalog)
         if live is None:
             live = ix_mod.price_for(name, ix_catalog)
+        if live is None:
+            live = ib_mod.price_for(name, ib_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
@@ -3264,6 +3308,12 @@ class ZimZillaApp(App):
             # catalog publishes no rate at all, so the estimate table would be
             # printing a figure nothing here can know.
             return "free (tenant quota)"
+        if ib_mod.is_inferbase(self.cfg.base_url):
+            # Not the NVIDIA case: this catalog DOES publish a rate, so a warm
+            # cache prices a model exactly. A cold one cannot, and the estimate
+            # table has never heard of ``auto`` — so the honest answer is the
+            # plan, which is what covers the default model by construction.
+            return "free plan (auto routes within the band)"
         pin, pout = price_for(name)
         note = f"${pin:.2f}/${pout:.2f} per Mtok"
         health = lf_mod.health_for(name) if lf_catalog else None
@@ -3635,6 +3685,7 @@ class ZimZillaApp(App):
                 ("nvidia", nv_mod, "NVIDIA NIM", "/nvidia-api-setup"),
                 ("moonmath", mm_mod, "Zro", "/moonmath-api-setup"),
                 ("inferx", ix_mod, "InferX", "/inferx-api-setup"),
+                ("inferbase", ib_mod, "Inferbase", "/inferbase-api-setup"),
             ):
                 # IteraCompute and InfronAI have local proxies, so when their
                 # profiles exist they are already listed above by discover() —
@@ -3652,7 +3703,7 @@ class ZimZillaApp(App):
                     # missing, so the port is the honest detail to show.
                     t.append(f":{_mod.PROXY_PORT}  {_label:<12} ",
                              style=p.primary)
-                elif _kind in ("nvidia", "inferx"):
+                elif _kind in ("nvidia", "inferx", "inferbase"):
                     # Neither hosted-by-us nor proxied: the upstream is reached
                     # directly, so the row says so the way Token Juice's does.
                     # There is no port, and "proxy down" would be a lie.
@@ -3699,7 +3750,7 @@ class ZimZillaApp(App):
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
                      "                 /zim-moonmath,  /zim-wandb,\n"
-                     "                 /zim-inferx,\n"
+                     "                 /zim-inferx,  /zim-inferbase,\n"
                      "                 or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
@@ -3747,6 +3798,16 @@ class ZimZillaApp(App):
                     "InferX is not set up on this machine — set your key with "
                     "/inferx-api-setup <ix_ key> (a tenant key from "
                     "model.inferx.net)", warn=True)
+                return
+            if key == "inferbase":
+                # Same shape again. The public Models route answers without a
+                # key, so there *is* a list to show — but the priced catalog
+                # that makes this source worth having is key-gated, and a turn
+                # needs the credential regardless.
+                self._sys_line(
+                    "Inferbase is not set up on this machine — set your key "
+                    "with /inferbase-api-setup <inf_ key> (from "
+                    "api.inferbase.ai)", warn=True)
                 return
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
@@ -3955,6 +4016,8 @@ class ZimZillaApp(App):
             return "/wandb-api-setup <wandb_v1_ key>"
         if src.key == "inferx":
             return "/inferx-api-setup <ix_ key>"
+        if src.key == "inferbase":
+            return "/inferbase-api-setup <inf_ key>"
         return f"/{src.key}-api-setup <key>"
 
     def _cmd_zim_deepseek(self, args) -> None:
@@ -4111,6 +4174,16 @@ class ZimZillaApp(App):
                 ok = True
                 detail = f"{len(models)} models"
                 ids = [m.id for m in models if m.chat]
+        elif src.key == "inferbase":
+            # NVIDIA's case exactly: the Models route is **public** — it answers
+            # 200 with no key and with a wrong one — so probing it would call a
+            # rejected key healthy. verify_key makes one tiny real call instead.
+            # The catalog is read through the module rather than through
+            # `openai_compat.probe` so the switch warms the same cache `/model`
+            # and `/inferbase-models` read: one round-trip does both jobs.
+            ok, detail = ib_mod.verify_key(token or "", chosen)
+            models, _ = ib_mod.fetch_models(token or "")
+            ids = [m.id for m in (models or []) if m.chat]
         else:
             ok, detail = oa_mod.probe(route.base_url, token)
             ids = list(oa_mod.cached_ids(route.base_url))
@@ -4123,7 +4196,8 @@ class ZimZillaApp(App):
         # moved. Prefer whatever is free right now over leaving a paid name in
         # place that the account may not be funded for.
         mod = {"iteracompute": ic_mod, "infronai": inf_mod,
-               "nvidia": nv_mod, "wandb": wb_mod, "inferx": ix_mod}.get(src.key)
+               "nvidia": nv_mod, "wandb": wb_mod, "inferx": ix_mod,
+               "inferbase": ib_mod}.get(src.key)
         if mod is not None:
             try:
                 fresh = mod.default_free_model()
@@ -4368,6 +4442,20 @@ class ZimZillaApp(App):
         ix_mod.fetch_models(creds[0] if creds else "")
 
     @work(exclusive=True, thread=True)
+    def _warm_inferbase_catalog(self) -> None:
+        """Fetch Inferbase's catalog once at startup, silently.
+
+        Silent for the same reason the other warm-ups are: a launch that cannot
+        reach the endpoint is still a working launch, /model falls back to the
+        declared free-band list, and /inferbase-models reports the failure on
+        demand. The key is sent when there is one because the *priced* catalog
+        is key-gated — without it only the public id list answers, which has no
+        window and no price.
+        """
+        creds = ib_mod.load_credentials()
+        ib_mod.fetch_models(creds[0] if creds else "")
+
+    @work(exclusive=True, thread=True)
     def _warm_moonmath_catalog(self) -> None:
         """Fetch Zro's catalog once at startup, silently.
 
@@ -4535,6 +4623,12 @@ class ZimZillaApp(App):
         # against a mode-600 profile.
         if kind == "inferx":
             return ix_mod, "InferX"
+        # Direct-only and key-owned, like InferX one line up: `/zim-inferbase`
+        # goes through `_cmd_zim_source`, and this is what lets
+        # `/inferbase-api-setup` share the key-handling code — the same
+        # read/write against a mode-600 profile.
+        if kind == "inferbase":
+            return ib_mod, "Inferbase"
         if kind == "antseed":
             return as_mod, "AntSeed"
         return None
@@ -4801,7 +4895,8 @@ class ZimZillaApp(App):
                 t.append(f"{mod.KEY_PREFIX}  · free daily usage on the Flash "
                          "models\n", style=p.dim)
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
-                        "iteracompute", "infronai", "nvidia", "moonmath"):
+                        "iteracompute", "infronai", "nvidia", "moonmath",
+                        "inferbase"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -4824,6 +4919,14 @@ class ZimZillaApp(App):
                 t.append(f"{mod.KEY_PREFIX}  · tenant-scoped — the catalog is "
                          "key-gated too,\n                so /inferx-models "
                          "needs it before it can list anything\n", style=p.dim)
+            if kind == "inferbase":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://inferbase.ai (Gateway › API keys)\n",
+                         style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{mod.KEY_PREFIX}  · free plan: no card, 5,000 "
+                         "requests a month,\n                models up to "
+                         "$2.00 per 1M output tokens included\n", style=p.dim)
             t.append(f"  stored in     {mod.PROFILE}\n", style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
@@ -4847,6 +4950,16 @@ class ZimZillaApp(App):
             # that was just stored instead of leaving the operator to meet the
             # 401 on their first turn. Off the UI thread — it is a network call.
             self._verify_moonmath_key(key)
+        if kind == "inferbase" and ib_mod.is_inferbase(self.cfg.base_url):
+            # The route is direct and the client already holds the *old* token,
+            # which it read from the profile at switch time. Without this the
+            # new key is on disk and nowhere else until the next launch — the
+            # "saved but not in force" failure TokenHarbour's command documents.
+            self.cfg.auth_token = key
+            self.cfg.api_key = ""
+            self.agent._client = None
+            self._sys_line("applied to this session — no restart", ok=True)
+            return
         if kind == "nvidia" and nv_mod.is_nvidia(self.cfg.base_url):
             # The route is direct and the client already holds the *old* token,
             # which it read from the profile at switch time. Without this the
@@ -5212,7 +5325,7 @@ class ZimZillaApp(App):
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
-                 "inferx"}
+                 "inferx", "inferbase"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -5322,6 +5435,13 @@ class ZimZillaApp(App):
             # that command rather than reporting a bare status.
             creds = ix_mod.load_credentials()
             return ix_mod.chat_models(creds[0] if creds else "")
+        if kind == "inferbase":
+            # The public Models route answers without a key, so this list works
+            # before /inferbase-api-setup has run — but the *priced* catalog is
+            # key-gated, and it is the one that says which models the free plan
+            # covers. Sent when present so the listing is the real one.
+            creds = ib_mod.load_credentials()
+            return ib_mod.usable_free_models(creds[0] if creds else "")
         if kind == "tokenharbour":
             creds = th_mod.load_credentials()
             if creds is None:
@@ -5356,6 +5476,7 @@ class ZimZillaApp(App):
                  "nvidia": "NVIDIA NIM",
                  "wandb": "WANDB.AI",
                  "inferx": "INFERX",
+                 "inferbase": "INFERBASE",
                  "moonmath": "ZRO (MOONMATH.AI)",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
@@ -5409,6 +5530,13 @@ class ZimZillaApp(App):
                     "the Models route\n  answers 401, so an empty list here "
                     "means the credential was refused —\n  /inferx-api-setup "
                     "is the fix)\n", style=p.dim)
+            if kind == "inferbase":
+                t.append(
+                    "  (the public model list answers without a key, but the "
+                    "priced catalog\n  that says which models the free plan "
+                    "covers is key-gated — so an empty\n  list here means "
+                    "neither route answered, not that nothing is free)\n",
+                    style=p.dim)
             if kind == "moonmath":
                 t.append(
                     "  (the catalog is public and live. 'free' here is the Free "
@@ -5570,6 +5698,23 @@ class ZimZillaApp(App):
                 "  the gateway serves Messages natively, so there is no proxy "
                 "and no\n  translation; both the bare id and the zro/ alias "
                 "are accepted on the wire\n", style=p.dim)
+        if kind == "inferbase":
+            # Three facts a reader of this list would otherwise get wrong, all
+            # measured against the live endpoint on 2026-11-07.
+            t.append(
+                "  free = inside the plan's price band: at or below $2.00 per "
+                "1M OUTPUT\n  tokens. It is a price rule, not a model list, so "
+                "the set moves with the\n  catalog — a model above the band "
+                "answers 402, and the key is still fine\n", style=p.dim)
+            t.append(
+                "  the free plan is also capped at 10 requests per minute on "
+                "Inferbase's own\n  models (429 with a retry-after), and at "
+                "100 managed requests and $0.50 of\n  usage a day\n",
+                style=p.dim)
+            t.append(
+                "  prices shown are the catalog's published rate per 1M "
+                "tokens; a free-band\n  model reads free because the plan "
+                "covers it, not because it is unpriced\n", style=p.dim)
         if kind == "inferx":
             # Two facts a reader of this list would otherwise get wrong, both
             # measured against the live endpoint on 2026-11-05.
@@ -9448,6 +9593,12 @@ class ZimZillaApp(App):
              "inferx-api-setup"),
             ("/inferx-models", "the live catalog — what this harness can drive",
              "inferx-models"),
+            ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)",
+             "zim-inferbase"),
+            ("/inferbase-api-setup", "store your Inferbase API key",
+             "inferbase-api-setup"),
+            ("/inferbase-models", "the live catalog — every model, priced, free band first",
+             "inferbase-models"),
             ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — fast and free (operator key)",
              "zim-deepseek"),
             ("/zim-wanbd", "talk wandb.ai inference with your own key",

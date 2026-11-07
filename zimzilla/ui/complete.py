@@ -59,6 +59,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
     ("/zim-wanbd", "talk wandb.ai inference — your own key"),
     ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
+    ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
     ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
@@ -81,6 +82,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/wandb-models", "the live catalog — what this harness can drive"),
     ("/inferx-api-setup", "store your InferX API key (model.inferx.net)"),
     ("/inferx-models", "the live catalog — what this harness can drive"),
+    ("/inferbase-api-setup", "store your Inferbase API key (api.inferbase.ai)"),
+    ("/inferbase-models", "the live catalog — every model, priced, free band first"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
     ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
     ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
@@ -387,7 +390,7 @@ class CompletionPopup(VerticalScroll):
                     "models": ["logfare", "tokenjuice", "tokenharbour",
                                "openrouter", "unorouter", "antseed", "aihubmix",
                                "beatapi", "iteracompute", "infronai", "nvidia",
-                               "moonmath", "wandb", "inferx"],
+                               "moonmath", "wandb", "inferx", "inferbase"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

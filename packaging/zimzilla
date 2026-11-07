@@ -227,6 +227,21 @@ if [[ "$_current_source" == "inferx" ]]; then
   fi
 fi
 
+if [[ "$_current_source" == "inferbase" ]]; then
+  # Direct route on the same terms as NVIDIA and InferX, and load-bearing for
+  # the same reason: without this branch a remembered Inferbase selection falls
+  # through to the Logfare profile below, so the launcher would source the wrong
+  # endpoint and the session would silently start on Logfare. Nothing ships for
+  # it — the key is the operator's own, written by /inferbase-api-setup — so the
+  # branch is guarded on the profile being readable and falls through rather
+  # than dying fail-closed on a route that was never finished setting up.
+  _ib_profile="$ZIMZILLA_HOME/inferbase/source"
+  if [[ -r "$_ib_profile" ]]; then
+    LITELLM_ENV_FILE="${_env_override:-$_ib_profile}"
+    ZIMZILLA_NO_PROXY=1
+  fi
+fi
+
 LITELLM_ENV_FILE="${LITELLM_ENV_FILE:-$ZIMZILLA_HOME/logfare/source}"
 LITELLM_PORT="${LITELLM_PORT:-4001}"
 LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"

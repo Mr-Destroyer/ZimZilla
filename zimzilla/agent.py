@@ -202,6 +202,9 @@ _CREDENTIAL_PROFILES = (
     # with no proxy, and the key is the operator's own. /inferx-api-setup is
     # the command that writes this file.
     ("inferx", "InferX", "ANTHROPIC_AUTH_TOKEN"),
+    # And Inferbase, on the same terms: a direct Chat Completions route whose
+    # key is the operator's own, written by /inferbase-api-setup.
+    ("inferbase", "Inferbase", "ANTHROPIC_AUTH_TOKEN"),
     ("iteracompute", "IteraCompute", "ANTHROPIC_AUTH_TOKEN"),
     ("ldxhub", "LDXHub", "LDXHUB_API_KEY"),
     ("shodan", "Shodan", "SHODAN_API_KEY"),

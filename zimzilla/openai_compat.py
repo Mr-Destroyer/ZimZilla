@@ -121,6 +121,7 @@ OPENAI_HOSTS = (
     "api.tokenjuice.ai",
     "logfare.ai",
     "model.inferx.net",
+    "api.inferbase.ai",
 )
 
 

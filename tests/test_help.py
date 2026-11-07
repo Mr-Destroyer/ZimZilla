@@ -177,8 +177,12 @@ async def test_filter(tmp: Path) -> None:
         app._handle_command("/help all")
         await pilot.pause()
         blob = "\n".join(_lines(app))
+        # The total is derived, not hardcoded: it grows every time a command is
+        # added, and a literal here fails on an unrelated change.
+        _total = sum(len(cmds) for _, _, _, cmds in HELP_GROUPS)
         check("filter: all restores every section",
-              "OFFENSIVE" in blob and "RECON" in blob and "97 commands" in blob,
+              "OFFENSIVE" in blob and "RECON" in blob
+              and f"{_total} commands" in blob,
               blob[:300])
 
         fresh()

@@ -568,8 +568,15 @@ def test_tui_surfaces() -> None:
           'return ix_mod, "InferX"' in app_src)
     check("tui: the status pane lists it",
           '("inferx", ix_mod, "InferX", "/inferx-api-setup")' in app_src)
+    # The tuple grows as direct-route providers are added, so match the branch
+    # rather than its exact text: what matters is that InferX is in it. There
+    # are two `_kind in (...)` branches (proxied, then direct), so pick the
+    # direct one by NVIDIA, which has been in it from the start.
+    _direct = [m for m in re.finditer(r'_kind in \(([^)]*)\)', app_src)
+               if '"nvidia"' in m.group(1)]
     check("tui: the status pane prints direct, not a port",
-          '_kind in ("nvidia", "inferx")' in app_src)
+          bool(_direct) and '"inferx"' in _direct[0].group(1),
+          _direct[0].group(0) if _direct else "no direct-route branch")
     check("tui: the model picker reads its catalog",
           'if active == "inferx" else None' in app_src)
     check("tui: /model refetches for it", 'elif active == "inferx":' in app_src)
