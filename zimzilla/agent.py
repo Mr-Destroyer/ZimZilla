@@ -986,7 +986,16 @@ class Agent:
                 # The prompt size this call actually sent. Stored so the next
                 # round can decide whether to compact before sending a bigger
                 # one, and so the UI can draw the gauge against a real number.
-                self._last_input_tokens = tin
+                #
+                # A playground sends no usage block at all — measured on Flex,
+                # every reply carries `choices` and nothing else — so `tin` is 0
+                # there and the measured figure would never arrive. Falling back
+                # to the estimate is what keeps auto-compaction alive on such a
+                # route: without it `_should_compact` returns False forever and
+                # the history is silently trimmed at the wire instead, which
+                # loses the oldest turns with no compaction event and no
+                # transcript line saying so.
+                self._last_input_tokens = tin or self.history_tokens()
                 yield {
                     "type": "usage",
                     "input": tin,
@@ -1769,16 +1778,39 @@ class Agent:
             found = None
         return found if found is not None else price_for(self.cfg.model)
 
+    def message_cap(self) -> int | None:
+        """The most messages this route accepts, or ``None`` when uncapped.
+
+        Only a playground caps message count. Flex answers ``400 Maximum 10
+        messages allowed`` on the eleventh, system included, and the transport
+        trims the history to fit — so without this the oldest turns would be
+        dropped at the wire with no compaction event and no transcript line
+        saying so. Never raises: a lookup must not break a turn.
+        """
+        try:
+            from . import sources as sources_mod
+            return sources_mod.message_cap_for(self.cfg.base_url)
+        except Exception:  # noqa: BLE001 - a lookup must not break a turn
+            return None
+
     def _should_compact(self, window: int) -> bool:
         """Whether the prompt is close enough to the threshold to compact first."""
         if not self.cfg.auto_compact:
-            return False
-        if self._last_input_tokens <= 0:
             return False
         # Too little history to summarise — `compact()` would refuse anyway, and
         # emitting the event pair for a no-op would put a "compacted" line in the
         # transcript that did not happen.
         if len(self.messages) < 4:
+            return False
+        # A capped route is compacted on message count, not on tokens. The cap
+        # is the harder limit: ten messages of 2000 characters is a prompt that
+        # never approaches a 32K window, so a token threshold would never fire
+        # and the transport would trim instead. Two messages of headroom are
+        # left for the turn about to be sent and its reply.
+        cap = self.message_cap()
+        if cap is not None and len(self.messages) >= max(4, cap - 2):
+            return True
+        if self._last_input_tokens <= 0:
             return False
         return self._last_input_tokens >= self.compact_threshold(window)
 

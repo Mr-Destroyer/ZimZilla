@@ -60,6 +60,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-wanbd", "talk wandb.ai inference — your own key"),
     ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
     ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
+    ("/zim-flex", "switch upstream to the Flex playground (direct, no key, chat only)"),
+    ("/zim-gemini", "switch upstream to Google Gemini (direct, free AI Studio tier)"),
     ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
     ("/tokenharbour-api-setup", "store your TokenHarbour API key"),
     ("/tokenharbour-models", "fetch the live catalog; show what is free"),
@@ -84,9 +86,12 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/inferx-models", "the live catalog — what this harness can drive"),
     ("/inferbase-api-setup", "store your Inferbase API key (api.inferbase.ai)"),
     ("/inferbase-models", "the live catalog — every model, priced, free band first"),
+    ("/flex-models", "the playground's twelve models and its three hard limits"),
     ("/antseed-models", "list AntSeed's free models, with the peer to pin"),
     ("/ldxhub-api-setup", "store your LDXHub API key (document jobs)"),
     ("/ldxhub-models", "LDXHub models/engines — pick the default per service"),
+    ("/gemini-api-setup", "store your Google AI Studio key (free tier)"),
+    ("/gemini-models", "the live catalog — what the free tier can actually call"),
     ("/models", "free models of an upstream — /models [source]"),
     ("/panes", "re-open this session under tmux"),
     ("/zim-opencode", "open opencode behind a fresh rotating IP"),
@@ -390,7 +395,8 @@ class CompletionPopup(VerticalScroll):
                     "models": ["logfare", "tokenjuice", "tokenharbour",
                                "openrouter", "unorouter", "antseed", "aihubmix",
                                "beatapi", "iteracompute", "infronai", "nvidia",
-                               "moonmath", "wandb", "inferx", "inferbase"],
+                               "moonmath", "wandb", "inferx", "inferbase",
+                               "flex"],
                 }.get(parts[0].lower(), [])
                 if parts[0].lower() == "model":
                     # Offer whatever the active upstream actually serves, so

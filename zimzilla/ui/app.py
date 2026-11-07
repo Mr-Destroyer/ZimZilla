@@ -34,6 +34,8 @@ from .. import beatapi as bp_mod
 from .. import crack as crack_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
+from .. import flex as flex_mod
+from .. import gemini as gm_mod
 from .. import hunt as hunt_mod
 from .. import inferbase as ib_mod
 from .. import inferx as ix_mod
@@ -894,6 +896,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
         ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
+        ("/zim-flex", "switch upstream to the Flex playground (direct, no key, chat only)"),
+        ("/zim-gemini", "switch upstream to Google Gemini (direct, free AI Studio tier)"),
         ("/zim-antseed", "switch upstream to AntSeed (local buyer, free peers)"),
         ("/protocol [auto|anthropic|openai]", "which wire protocol the endpoint speaks"),
         ("/openai-endpoint <url> [model]", "talk Chat Completions to any OpenAI-compatible endpoint"),
@@ -923,6 +927,9 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/inferx-models", "the live catalog — what this harness can drive"),
         ("/inferbase-api-setup <key>", "store your Inferbase API key (api.inferbase.ai)"),
         ("/inferbase-models", "the live catalog — every model, priced, free band first"),
+        ("/flex-models", "the playground's twelve models and its three hard limits"),
+        ("/gemini-api-setup [key]", "store your Google AI Studio key (free tier)"),
+        ("/gemini-models", "the live catalog — what the free tier can actually call"),
         ("/antseed-models", "AntSeed's free models, and the peer to pin"),
         ("/logfare-api-setup [key]", "use your own Logfare key (none ships)"),
         ("/logfare-models", "fetch the live catalog; show what is up"),
@@ -2457,6 +2464,13 @@ class ZimZillaApp(App):
         "inferx-api-setup", "inferx-models", "zim-inferx",
         # And Inferbase's, for the same three reasons.
         "inferbase-api-setup", "inferbase-models", "zim-inferbase",
+        # Gemini's three, for the same reasons: a mode-600 write, a catalog
+        # read, and a client rebuild. None of them starts a turn.
+        "gemini-api-setup", "gemini-models", "zim-gemini",
+        # Flex has no setup command — the playground takes no key — so only the
+        # switch and the catalog are here. Both are a local read and a client
+        # rebuild, and neither starts a turn.
+        "flex-models", "zim-flex",
         "zim-antseed", "antseed-models",
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
@@ -2615,6 +2629,14 @@ class ZimZillaApp(App):
             "zim-inferbase": lambda a: self._cmd_zim_source("inferbase", a),
             "inferbase-api-setup": lambda a: self._cmd_gateway_key("inferbase", a),
             "inferbase-models": lambda a: self._cmd_models(["inferbase"]),
+            # Flex has no setup command on purpose: the playground takes no
+            # key, so there is nothing for one to write. `/flex-models` is the
+            # catalog and the limits, which is the whole surface.
+            "zim-flex": lambda a: self._cmd_zim_source("flex", a),
+            "zim-gemini": lambda a: self._cmd_zim_source("gemini", a),
+            "gemini-api-setup": lambda a: self._cmd_gateway_key("gemini", a),
+            "gemini-models": lambda a: self._cmd_models(["gemini"]),
+            "flex-models": lambda a: self._cmd_models(["flex"]),
             "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "zim-wanbd": lambda a: self._cmd_zim_wanbd(a),
             "protocol": lambda a: self._cmd_protocol(a),
@@ -3686,6 +3708,8 @@ class ZimZillaApp(App):
                 ("moonmath", mm_mod, "Zro", "/moonmath-api-setup"),
                 ("inferx", ix_mod, "InferX", "/inferx-api-setup"),
                 ("inferbase", ib_mod, "Inferbase", "/inferbase-api-setup"),
+                ("flex", flex_mod, "Flex playground", "no key needed"),
+                ("gemini", gm_mod, "Google Gemini", "/gemini-api-setup"),
             ):
                 # IteraCompute and InfronAI have local proxies, so when their
                 # profiles exist they are already listed above by discover() —
@@ -3703,14 +3727,20 @@ class ZimZillaApp(App):
                     # missing, so the port is the honest detail to show.
                     t.append(f":{_mod.PROXY_PORT}  {_label:<12} ",
                              style=p.primary)
-                elif _kind in ("nvidia", "inferx", "inferbase"):
+                elif _kind in ("nvidia", "inferx", "inferbase", "flex",
+                               "gemini"):
                     # Neither hosted-by-us nor proxied: the upstream is reached
                     # directly, so the row says so the way Token Juice's does.
                     # There is no port, and "proxy down" would be a lie.
                     t.append(f"{'direct':<7}{_label:<12} ", style=p.primary)
                 else:
                     t.append(f"      hosted  {_label:<12} ", style=p.primary)
-                if creds is None:
+                if _kind == "flex":
+                    # No credential exists, so "no key" would read as a setup
+                    # step the operator has not done. Say what is true: the
+                    # route needs nothing, and it is a chat playground.
+                    t.append("no key needed · chat only\n", style=p.accent)
+                elif creds is None:
                     t.append(f"no key — {_setup}\n", style=p.amber)
                 else:
                     t.append(f"key from {creds[2]}\n", style=p.accent)
@@ -3751,6 +3781,7 @@ class ZimZillaApp(App):
                      "                 /zim-infronai,  /zim-nvidia,\n"
                      "                 /zim-moonmath,  /zim-wandb,\n"
                      "                 /zim-inferx,  /zim-inferbase,\n"
+                     "                 /zim-flex,  /zim-gemini,\n"
                      "                 or  /zim-antseed\n",
                      style=p.dim)
             # Any route that is present but parked is named once here, so the
@@ -3808,6 +3839,25 @@ class ZimZillaApp(App):
                     "Inferbase is not set up on this machine — set your key "
                     "with /inferbase-api-setup <inf_ key> (from "
                     "api.inferbase.ai)", warn=True)
+                return
+            if key == "gemini":
+                # Same shape as InferX: the catalog is key-gated, so until this
+                # command writes a profile there is not even a model list to
+                # show — the Models route answers 404 without one.
+                self._sys_line(
+                    "Gemini is not set up on this machine — set your key with "
+                    "/gemini-api-setup <AQ. key> (free at aistudio.google.com)",
+                    warn=True)
+                return
+            if key == "flex":
+                # The only source that cannot be missing for want of a key: its
+                # profile ships in the tree and carries no credential. Reaching
+                # here means the checkout is incomplete, which is a different
+                # problem from a missing key and deserves a different sentence.
+                self._sys_line(
+                    "the Flex playground route is missing from this checkout — "
+                    "packaging/flex/source should ship with it; reinstall or "
+                    "restore that file", warn=True)
                 return
             self._sys_line(
                 f"source '{key}' is not available — profile, config or service missing",
@@ -3958,7 +4008,12 @@ class ZimZillaApp(App):
         try:
             profile = sources_mod.load_profile(src)
             token = profile.get("ANTHROPIC_AUTH_TOKEN") or None
-            if not token:
+            # Flex is the one direct source with no credential to find: its
+            # playground authenticates nothing, so an empty token is the
+            # correct state rather than a broken profile. Every other source
+            # still stops here, because for them a missing token means the
+            # profile is half-written and the first turn would 401.
+            if not token and src.key != "flex":
                 self._sys_line(
                     f"{src.label} profile has no ANTHROPIC_AUTH_TOKEN: "
                     f"{src.profile}", warn=True)
@@ -4018,6 +4073,12 @@ class ZimZillaApp(App):
             return "/inferx-api-setup <ix_ key>"
         if src.key == "inferbase":
             return "/inferbase-api-setup <inf_ key>"
+        if src.key == "gemini":
+            return "/gemini-api-setup <AQ. key>"
+        if src.key == "flex":
+            # There is no key to replace, so the honest answer is the route
+            # itself rather than a setup command that does not exist.
+            return "nothing — the Flex playground takes no key"
         return f"/{src.key}-api-setup <key>"
 
     def _cmd_zim_deepseek(self, args) -> None:
@@ -4184,6 +4245,29 @@ class ZimZillaApp(App):
             ok, detail = ib_mod.verify_key(token or "", chosen)
             models, _ = ib_mod.fetch_models(token or "")
             ids = [m.id for m in (models or []) if m.chat]
+        elif src.key == "gemini":
+            # InferX's case: the Models route is **key-gated** (404 without a
+            # credential), so the probe *is* the key check — no separate verify
+            # call, and a spent quota cannot fail a working key because only a
+            # rejected key does. Read through the module rather than
+            # `openai_compat.probe` so the switch warms the same cache `/model`
+            # and `/gemini-models` read: one round-trip does both jobs.
+            models, err = gm_mod.fetch_models(token or "")
+            if models is None:
+                ok, detail, ids = False, err, []
+            else:
+                ok = True
+                detail = f"{len(models)} models"
+                ids = [m.id for m in models if m.chat]
+        elif src.key == "flex":
+            # Neither of the two cases above, because there is no credential to
+            # check and no Models route to probe: the playground authenticates
+            # nothing and publishes no catalog. `verify` makes one tiny real
+            # chat call, which is the only thing that proves the route, and the
+            # ids come from the module's declared list — the same list `/model`
+            # and `/flex-models` read, so the picker and the switch agree.
+            ok, detail = flex_mod.verify(chosen)
+            ids = list(flex_mod.model_ids()[0] or [])
         else:
             ok, detail = oa_mod.probe(route.base_url, token)
             ids = list(oa_mod.cached_ids(route.base_url))
@@ -4197,7 +4281,8 @@ class ZimZillaApp(App):
         # place that the account may not be funded for.
         mod = {"iteracompute": ic_mod, "infronai": inf_mod,
                "nvidia": nv_mod, "wandb": wb_mod, "inferx": ix_mod,
-               "inferbase": ib_mod}.get(src.key)
+               "inferbase": ib_mod, "flex": flex_mod,
+               "gemini": gm_mod}.get(src.key)
         if mod is not None:
             try:
                 fresh = mod.default_free_model()
@@ -4615,6 +4700,11 @@ class ZimZillaApp(App):
         # against a mode-600 profile.
         if kind == "nvidia":
             return nv_mod, "NVIDIA NIM"
+        # Direct-only and key-owned, like NVIDIA: `/zim-gemini` goes through
+        # `_cmd_zim_source`, and this is what lets `/gemini-api-setup` share the
+        # key-handling code — the same read/write against a mode-600 profile.
+        if kind == "gemini":
+            return gm_mod, "Google Gemini"
         if kind == "wandb":
             return wb_mod, "wandb.ai inference"
         # Direct-only and key-owned, like wandb one line up: `/zim-inferx` goes
@@ -4919,6 +5009,20 @@ class ZimZillaApp(App):
                 t.append(f"{mod.KEY_PREFIX}  · tenant-scoped — the catalog is "
                          "key-gated too,\n                so /inferx-models "
                          "needs it before it can list anything\n", style=p.dim)
+            if kind == "gemini":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://aistudio.google.com/apikey\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{gm_mod.KEY_PREFIX}  · free tier, no card. The catalog "
+                         "lists 61 models\n                but only ~12 answer "
+                         "on a free key — /gemini-models says which\n",
+                         style=p.dim)
+                t.append("  note:        ", style=p.dim)
+                t.append(
+                    "the catalog is key-gated, so /gemini-models needs the key "
+                    "before it can list anything.\n",
+                    style=p.dim,
+                )
             if kind == "inferbase":
                 t.append("  get a key at  ", style=p.dim)
                 t.append("https://inferbase.ai (Gateway › API keys)\n",
@@ -4951,6 +5055,16 @@ class ZimZillaApp(App):
             # 401 on their first turn. Off the UI thread — it is a network call.
             self._verify_moonmath_key(key)
         if kind == "inferbase" and ib_mod.is_inferbase(self.cfg.base_url):
+            # The route is direct and the client already holds the *old* token,
+            # which it read from the profile at switch time. Without this the
+            # new key is on disk and nowhere else until the next launch — the
+            # "saved but not in force" failure TokenHarbour's command documents.
+            self.cfg.auth_token = key
+            self.cfg.api_key = ""
+            self.agent._client = None
+            self._sys_line("applied to this session — no restart", ok=True)
+            return
+        if kind == "gemini" and gm_mod.is_gemini(self.cfg.base_url):
             # The route is direct and the client already holds the *old* token,
             # which it read from the profile at switch time. Without this the
             # new key is on disk and nowhere else until the next launch — the
@@ -5325,7 +5439,7 @@ class ZimZillaApp(App):
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "antseed", "aihubmix", "beatapi",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
-                 "inferx", "inferbase"}
+                 "inferx", "inferbase", "flex", "gemini"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -5442,6 +5556,19 @@ class ZimZillaApp(App):
             # covers. Sent when present so the listing is the real one.
             creds = ib_mod.load_credentials()
             return ib_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "gemini":
+            # Key-gated, unlike NVIDIA's: the Models route answers 404 without a
+            # credential, so there is nothing to list before the key exists.
+            creds = gm_mod.load_credentials()
+            if creds is None:
+                return None, "no key — set one with /gemini-api-setup <key>"
+            return gm_mod.chat_models(creds[0])
+        if kind == "flex":
+            # No key and no fetch: the playground publishes no catalog, so this
+            # is the module's declared list. `usable_free_models` filters it to
+            # the chat-capable ids, which is what keeps PaddleOCR-VL out of a
+            # picker that would otherwise offer an OCR model as a chat one.
+            return flex_mod.usable_free_models()
         if kind == "tokenharbour":
             creds = th_mod.load_credentials()
             if creds is None:
@@ -5477,6 +5604,8 @@ class ZimZillaApp(App):
                  "wandb": "WANDB.AI",
                  "inferx": "INFERX",
                  "inferbase": "INFERBASE",
+                 "flex": "FLEX PLAYGROUND",
+                 "gemini": "GOOGLE GEMINI",
                  "moonmath": "ZRO (MOONMATH.AI)",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
@@ -5537,6 +5666,13 @@ class ZimZillaApp(App):
                     "covers is key-gated — so an empty\n  list here means "
                     "neither route answered, not that nothing is free)\n",
                     style=p.dim)
+            if kind == "flex":
+                t.append(
+                    "  (the catalog is declared, not fetched: the playground "
+                    "has no Models\n  route — /api/playground/models answers "
+                    "404 and /v1/models is the\n  authenticated API's. An "
+                    "empty list here would mean the module failed to\n  "
+                    "import, not that the playground is down)\n", style=p.dim)
             if kind == "moonmath":
                 t.append(
                     "  (the catalog is public and live. 'free' here is the Free "
@@ -5728,6 +5864,30 @@ class ZimZillaApp(App):
                 "  ids go on the wire unchanged, and the window comes from "
                 "InferX's own\n  catalog page (the API sends none); an id it "
                 "does not list plans against 256K\n", style=p.dim)
+        if kind == "flex":
+            # The three limits are the whole reason this screen exists: they are
+            # enforced by the playground, they are not negotiable, and a reader
+            # who does not know them will read a trimmed history or a missing
+            # tool call as a harness bug.
+            t.append(
+                "  free = there is no account: the playground is "
+                "unauthenticated, so nothing\n  is billed and no key exists to "
+                "set\n", style=p.dim)
+            t.append(
+                f"  at most {flex_mod.MAX_MESSAGES} messages, system included, "
+                f"and {flex_mod.MAX_MESSAGE_CHARS}\n  characters in the last "
+                "one — the harness trims history and the tail to fit,\n  so a "
+                "long session loses its oldest turns rather than failing\n",
+                style=p.dim)
+            t.append(
+                "  no tool calls: a tools array is accepted and the model "
+                "answers with a\n  call-shaped string in ordinary content, "
+                "never delta.tool_calls[] — so this\n  route cannot drive the "
+                "tool loop, and it is a chat route only\n", style=p.dim)
+            t.append(
+                "  a busy playground answers 200 with a rate_limit frame rather "
+                "than a 429;\n  the transport maps it back to a 429 so the "
+                "retry policy backs off and retries\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
         self._refresh_model_choices()
 
@@ -9595,10 +9755,16 @@ class ZimZillaApp(App):
              "inferx-models"),
             ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)",
              "zim-inferbase"),
+            ("/zim-gemini", "switch upstream to Google Gemini (direct, free AI Studio tier)",
+             "zim-gemini"),
+            ("/zim-flex", "switch upstream to the Flex playground — no key, chat only",
+             "zim-flex"),
             ("/inferbase-api-setup", "store your Inferbase API key",
              "inferbase-api-setup"),
             ("/inferbase-models", "the live catalog — every model, priced, free band first",
              "inferbase-models"),
+            ("/flex-models", "the playground's twelve models and its three hard limits",
+             "flex-models"),
             ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — fast and free (operator key)",
              "zim-deepseek"),
             ("/zim-wanbd", "talk wandb.ai inference with your own key",

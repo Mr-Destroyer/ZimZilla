@@ -750,7 +750,7 @@ or a colour diff of the change, and three keys:
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
 points at, or Chat Completions to an endpoint that serves it, so it can run
 against a hosted gateway, a direct upstream or a local proxy without any code
-caring which. Fourteen sources are wired up:
+caring which. Seventeen sources are wired up:
 
 | Source | Endpoint | Key | How it starts |
 |---|---|---|---|
@@ -762,6 +762,8 @@ caring which. Fourteen sources are wired up:
 | **wandb.ai inference** | `api.inference.wandb.ai/v1` | yours (`wandb_v1_…`) | direct, no proxy — free preview, Chat Completions |
 | **InferX** | `model.inferx.net/endpoints/v1` | yours (`ix_…`) | direct, no proxy — tenant-scoped endpoint, key-gated catalog |
 | **Inferbase** | `api.inferbase.ai/v1` | yours (`inf_…`) | direct, no proxy — free plan is a price band, priced catalog |
+| **Flex playground** | `eu.api.flex.ai/api/playground/chat` | **none** — unauthenticated | direct, no proxy — 12 models, chat only (no tool calls) |
+| **Google Gemini** | `generativelanguage.googleapis.com/v1beta/openai` | yours (`AQ.…`) | direct, no proxy — free AI Studio tier, key-gated catalog |
 | **TokenHarbour** | `tokenharbor.ai` | yours | hosted — nothing to start |
 | **OpenRouter** | `openrouter.ai` | yours | hosted — nothing to start |
 | **UnoRouter** | `api.unorouter.com` | yours | hosted — nothing to start |
@@ -772,14 +774,14 @@ caring which. Fourteen sources are wired up:
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
-`/zim-inferbase`, `/zim-tokenharbour`, `/zim-openrouter`,
-`/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi`, `/zim-moonmath` or
-`/zim-antseed`; the choice is remembered, so the next launch comes back to the
-one that was working.
+`/zim-inferbase`, `/zim-gemini`, `/zim-flex`, `/zim-tokenharbour`,
+`/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi`,
+`/zim-moonmath` or `/zim-antseed`; the choice is remembered, so the next launch
+comes back to the one that was working.
 
-Logfare, Token Juice, NVIDIA, wandb, InferX and Inferbase are reached
-**directly** — their upstreams serve Chat Completions themselves, so there is no
-proxy to start.
+Logfare, Token Juice, NVIDIA, wandb, InferX, Inferbase, Gemini and Flex are
+reached **directly** — their upstreams serve Chat Completions themselves, so
+there is no proxy to start.
 IteraCompute and InfronAI still ship an optional local proxy, but are reached
 directly by default too; add `proxy` to go through it:
 `/zim-iteracompute proxy`.
@@ -1609,10 +1611,15 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-inferbase` | switch upstream to Inferbase — direct, free plan is a price band |
 | `/inferbase-api-setup <key>` | store your Inferbase API key (`inf_…` from inferbase.ai) |
 | `/inferbase-models` | the live catalog — every model, priced, free band first |
+| `/zim-flex` | switch upstream to the Flex playground — direct, **no key**, chat only |
+| `/flex-models` | the playground's twelve models and its three hard limits |
+| `/zim-gemini` | switch upstream to Google Gemini — direct, free AI Studio tier |
+| `/gemini-api-setup <key>` | store your Google AI Studio key (`AQ.…` from aistudio.google.com) |
+| `/gemini-models` | the live catalog — what the free tier can actually call |
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
 | `/logfare-api-setup [key]` | use your own Logfare key; none ships in the repository |
-| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `inferbase`, `antseed` |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `inferbase`, `gemini`, `flex`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/reverse-engineer <file>` | map an artifact (`.apk`, `.zip`, `.exe`, `.sh`, binary), then ask what you want changed |
 | `/reverse-engineer <file> --map` | map it only — no model turn, nothing sent |

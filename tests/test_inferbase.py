@@ -848,8 +848,13 @@ def test_tui_surfaces() -> None:
           'return ib_mod, "Inferbase"' in app_src)
     check("tui: the status pane lists it",
           '("inferbase", ib_mod, "Inferbase", "/inferbase-api-setup")' in app_src)
+    # Matched on the branch rather than on its exact tuple: the tuple grows
+    # every time a direct source is added (flex was the next one), and an
+    # assertion on the literal text fails on an unrelated addition instead of
+    # on the regression it is here to catch.
     check("tui: the status pane prints direct, not a port",
-          '_kind in ("nvidia", "inferx", "inferbase")' in app_src)
+          '_kind in (' in app_src and '"inferbase")' in app_src
+          and 't.append(f"{\'direct\':<7}{_label:<12} "' in app_src)
     check("tui: the model picker reads its catalog",
           'if active == "inferbase" else None' in app_src)
     check("tui: /model refetches for it", 'elif active == "inferbase":' in app_src)

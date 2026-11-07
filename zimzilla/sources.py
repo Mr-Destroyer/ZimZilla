@@ -77,6 +77,15 @@ are read together, because neither is complete on its own. Its free plan is a
 anything above answers 402 — so ``free`` here is a published rate rather than an
 allowance; see :mod:`zimzilla.inferbase`.
 
+Flex (``eu.api.flex.ai``) is the odd one out, and the difference is worth
+stating plainly: its playground route is **unauthenticated**. There is no key to
+store, so its profile is a route record rather than a credential, and
+``/zim-flex`` needs no setup command. It is also a *playground* rather than an
+API — 10 messages, 2000 characters in the last one, no ``tool_calls``, and
+failures delivered as a 200 with an SSE error frame — so it is a chat route and
+not a route this harness's tool loop can drive. See :mod:`zimzilla.flex` and
+``openai_compat.PLAYGROUND_HOSTS``.
+
 The other upstreams (TokenHarbour, OpenRouter, UnoRouter, AIHubMix, BeatAPI,
 AntSeed) are remote or operator-started, and live in their own modules; this one
 is the local proxy plumbing and the selection record
@@ -238,6 +247,24 @@ INFERX_DIRECT = DirectRoute(base_url="https://model.inferx.net/endpoints/v1")
 #: :mod:`zimzilla.inferbase`.
 INFERBASE_DIRECT = DirectRoute(base_url="https://api.inferbase.ai/v1")
 
+#: Flex's playground route, declared rather than read from a proxy config.
+#:
+#: ``eu.api.flex.ai/api/playground/chat`` speaks Chat Completions itself, so —
+#: like Token Juice, NVIDIA, wandb, InferX and Inferbase — there is no LiteLLM
+#: hop and nothing to start. Two things make it different from every other
+#: route in this table:
+#:
+#: * **It needs no credential.** The route is unauthenticated, so the profile
+#:   below is a route record and ``/zim-flex`` has no setup command to name.
+#: * **The URL is the endpoint, not a base.** There is no ``/v1`` to append to,
+#:   which is why ``openai_compat.chat_completions_url`` returns it untouched
+#:   for this host rather than building ``…/chat/v1/chat/completions``.
+#:
+#: The alias map is empty: the playground's ids are already the ids that go on
+#: the wire (``DeepSeek-V4-Flash-0731``, ``gpt-oss-20b``, …). See
+#: :mod:`zimzilla.flex`.
+FLEX_DIRECT = DirectRoute(base_url="https://eu.api.flex.ai/api/playground/chat")
+
 #: Logfare's route, declared rather than read from a proxy config.
 #:
 #: ``https://logfare.ai/v1`` serves Chat Completions itself, so the bundled
@@ -255,11 +282,31 @@ LOGFARE_DIRECT = DirectRoute(
     },
 )
 
+#: Gemini's route, declared rather than read from a proxy config.
+#:
+#: ``generativelanguage.googleapis.com/v1beta/openai`` speaks Chat Completions
+#: itself, so — like Token Juice, NVIDIA, wandb, InferX, Inferbase and Flex —
+#: there is no LiteLLM hop and nothing to start. Two things make it different
+#: from every other route in this table:
+#:
+#: * **The base is not ``/v1``.** It is ``/v1beta/openai``, which is why
+#:   :func:`zimzilla.openai_compat.chat_completions_url` special-cases this host
+#:   rather than appending ``/v1/chat/completions`` to it.
+#: * **The catalog is key-gated.** ``/models`` answers 404 without a credential,
+#:   so the switch probe is a real key check and ``/gemini-models`` needs the
+#:   key before it can list anything.
+#:
+#: The alias map is empty: the catalog's ids are already the ids that go on the
+#: wire (``gemini-flash-lite-latest``, ``gemma-4-31b-it``, ...). See
+#: :mod:`zimzilla.gemini`.
+GEMINI_DIRECT = DirectRoute(
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai")
+
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
 #: where they go.
 DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia", "wandb",
-                                         "inferx", "inferbase"})
+                                         "inferx", "inferbase", "flex", "gemini"})
 
 #: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
 DECLARED_ROUTES: dict[str, DirectRoute] = {
@@ -269,6 +316,8 @@ DECLARED_ROUTES: dict[str, DirectRoute] = {
     "wandb": WANDB_DIRECT,
     "inferx": INFERX_DIRECT,
     "inferbase": INFERBASE_DIRECT,
+    "flex": FLEX_DIRECT,
+    "gemini": GEMINI_DIRECT,
 }
 
 
@@ -559,6 +608,28 @@ INFERBASE_MODELS: tuple[str, ...] = (
     "zai-glm-4-6",
 )
 
+#: Flex's declared catalog — the twelve ids its playground picker offered on
+#: 2026-11-07, each confirmed to answer a chat turn. Unlike every other list in
+#: this table this one is **not a fallback**: the playground has no Models route
+#: (``/api/playground/models`` answers 404, and ``/v1/models`` is the
+#: authenticated API's), so there is nothing to fetch and this is the catalog.
+#: ``PaddleOCR-VL`` is listed because the picker lists it; ``flex.Model.chat``
+#: filters it out of the picker, since it is an OCR model and not a chat one.
+FLEX_MODELS: tuple[str, ...] = (
+    "DeepSeek-V4-Flash-0731",
+    "gpt-oss-20b",
+    "Qwen3.5-9B",
+    "GLM-4.5-Air-FP8",
+    "Qwen3-Coder-30B-A3B-Instruct-FP8",
+    "Qwen3.6-35B-A3B-FP8",
+    "Qwen3-30B-A3B-Thinking-2507-FP8",
+    "gemma-4-26B-A4B-it",
+    "gemma-4-31b-it",
+    "Meta-Llama-3.1-8B-Instruct-FP8",
+    "Mistral-Nemo-Instruct-2407-FP8",
+    "PaddleOCR-VL",
+)
+
 #: Zro's declared fallback. Its real catalog is fetched from the public
 #: ``/models`` route (see ``moonmath.py``); this is what ``/model`` shows before
 #: that fetch. The catalog carried three chat models when this was written, and
@@ -585,6 +656,7 @@ MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "wandb": WANDB_MODELS,
     "inferx": INFERX_MODELS,
     "inferbase": INFERBASE_MODELS,
+    "flex": FLEX_MODELS,
 }
 
 
@@ -676,6 +748,26 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import inferbase as ib_mod
         cached = ib_mod.cached_ids()
         return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
+    if key == "gemini":
+        # Checked before the generic DIRECT_ONLY branch for the same reason as
+        # InferX: the catalog is key-gated, so the generic branch would read a
+        # probe cache that is cold until a switch fills it. Reading the module
+        # directly means `/model` offers the chat-capable ids the switch just
+        # fetched, not the raw 61 the Models route lists.
+        from . import gemini as gm_mod
+        cached = gm_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
+    if key == "flex":
+        # Checked before the generic DIRECT_ONLY branch, and for a reason that
+        # is the opposite of Inferbase's: this source has no Models route to
+        # probe at all, so the generic branch would read a probe cache that can
+        # never be filled and fall back to the declared list anyway. Reading the
+        # module directly says where the list comes from — a constant, not a
+        # fetch — and keeps `PaddleOCR-VL` out of the picker, which the raw
+        # declared tuple would put there.
+        from . import flex as flex_mod
+        cached = flex_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     if key in DIRECT_ONLY:
         # Declared, not fetched — but a switch probes the Models route, and what
         # the upstream actually answered is better than the declared fallback.
@@ -761,6 +853,12 @@ def catalog_models(key: str) -> list | None:
     if key == "inferbase":
         from . import inferbase as ib_mod
         return ib_mod.cached_models()
+    if key == "flex":
+        from . import flex as flex_mod
+        return flex_mod.cached_models()
+    if key == "gemini":
+        from . import gemini as gm_mod
+        return gm_mod.cached_models()
     if key == "moonmath":
         from . import moonmath as mm_mod
         return mm_mod.cached_models()
@@ -854,6 +952,18 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # it warm or cold; a pinned model gets its published rate as soon as
         # the catalog is read.
         return (0.0, 0.0)
+    if key == "flex":
+        # The playground is unauthenticated, so there is no account to bill and
+        # no key to meter. (0, 0) is the true answer warm or cold — and unlike
+        # the three branches above, this one is not about a cold cache: the
+        # catalog is a constant, so it is never cold.
+        return (0.0, 0.0)
+    if key == "gemini":
+        # NVIDIA's case exactly: the catalog publishes no per-model price, and
+        # the free tier is a quota on the *account* rather than a rate on the
+        # model. A cold cache answering None would fall through to the estimate
+        # table and bill a free model at DEFAULT_PRICE.
+        return (0.0, 0.0)
     cached = catalog_models(key)
     if not cached:
         return None
@@ -873,6 +983,27 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         if isinstance(price_in, (int, float)) and isinstance(price_out, (int, float)):
             return (float(price_in), float(price_out))
         return None
+    return None
+
+
+def message_cap_for(base_url: str) -> int | None:
+    """The most messages the active route accepts, or ``None`` when uncapped.
+
+    Only a playground caps this. Flex answers ``400 Maximum 10 messages
+    allowed`` on the eleventh, system included, and the transport trims the
+    history to fit — which means the oldest turns are dropped at the wire with
+    no compaction event and no transcript line saying so. The agent loop reads
+    this to compact *before* that happens, so the loss is a summarised history
+    rather than a silent truncation.
+
+    ``None`` is the honest answer for every other route: an API does not cap
+    message count, and a caller that treated "no answer" as a number would
+    compact a healthy session for no reason.
+    """
+    key = active_key(base_url)
+    if key == "flex":
+        from . import flex as flex_mod
+        return flex_mod.MAX_MESSAGES
     return None
 
 
@@ -1011,6 +1142,24 @@ def _profile_candidates(key: str) -> list[Path]:
         return [
             ZIMZILLA_HOME / "inferbase" / "source",
         ]
+    if key == "gemini":
+        # No credential ships, and none could: an AI Studio key is the
+        # operator's own. Until /gemini-api-setup writes this file the source is
+        # not discovered, which is what makes /zim-gemini name the setup command
+        # instead of failing at request time.
+        return [
+            ZIMZILLA_HOME / "gemini" / "source",
+        ]
+    if key == "flex":
+        # The one source whose profile is NOT a credential: the playground
+        # authenticates nothing, so this file records the route and the model.
+        # It ships in the tree, which is what makes /zim-flex work on a fresh
+        # clone with no setup step — and the operator's own copy wins, so a
+        # model pinned with /model survives a reinstall.
+        return [
+            ZIMZILLA_HOME / "flex" / "source",
+            DEFAULT_ROOT / "packaging" / "flex" / "source",
+        ]
     return [
         ZIMZILLA_HOME / "tokenjuice" / "source",
         DEFAULT_HOME / "claude-source" / "deepseek-claude",
@@ -1104,6 +1253,19 @@ def discover() -> dict[str, Source]:
     inferbase = _build("inferbase", "Inferbase", 0, "auto")
     if inferbase:
         found["inferbase"] = inferbase
+    # And Flex, which is the one source discovered from a profile that carries
+    # no credential. Its profile ships in the tree, so this is present on every
+    # install — which is the point: the route needs no key, so there is nothing
+    # for the operator to set up before it works.
+    flex = _build("flex", "Flex playground", 0, "DeepSeek-V4-Flash-0731")
+    if flex:
+        found["flex"] = flex
+    # And Gemini: direct-only, and — like InferX and unlike NVIDIA — its catalog
+    # is key-gated, so without a profile there is nothing to list and the route
+    # is absent until /gemini-api-setup has run.
+    gemini = _build("gemini", "Google Gemini", 0, "gemini-flash-lite-latest")
+    if gemini:
+        found["gemini"] = gemini
     return found
 
 
@@ -1144,7 +1306,7 @@ def switchable(exclude: str | None = None) -> list[str]:
     for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
                 "tokenharbour", "moonmath", "infronai", "iteracompute",
                 "antseed", "nvidia", "tokenjuice", "logfare", "wandb",
-                "inferx", "inferbase"):
+                "inferx", "inferbase", "flex"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -1180,6 +1342,8 @@ def _gateway_module(key: str):
     """
     from . import aihubmix as ah_mod
     from . import beatapi as bp_mod
+    from . import flex as flex_mod
+    from . import gemini as gm_mod
     from . import inferbase as ib_mod
     from . import inferx as ix_mod
     from . import moonmath as mm_mod
@@ -1191,6 +1355,7 @@ def _gateway_module(key: str):
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
         "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
         "wandb": wb_mod, "inferx": ix_mod, "inferbase": ib_mod,
+        "flex": flex_mod, "gemini": gm_mod,
     }.get(key)
 
 
@@ -1255,7 +1420,7 @@ def _state_file() -> Path:
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
                           "aihubmix", "beatapi", "moonmath", "wandb", "inferx",
-                          "inferbase"})
+                          "inferbase", "flex"})
 
 
 def current_key() -> str | None:
@@ -1306,6 +1471,8 @@ def active_key(base_url: str) -> str | None:
     from . import aihubmix as ah_mod
     from . import antseed as as_mod
     from . import beatapi as bp_mod
+    from . import flex as flex_mod
+    from . import gemini as gm_mod
     from . import inferbase as ib_mod
     from . import inferx as ix_mod
     from . import infronai as inf_mod
@@ -1359,6 +1526,15 @@ def active_key(base_url: str) -> str | None:
     # launched from an environment profile is still recognised.
     if ib_mod.is_inferbase(base_url):
         return "inferbase"
+    # And Flex, which is the one source here with no credential to identify it
+    # by: the playground authenticates nothing, so the host is the whole test.
+    if flex_mod.is_flex(base_url):
+        return "flex"
+    # And Gemini, reached directly and identified by host for the same reason:
+    # there is no port to match on, and a session launched from an environment
+    # profile has no file for discover() to find.
+    if gm_mod.is_gemini(base_url):
+        return "gemini"
     # Checked before the port match, and by port rather than by name: the buyer
     # hands out a plain http://localhost:8377 with no "antseed" in it, and the
     # regex below would otherwise find port 8377, miss it in source_for_port()

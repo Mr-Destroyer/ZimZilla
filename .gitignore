@@ -16,8 +16,11 @@ venv/
 # deliberate exceptions — a shared key shipped so a fresh clone can start:
 # Logfare's (a template with a placeholder, because its key is budgeted) and
 # Token Juice's (a real shared key, because the route is meant to work with no
-# signup at all).
+# signup at all). Flex's is a third kind of exception: it carries no credential
+# at all — the playground authenticates nothing — so it is a route record, and
+# /zim-flex is documented as working on a fresh clone because of it.
 packaging/*/source
 !packaging/logfare/source
 !packaging/tokenjuice/source
+!packaging/flex/source
 

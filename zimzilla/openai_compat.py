@@ -122,7 +122,57 @@ OPENAI_HOSTS = (
     "logfare.ai",
     "model.inferx.net",
     "api.inferbase.ai",
+    # Flex's playground. Its route is the endpoint itself
+    # (``/api/playground/chat``), so the path rule would already resolve it —
+    # naming the host keeps a bare ``https://eu.api.flex.ai`` from being read as
+    # an Anthropic endpoint by a future heuristic. See :mod:`zimzilla.flex`.
+    "eu.api.flex.ai",
+    # Gemini's OpenAI-compatible surface. Its base is ``/v1beta/openai``, not
+    # ``/v1``, so the path rule below would append a second path and 404. See
+    # :mod:`zimzilla.gemini`.
+    "generativelanguage.googleapis.com",
 )
+
+#: Hosts whose Chat Completions route is a *playground* rather than an API, and
+#: which therefore need three adjustments this transport would not otherwise
+#: make. Measured on Flex's route, 2026-11-07:
+#:
+#: * **The reply is always SSE**, even for ``stream: false`` — so the
+#:   non-streaming path would try to parse an event stream as one JSON object
+#:   and read an empty reply.
+#: * **Failures arrive as 200** with an SSE frame
+#:   ``{"error": {"code": "rate_limit" | "generic", …}}``. A status check sees
+#:   success, so the frame has to be mapped onto a status the retry policy
+#:   understands.
+#: * **The history is capped** at 10 messages (system included) and 2000
+#:   characters in the last one, enforced with a 400.
+PLAYGROUND_HOSTS = ("eu.api.flex.ai",)
+
+#: Hosts whose OpenAI-compatible base is not ``/v1``. Gemini serves it at
+#: ``/v1beta/openai``, so the ``/v1`` rule in :func:`chat_completions_url` and
+#: :func:`models_url` would append a second path and 404. Named here rather than
+#: inlined so the two functions cannot drift apart. See :mod:`zimzilla.gemini`.
+GEMINI_HOSTS = ("generativelanguage.googleapis.com",)
+
+#: The playground's published limits, used to fit a request before it is sent.
+#: Read from ``/api/playground/config`` on 2026-11-07; ``zimzilla.flex`` carries
+#: the same two numbers and the command that shows them.
+PLAYGROUND_MAX_MESSAGES = 10
+PLAYGROUND_MAX_MESSAGE_CHARS = 2000
+
+#: Appended to a message the playground cap forced us to cut, so a model reading
+#: a truncated tool result knows it is reading one.
+PLAYGROUND_TRIM_MARK = (
+    "\n…[trimmed: this playground caps the last message at "
+    f"{PLAYGROUND_MAX_MESSAGE_CHARS} chars]"
+)
+
+#: Error codes an SSE frame uses for a condition that clears on its own. Mapped
+#: onto 429 so ``_stream_once``'s backoff retries them instead of failing the
+#: turn — measured, Flex's busy condition clears in seconds and the identical
+#: request succeeds on the next attempt.
+_TRANSIENT_FRAME_CODES = frozenset({"rate_limit", "rate_limited", "overloaded",
+                                    "busy", "capacity"})
 
 
 def _host_of(url: str) -> str:
@@ -200,6 +250,16 @@ def is_local_proxy(base_url: str) -> bool:
         and not path.endswith("/v1")
 
 
+def is_playground(base_url: str) -> bool:
+    """Whether *base_url* is a playground route rather than an API.
+
+    Playgrounds need three adjustments this transport does not otherwise make —
+    always-SSE replies, failures delivered as a 200 with an error frame, and a
+    capped history. See :data:`PLAYGROUND_HOSTS`.
+    """
+    return _host_matches(_host_of(base_url), PLAYGROUND_HOSTS)
+
+
 def chat_completions_url(base_url: str) -> str:
     """The Chat Completions endpoint for *base_url*.
 
@@ -207,20 +267,56 @@ def chat_completions_url(base_url: str) -> str:
     an operator can paste the exact endpoint from a provider's docs. A URL that
     ends in ``/v1`` only gains the last segment; anything else gains the whole
     ``/v1/chat/completions``.
+
+    A playground is the exception: its route *is* the endpoint
+    (``/api/playground/chat``), with no ``/v1`` convention to append to, so the
+    URL is returned as given. Appending would produce
+    ``…/playground/chat/v1/chat/completions``, which answers 404.
     """
     url = (base_url or "").strip().rstrip("/")
+    if is_playground(url):
+        return url
     if url.endswith("/chat/completions"):
         return url
+    # Gemini's OpenAI-compatible base is ``/v1beta/openai``, which is neither a
+    # ``/v1`` base nor the endpoint itself. The generic rule would produce
+    # ``.../v1beta/openai/v1/chat/completions`` and 404, so the last segment is
+    # appended to the base as given. A bare host (or the native ``/v1beta``
+    # surface) is rewritten to the ``/openai`` path that speaks this protocol.
+    if _host_matches(_host_of(url), GEMINI_HOSTS):
+        if url.endswith("/v1beta/openai"):
+            return url + "/chat/completions"
+        if url.endswith("/v1beta"):
+            return url + "/openai/chat/completions"
+        return url + "/v1beta/openai/chat/completions"
     if url.endswith("/v1"):
         return url + "/chat/completions"
     return url + CHAT_PATH
 
 
 def models_url(base_url: str) -> str:
-    """The Models endpoint for *base_url*, for probing a route."""
+    """The Models endpoint for *base_url*, for probing a route.
+
+    A playground has none: its route is the chat endpoint itself and there is no
+    catalog to list (Flex answers 404 on ``/api/playground/models`` and 401 on
+    the authenticated ``/v1/models``). The chat URL is returned so a caller that
+    probes anyway gets a 405 from the route rather than a 404 from a path that
+    was invented here — and ``probe`` short-circuits playgrounds before it ever
+    gets this far.
+    """
     url = (base_url or "").strip().rstrip("/")
+    if is_playground(url):
+        return url
     if url.endswith("/chat/completions"):
         return url[: -len("/chat/completions")] + "/models"
+    # Same exception as chat_completions_url, for the same reason: Gemini's
+    # base is ``/v1beta/openai`` and the generic rule would append ``/v1``.
+    if _host_matches(_host_of(url), GEMINI_HOSTS):
+        if url.endswith("/v1beta/openai"):
+            return url + "/models"
+        if url.endswith("/v1beta"):
+            return url + "/openai/models"
+        return url + "/v1beta/openai/models"
     if url.endswith("/v1"):
         return url + "/models"
     return url + "/v1/models"
@@ -671,6 +767,74 @@ _STATUS_ERRORS = {
 }
 
 
+def _looks_like_sse(raw: bytes) -> bool:
+    """Whether a body is an event stream rather than one JSON object.
+
+    A playground answers SSE even to a non-streaming request, so the
+    non-streaming path has to notice. Checked on the first non-blank line rather
+    than on the content type: the route sends
+    ``text/event-stream; charset=utf-8``, but a proxy in front of one may not,
+    and the bytes are the thing that cannot be wrong.
+    """
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        return line.startswith("data:") or line.startswith(":")
+    return False
+
+
+def _feed_sse_body(accumulator: "Accumulator", raw: bytes, url: str,
+                   status: int, headers: dict) -> None:
+    """Feed a whole SSE body into *accumulator*, raising on an error frame.
+
+    The non-streaming twin of ``_Stream._iterate``: same frame handling, same
+    error mapping, no iteration. Used when a server answers an event stream to a
+    request that asked for one object.
+    """
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith(":"):
+            continue
+        data = line[len("data:"):].strip() if line.startswith("data:") else line
+        if data == "[DONE]":
+            break
+        try:
+            obj = json.loads(data)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("error"):
+            raise error_for(_frame_status(obj, status),
+                            json.dumps(obj).encode(), headers, url)
+        accumulator.feed_chunk(obj)
+
+
+def _frame_status(obj: dict, status: int) -> int:
+    """The status an in-stream error frame should be treated as.
+
+    A playground delivers failures as a **200** with an SSE frame
+    ``{"error": {"code": …, "message": …}}``, so the HTTP status says success
+    and the frame is the whole story. Mapping the frame's own code onto a status
+    is what lets the existing retry policy act on it: ``rate_limit`` becomes a
+    429, which ``_stream_once`` backs off and retries — measured on Flex, the
+    busy condition clears in seconds and the identical request then succeeds.
+
+    A frame on a real error status keeps that status: a 400 that also carries a
+    frame is a bad request, not a transient condition.
+    """
+    if status and status >= 400:
+        return status
+    error = obj.get("error")
+    code = ""
+    if isinstance(error, dict):
+        code = str(error.get("code") or "").strip().lower()
+    if code in _TRANSIENT_FRAME_CODES:
+        return 429
+    return 400
+
+
 def _decode_body(raw: bytes) -> Any:
     try:
         return json.loads(raw.decode("utf-8", "replace"))
@@ -706,6 +870,27 @@ def _output_limit_from(message: str) -> int | None:
     except (TypeError, ValueError):  # pragma: no cover - regex guarantees digits
         return None
     return value or None
+
+
+def _count_limit_from(message: str) -> int | None:
+    """The count a provider's 400 names, for a message or character cap.
+
+    Matched on ``max N`` and ``maximum N`` — the two spellings measured on Flex's
+    playground (``"Maximum 10 messages allowed"``, ``"Message content too long
+    (max 2000 characters)"``). Narrow on purpose: the same sentence often names
+    a *context* window, which is not the number to clamp a message to.
+    """
+    for pattern in (r"maximum\s+(\d{1,7})", r"max\s+(\d{1,7})"):
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match is None:
+            continue
+        try:
+            value = int(match.group(1))
+        except (TypeError, ValueError):  # pragma: no cover - regex guarantees digits
+            continue
+        if value > 0:
+            return value
+    return None
 
 
 def _connection_error(exc: Exception, url: str) -> Exception:
@@ -875,6 +1060,27 @@ class _Stream:
             if limit and 0 < limit < requested:
                 payload[key] = limit
                 return True
+        # A playground's own caps, read out of its sentence rather than assumed:
+        # "Maximum 10 messages allowed" and "Message content too long (max 2000
+        # characters)". The payload builder already fits a request to the
+        # published numbers, so reaching here means the endpoint moved them —
+        # and the sentence is the only place the new number is stated.
+        if "messages" in message and "maximum" in message:
+            limit = _count_limit_from(message)
+            messages = payload.get("messages")
+            if limit and isinstance(messages, list) and len(messages) > limit:
+                start = 1 if messages and messages[0].get("role") == "system" else 0
+                del messages[start:start + (len(messages) - limit)]
+                return True
+        if "too long" in message and "characters" in message:
+            limit = _count_limit_from(message)
+            messages = payload.get("messages")
+            if limit and isinstance(messages, list) and messages:
+                last = messages[-1]
+                content = last.get("content")
+                if isinstance(content, str) and len(content) > limit:
+                    last["content"] = content[:limit]
+                    return True
         return False
 
     # -- iteration -------------------------------------------------------
@@ -907,7 +1113,7 @@ class _Stream:
                 if not isinstance(obj, dict):
                     continue
                 if obj.get("error"):
-                    raise error_for(self._resp.status_code or 400,
+                    raise error_for(_frame_status(obj, self._resp.status_code),
                                     json.dumps(obj).encode(), dict(self._resp.headers),
                                     self._client.url)
                 for event in self._acc.feed_chunk(obj):
@@ -950,7 +1156,16 @@ class _Messages:
                 raw = await response.aread()
                 if response.status_code < 400:
                     accumulator = Accumulator()
-                    accumulator.feed_message(_decode_body(raw))
+                    # A playground answers SSE whatever was asked for, so the
+                    # body may be an event stream even though this call wanted
+                    # one object. Reading it as JSON would yield an empty reply
+                    # and no error, which is the worst of both.
+                    if _looks_like_sse(raw):
+                        _feed_sse_body(accumulator, raw, self._client.url,
+                                       response.status_code,
+                                       dict(response.headers))
+                    else:
+                        accumulator.feed_message(_decode_body(raw))
                     return accumulator.message()
                 stream = _Stream(self._client, kwargs)
                 if not stream._retry_payload(payload, raw):
@@ -1030,7 +1245,59 @@ class Client:
         for key, value in (kwargs.get("extra_body") or {}).items():
             if value is not None:
                 payload[key] = value
+
+        if is_playground(self.base_url):
+            payload = _playground_payload(payload)
         return payload
+
+
+def _playground_payload(payload: dict) -> dict:
+    """Fit a request to a playground's published limits, in place.
+
+    Three adjustments, each measured against Flex's route on 2026-11-07 and each
+    enforced by the endpoint rather than by this harness:
+
+    * **``stream`` is forced on.** The route answers SSE whatever is asked for,
+      so a non-streaming request would be parsed as one JSON object and read as
+      an empty reply. ``stream_options`` is dropped with it: the route sends no
+      usage block, and asking for one is a field it does not implement.
+    * **The history is trimmed to the message cap.** The system message counts
+      toward it, so the oldest *conversation* turns go first and the system
+      message is kept — dropping it would silently change the model's
+      instructions, which is a worse failure than losing old context.
+    * **The last message is trimmed to the character cap.** Only the last one is
+      checked by the endpoint (5000-character earlier messages passed), so this
+      is the only place a cut is needed. A tool result is the message that
+      usually overflows, and a cut one is marked so the model knows.
+
+    A playground that changes its limits will answer 400 with a sentence naming
+    the new number; ``_retry_payload`` reads it and shrinks to fit, so this is a
+    starting point rather than a hardcoded truth.
+    """
+    payload["stream"] = True
+    payload.pop("stream_options", None)
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+
+    # The cap counts every message, system included.
+    overflow = len(messages) - PLAYGROUND_MAX_MESSAGES
+    if overflow > 0:
+        # Drop from the front, but never the system message: it is the model's
+        # instructions, and losing it changes the answer rather than shortening
+        # the history. A leading system message is the only one
+        # ``translate_messages`` ever emits, so index 0 is the whole test.
+        start = 1 if messages and messages[0].get("role") == "system" else 0
+        del messages[start:start + overflow]
+
+    if messages:
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, str) and len(content) > PLAYGROUND_MAX_MESSAGE_CHARS:
+            keep = PLAYGROUND_MAX_MESSAGE_CHARS - len(PLAYGROUND_TRIM_MARK)
+            last["content"] = content[:max(0, keep)] + PLAYGROUND_TRIM_MARK
+    return payload
 
 
 def probe(base_url: str, api_key: str | None = None, timeout: float = 8.0) -> tuple[bool, str]:
@@ -1039,7 +1306,13 @@ def probe(base_url: str, api_key: str | None = None, timeout: float = 8.0) -> tu
     Deliberately synchronous and short: the caller runs it off the UI thread,
     and its job is to turn "I typed the URL wrong" from a failed first turn
     into an immediate, specific answer.
+
+    A playground has no Models route, so it is checked with a real chat call
+    instead — the only thing that proves a route with no catalog and no key.
     """
+    if is_playground(base_url):
+        from . import flex as flex_mod
+        return flex_mod.verify(timeout=timeout)
     url = models_url(base_url)
     headers = {"Accept": "application/json", "User-Agent": "zimzilla"}
     if api_key:

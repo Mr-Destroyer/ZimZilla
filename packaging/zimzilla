@@ -242,6 +242,22 @@ if [[ "$_current_source" == "inferbase" ]]; then
   fi
 fi
 
+if [[ "$_current_source" == "flex" ]]; then
+  # The one source whose profile is not a credential: the Flex playground
+  # authenticates nothing, so this file records the route and the model. It
+  # ships in the tree, which is what makes /zim-flex work on a fresh clone —
+  # and the operator's own copy wins, so a model pinned with /model survives a
+  # reinstall. Load-bearing for the same reason as the branches above: without
+  # it a remembered Flex selection falls through to the Logfare profile and the
+  # session comes up on the wrong provider with no indication.
+  _fx_profile="$ZIMZILLA_HOME/flex/source"
+  [[ -r "$_fx_profile" ]] || _fx_profile="$ZIMZILLA_ROOT/packaging/flex/source"
+  if [[ -r "$_fx_profile" ]]; then
+    LITELLM_ENV_FILE="${_env_override:-$_fx_profile}"
+    ZIMZILLA_NO_PROXY=1
+  fi
+fi
+
 LITELLM_ENV_FILE="${LITELLM_ENV_FILE:-$ZIMZILLA_HOME/logfare/source}"
 LITELLM_PORT="${LITELLM_PORT:-4001}"
 LITELLM_LOG="${LITELLM_LOG:-/tmp/litellm-zim.log}"

@@ -1,0 +1,21 @@
+# ZimZilla — Flex playground route.
+#
+# This file is NOT a credential. The Flex playground at
+# https://eu.api.flex.ai/api/playground/chat authenticates nothing: it answers
+# 200 with no Authorization header, with an expired one, and with a bogus one.
+# So there is no key here to replace, and no /flex-api-setup command — the
+# route is the whole install.
+#
+# It ships in the tree so /zim-flex works on a fresh clone. The operator's own
+# copy at ~/.zimzilla/flex/source wins over this one, which is what lets a
+# model pinned with /model survive a reinstall.
+#
+# What this route is: a chat playground, not an API. It accepts at most 10
+# messages (system included) and 2000 characters in the last one, and it never
+# emits tool_calls — a tools array is accepted and the model answers with a
+# call-shaped string in ordinary content. The harness fits requests to those
+# limits and says so; see zimzilla/flex.py.
+export ANTHROPIC_BASE_URL="https://eu.api.flex.ai/api/playground/chat"
+export ANTHROPIC_AUTH_TOKEN=""
+export ANTHROPIC_MODEL="DeepSeek-V4-Flash-0731"
+export ANTHROPIC_API_KEY=""
