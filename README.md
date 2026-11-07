@@ -735,6 +735,7 @@ the file up too.
 | `search_web` | no | Search the web. |
 | `web_fetch` | no | Pull down a URL. |
 | `generate_image` | no | Generate an image from a prompt and save it under `images/` (needs a Logfare key). |
+| `mcp_<server>_<tool>` | **yes** | Any tool from a connected MCP server. See [MCP](#mcp). |
 
 When a mode makes a tool ask first, you get a modal showing the exact command
 or a colour diff of the change, and three keys:
@@ -742,6 +743,42 @@ or a colour diff of the change, and three keys:
 ```
 [y] run it     [n] no     [a] always, this session
 ```
+
+---
+
+## MCP
+
+ZimZilla is an MCP client. Point it at any [Model Context
+Protocol](https://modelcontextprotocol.io) server and that server's tools join
+the tool set — the model sees them, calls them, and gets their results, exactly
+as it does the built-in ones.
+
+```bash
+/mcp add filesystem npx -y @modelcontextprotocol/server-filesystem /tmp
+/mcp add remote --url https://example.com/mcp
+/mcp                        # what is configured, connected, and on offer
+/mcp tools                  # every tool, with its schema
+/mcp connect                # (re)connect everything
+/mcp disable filesystem     # keep it configured, stop advertising its tools
+/mcp remove filesystem
+```
+
+Servers live in `~/.zimzilla/mcp.json`, written mode 600 because an entry may
+carry a token in `env` or `headers`. Both transports the spec defines for a
+client are supported: **stdio** (a child process speaking JSON-RPC on its
+stdin/stdout) and **Streamable HTTP** (a URL). Configured servers connect at
+startup, off the UI thread, so a slow one never holds up the prompt.
+
+Tools are namespaced `mcp_<server>_<tool>`, so two servers may both offer
+`search` without colliding with each other or with the harness's own tools.
+
+**They are gated.** Every MCP call asks first, in every mode — an MCP server is
+code you chose to run, and its tools are as powerful as it makes them. Plan
+mode denies them outright: their effect is decided by the server, so they
+cannot be called read-only.
+
+A server that will not start is reported by name and does not stop the others —
+one broken entry in `mcp.json` costs you that server, not the session.
 
 ---
 
@@ -1553,6 +1590,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/load [name]` | restore a session |
 | `/compact` | summarise history to free context |
 | `/limits` | context window, round caps and timeouts — and where each figure comes from |
+| `/mcp [add\|remove\|connect\|tools]` | connect MCP servers — their tools join the tool set |
 | `/team <task>` | fan the task out across parallel agents |
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/osint-tree [kind\|path]` | re-show a finished recon as a result tree |

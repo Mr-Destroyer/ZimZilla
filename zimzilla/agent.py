@@ -576,7 +576,25 @@ class Agent:
         if not imagegen_mod.available(self.cfg):
             deny = deny | tools_mod.IMAGEGEN_TOOLS
         schemas = tools_mod.TOOL_SCHEMAS + tools_mod.PEER_SCHEMAS
-        return [t for t in schemas if t["name"] not in deny]
+        # MCP tools are discovered at runtime, so they are appended rather than
+        # listed. Withheld entirely when no server is connected: an advertised
+        # tool that can only fail wastes a turn on every attempt, the same
+        # reason the LDXHub job tools are withheld without a key.
+        from . import mcp as mcp_mod
+        schemas = schemas + mcp_mod.registry().schemas()
+        return [t for t in schemas if not self._schema_denied(t["name"], deny)]
+
+    @staticmethod
+    def _schema_denied(name: str, deny: set) -> bool:
+        """Whether *name* is withheld, honouring the ``mcp`` prefix deny.
+
+        A plain set membership test is not enough: MCP tool names are not known
+        until a server is connected to, so plan mode denies the family by the
+        ``mcp`` prefix rather than by name.
+        """
+        if name in deny:
+            return True
+        return "mcp" in deny and name.startswith("mcp_")
 
     def _denied(self, name: str) -> str | None:
         """Reason a tool is unavailable in this mode, or None if it is allowed."""
@@ -585,6 +603,17 @@ class Agent:
 
             label = MODES.get(self.cfg.mode, {}).get("label", self.cfg.mode)
             return f"the {name} tool is disabled in {label} mode"
+        # An MCP tool in plan mode. Plan mode is read-only, and an MCP tool's
+        # effect is whatever its server does — which this harness cannot know,
+        # so it cannot be called read-only. Denied by prefix because the names
+        # are not known until a server is connected to.
+        from . import mcp as mcp_mod
+        if mcp_mod.is_mcp_tool(name) and "mcp" in self._mode_policy().get("deny", set()):
+            from .config import MODES
+
+            label = MODES.get(self.cfg.mode, {}).get("label", self.cfg.mode)
+            return (f"MCP tools are disabled in {label} mode — their effect is "
+                    f"decided by the server, so they cannot be called read-only")
         # A hunt-only tool outside a hunt. Withholding it from the schema is
         # what normally prevents this; this branch is for a model that calls it
         # anyway, and it says why rather than executing something whose result

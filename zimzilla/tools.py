@@ -568,7 +568,18 @@ class ToolError(Exception):
 
 
 def needs_permission(name: str) -> bool:
-    return name in GATED_TOOLS
+    """Whether a call must be confirmed before it runs.
+
+    MCP tools are gated, and they are the reason this is a function rather than
+    a set membership test: their names are not known until a server has been
+    connected to, so they cannot be listed in ``GATED_TOOLS``. A tool the
+    operator has not seen before does not run unattended — an MCP server is
+    code they chose to run, and its tools are as powerful as it makes them.
+    """
+    if name in GATED_TOOLS:
+        return True
+    from . import mcp as mcp_mod
+    return mcp_mod.is_mcp_tool(name)
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +771,16 @@ def _text(value) -> str:
 def build_preview(name: str, args: dict, cfg) -> Preview:
     if name == "bash":
         return Preview("command", "BASH", _text(args.get("command", "")))
+    from . import mcp as mcp_mod
+    if mcp_mod.is_mcp_tool(name):
+        # An MCP tool's effect is whatever its server does, which this harness
+        # cannot know. The preview shows the call as the server will receive it
+        # — the tool's own name and its arguments — so the operator is
+        # confirming the thing that will actually be sent.
+        found = mcp_mod.registry().find(name)
+        label = f"MCP {found[1].server}: {found[1].name}" if found else f"MCP {name}"
+        body = json.dumps(args, indent=2, ensure_ascii=False) if args else "(no arguments)"
+        return Preview("text", label, body)
     if name == "write_file":
         path = _text(args.get("path", "?"))
         content = _text(args.get("content", ""))
@@ -808,6 +829,14 @@ def execute(name: str, args: dict, cfg) -> ToolResult:
     try:
         fn = _DISPATCH.get(name)
         if fn is None:
+            # An MCP tool is not in the static dispatch table — its name is
+            # only known once a server has been connected to. Forwarded to the
+            # registry, which owns the connection.
+            from . import mcp as mcp_mod
+            if mcp_mod.is_mcp_tool(name):
+                text, is_error = mcp_mod.registry().call(name, args or {})
+                return ToolResult(text or "(no output)", is_error=is_error,
+                                  meta={"mcp": True})
             return ToolResult(f"unknown tool: {name}", is_error=True)
         return fn(args, cfg)
     except SandboxError as e:
@@ -1847,5 +1876,20 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
         what = args.get("file_path") or args.get("service") or args.get("prompt") or ""
         what = str(what)
         label = f"ldxhub {svc} {what}".strip()
+        return label if len(label) <= max_len else label[: max_len - 1] + "…"
+    from . import mcp as mcp_mod
+    if mcp_mod.is_mcp_tool(name):
+        # The exposed name already carries the server, so the label is the call
+        # as the operator will recognise it: which server, which tool, and the
+        # first argument that says what it is acting on.
+        found = mcp_mod.registry().find(name)
+        if found is not None:
+            _, tool = found
+            label = f"mcp {tool.server}: {tool.name}"
+        else:
+            label = name
+        first = next((str(v) for v in (args or {}).values() if str(v).strip()), "")
+        if first:
+            label = f"{label} {first}"
         return label if len(label) <= max_len else label[: max_len - 1] + "…"
     return shlex.quote(str(args))[:max_len]

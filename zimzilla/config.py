@@ -108,7 +108,11 @@ MODES: dict[str, dict] = {
         # It is not in GATED_TOOLS (it writes only inside the jail, the same
         # posture as the paid LDXHub jobs), which is why plan mode has to deny
         # it explicitly rather than relying on the permission gate.
-        "deny": {"bash", "write_file", "edit_file", "generate_image"},
+        #
+        # "mcp" is a prefix, not a tool name: MCP tools are discovered at
+        # runtime, so the whole family is denied by prefix. Their effect is
+        # whatever the server does, which cannot be called read-only.
+        "deny": {"bash", "write_file", "edit_file", "generate_image", "mcp"},
     },
     "zim": {
         "label": "ZIM",

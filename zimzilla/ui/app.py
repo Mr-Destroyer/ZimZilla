@@ -44,6 +44,7 @@ from .. import iteracompute as ic_mod
 from .. import ldxhub as ldx_mod
 from .. import leadgen as leadgen_mod
 from .. import logfare as lf_mod
+from .. import mcp as mcp_mod
 from .. import moonmath as mm_mod
 from .. import nvidia as nv_mod
 from .. import opencode as oc_mod
@@ -875,6 +876,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/effort [low|medium|high|off]", "raise or lower how hard the model thinks"),
         ("/think", "toggle showing the model's own reasoning"),
         ("/limits", "context window, round caps, timeouts, and their source"),
+        ("/mcp [add|remove|connect|tools]", "connect MCP servers; their tools join the tool set"),
         ("/compact", "summarise history to free context"),
         ("/cost", "session token and cost breakdown"),
     ]),
@@ -1558,6 +1560,12 @@ class ZimZillaApp(App):
         # the gateway prices for itself.
         elif sources_mod.active_key(self.cfg.base_url) == "moonmath":
             self._warm_moonmath_catalog()
+        # Connect any configured MCP servers. Off the UI thread: a stdio server
+        # is a child process that has to start and answer a handshake, and a
+        # slow one must not hold up the prompt. The tools join the tool set as
+        # soon as the connection lands, so a turn started before then simply
+        # does not see them — which is the right failure, not a broken one.
+        self._connect_mcp_async()
         # Replay anything the user typed while the boot animation was running.
         text = "".join(typed or [])
         inp.focus()
@@ -1572,6 +1580,49 @@ class ZimZillaApp(App):
         elif text:
             inp.value = text
             inp.cursor_position = len(inp.value)
+
+    def _connect_mcp_async(self) -> None:
+        """Connect configured MCP servers without blocking the prompt.
+
+        A stdio server is a child process: it has to start, answer
+        ``initialize`` and list its tools, and any of those can be slow or hang.
+        Doing it on the UI thread would freeze the interface before the operator
+        has typed anything, so it runs on a worker and the result is reported
+        when it lands.
+
+        A failure is reported once, quietly, and does not stop the session: one
+        broken entry in ``mcp.json`` must not cost the operator every working
+        server, and it must not stop them using the harness.
+        """
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        if not servers:
+            return
+
+        def _work() -> None:
+            reg = mcp_mod.registry()
+            reg.connect_all(servers)
+            self.call_from_thread(self._mcp_connected, servers)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _mcp_connected(self, servers) -> None:
+        """Report what the background connect found."""
+        reg = mcp_mod.registry()
+        total = len(reg.tools())
+        for cfg in servers:
+            if not cfg.enabled:
+                continue
+            if cfg.name in reg.errors:
+                self._sys_line(f"mcp {cfg.name}: {reg.errors[cfg.name]}", warn=True)
+        if total:
+            names = ", ".join(sorted(reg.clients))
+            self._sys_line(
+                f"{total} MCP tool(s) from {names} — /mcp tools to see them",
+                ok=True)
 
     def _replay_transcript(self) -> None:
         """Redraw a restored conversation in the transcript pane.
@@ -2498,6 +2549,10 @@ class ZimZillaApp(App):
         # this about to hit a cap" is exactly the question a running turn
         # raises. It starts no turn and touches nothing the live one owns.
         "limits",
+        # /mcp reads and writes a local JSON file and connects to servers the
+        # operator named. It starts no turn and touches nothing the live one
+        # owns — and it is most useful *before* a turn, to see what is on offer.
+        "mcp",
         # Same reasoning as /rain: a display toggle reads and writes only
         # harness state, starts no turn, and is most wanted while a turn is
         # running — which is exactly when the reasoning is on screen.
@@ -2541,6 +2596,7 @@ class ZimZillaApp(App):
             "load": self._cmd_load,
             "compact": lambda a: self._cmd_compact(),
             "limits": lambda a: self._cmd_limits(),
+            "mcp": lambda a: self._cmd_mcp(a),
             "team": lambda a: self._cmd_team(a),
             "osint": lambda a: self._cmd_osint(a),
             "osint-tree": lambda a: self._cmd_osint_tree(a),
@@ -3391,6 +3447,260 @@ class ZimZillaApp(App):
         t.append(f"  {'session total':<18}", style=p.dim)
         t.append(f"${a.session_cost:.4f}\n", style=f"bold {p.accent}")
         self.query_one(ChatPane).write_block(t)
+
+    def _cmd_mcp(self, args) -> None:
+        """/mcp — connect MCP servers and list the tools they offer.
+
+        Usage:
+            /mcp                        what is configured, connected, and on offer
+            /mcp add <name> <command> [args…]
+            /mcp add <name> --url <url>
+            /mcp remove <name>
+            /mcp enable|disable <name>
+            /mcp connect                (re)connect every enabled server
+            /mcp tools [server]         the tools, with their schemas
+
+        The server list lives in ``~/.zimzilla/mcp.json`` and is written mode
+        600 — an entry may carry a token in ``env`` or ``headers``. Adding a
+        server connects to it immediately, so a typo is reported now rather
+        than at the first tool call.
+        """
+        sub = (args[0].strip().lower() if args else "")
+        rest = list(args[1:]) if args else []
+
+        if sub in ("", "list", "status"):
+            self._mcp_status()
+            return
+        if sub == "tools":
+            self._mcp_tools(rest[0].strip() if rest else "")
+            return
+        if sub == "connect":
+            self._mcp_connect()
+            return
+        if sub == "add":
+            self._mcp_add(rest)
+            return
+        if sub in ("remove", "rm", "delete"):
+            self._mcp_remove(rest)
+            return
+        if sub in ("enable", "disable"):
+            self._mcp_toggle(rest, enabled=(sub == "enable"))
+            return
+        self._sys_line(
+            "usage: /mcp [list] | add <name> <command> [args…] | "
+            "add <name> --url <url> | remove <name> | enable|disable <name> | "
+            "connect | tools [server]", warn=True)
+
+    def _mcp_status(self) -> None:
+        """The configured servers, which are connected, and what they offer."""
+        p = self.palette
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        reg = mcp_mod.registry()
+        t = Text()
+        t.append("  MCP SERVERS\n\n", style=f"bold {p.accent}")
+        if not servers:
+            t.append("  none configured\n\n", style=p.dim)
+            t.append("  add one with:\n", style=p.primary)
+            t.append("    /mcp add filesystem npx -y @modelcontextprotocol/"
+                     "server-filesystem /tmp\n", style=p.dim)
+            t.append("    /mcp add remote --url https://example.com/mcp\n",
+                     style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+        for cfg in servers:
+            live = reg.clients.get(cfg.name)
+            if not cfg.enabled:
+                mark, style = "○", p.dim
+                state = "disabled"
+            elif live is not None:
+                mark, style = "◉", f"bold {p.accent}"
+                state = f"connected · {len(live.tools)} tool(s)"
+            elif cfg.name in reg.errors:
+                mark, style = "✗", p.amber
+                state = "failed"
+            else:
+                mark, style = "○", p.primary
+                state = "not connected"
+            t.append(f"  {mark} {cfg.name:<16}", style=style)
+            t.append(f"{cfg.transport:<6}", style=p.dim)
+            where = cfg.url or f"{cfg.command} {' '.join(cfg.args)}".strip()
+            t.append(f"{state}\n", style=p.accent if live else p.primary)
+            t.append(f"      {where[:100]}\n", style=p.dim)
+            if cfg.name in reg.errors:
+                t.append(f"      {reg.errors[cfg.name][:160]}\n", style=p.amber)
+        total = len(reg.tools())
+        t.append(f"\n  {total} tool(s) available to the model", style=p.primary)
+        if total:
+            t.append(" — /mcp tools for the list", style=p.dim)
+        t.append("\n")
+        self.query_one(ChatPane).write_block(t)
+
+    def _mcp_tools(self, server: str) -> None:
+        """Every MCP tool, or one server's, with the schema the model sees."""
+        p = self.palette
+        reg = mcp_mod.registry()
+        tools = [t for t in reg.tools() if not server or t.server == server]
+        t = Text()
+        t.append("  MCP TOOLS\n\n", style=f"bold {p.accent}")
+        if not tools:
+            t.append("  none — /mcp connect, or /mcp to see why\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+        for tool in tools:
+            t.append(f"  {tool.exposed_name}\n", style=f"bold {p.accent}")
+            if tool.description:
+                t.append(f"      {tool.description[:160]}\n", style=p.primary)
+            props = (tool.input_schema or {}).get("properties") or {}
+            required = set((tool.input_schema or {}).get("required") or [])
+            for key, spec in props.items():
+                if not isinstance(spec, dict):
+                    continue
+                kind = spec.get("type") or "any"
+                star = "*" if key in required else " "
+                t.append(f"      {star}{key}: {kind}", style=p.dim)
+                if spec.get("description"):
+                    t.append(f" — {str(spec['description'])[:80]}", style=p.dim)
+                t.append("\n")
+        t.append("\n  '*' is required. These are gated: each call is confirmed.\n",
+                 style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    def _mcp_connect(self) -> None:
+        """(Re)connect every enabled server, reporting each outcome."""
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        if not servers:
+            self._sys_line("no MCP servers configured — /mcp add <name> <command>",
+                           warn=True)
+            return
+        reg = mcp_mod.registry()
+        reg.close()
+        reg.connect_all(servers)
+        for cfg in servers:
+            if not cfg.enabled:
+                continue
+            if cfg.name in reg.errors:
+                self._sys_line(f"{cfg.name}: {reg.errors[cfg.name]}", warn=True)
+            else:
+                live = reg.clients.get(cfg.name)
+                count = len(live.tools) if live else 0
+                self._sys_line(f"{cfg.name}: connected, {count} tool(s)", ok=True)
+        total = len(reg.tools())
+        self._sys_line(f"{total} MCP tool(s) now available to the model")
+
+    def _mcp_add(self, rest: list[str]) -> None:
+        """Add a server and connect to it, so a typo is reported now."""
+        if not rest:
+            self._sys_line("usage: /mcp add <name> <command> [args…]  |  "
+                           "/mcp add <name> --url <url>", warn=True)
+            return
+        name = rest[0].strip()
+        tail = rest[1:]
+        url = ""
+        if "--url" in tail:
+            i = tail.index("--url")
+            url = tail[i + 1].strip() if i + 1 < len(tail) else ""
+            tail = tail[:i]
+            if not url:
+                self._sys_line("--url needs a URL", warn=True)
+                return
+        command = tail[0].strip() if tail else ""
+        args = tail[1:] if len(tail) > 1 else []
+        if not url and not command:
+            self._sys_line("give a command (stdio) or --url (http)", warn=True)
+            return
+        cfg = mcp_mod.ServerConfig(name=name, command=command, args=args, url=url)
+        problem = cfg.validate()
+        if problem:
+            self._sys_line(problem, warn=True)
+            return
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        servers = [s for s in servers if s.name != name] + [cfg]
+        try:
+            path = mcp_mod.save_config(servers)
+        except OSError as e:
+            self._sys_line(f"could not write {mcp_mod.CONFIG_PATH}: {e}", warn=True)
+            return
+        self._sys_line(f"{name} saved to {path} (mode 600)", ok=True)
+        # Connect now: a server that will not start is a typo the operator can
+        # fix immediately, not a surprise at the first tool call.
+        client = mcp_mod.Client(cfg)
+        try:
+            client.connect()
+            tools = client.list_tools()
+        except mcp_mod.MCPError as e:
+            self._sys_line(f"{name}: {e}", warn=True)
+            return
+        mcp_mod.registry().clients[name] = client
+        mcp_mod.registry().errors.pop(name, None)
+        self._sys_line(f"{name}: connected, {len(tools)} tool(s)", ok=True)
+        for tool in tools:
+            self._sys_line(f"  {tool.exposed_name}", ok=True)
+
+    def _mcp_remove(self, rest: list[str]) -> None:
+        if not rest:
+            self._sys_line("usage: /mcp remove <name>", warn=True)
+            return
+        name = rest[0].strip()
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        kept = [s for s in servers if s.name != name]
+        if len(kept) == len(servers):
+            self._sys_line(f"no MCP server named {name}", warn=True)
+            return
+        try:
+            mcp_mod.save_config(kept)
+        except OSError as e:
+            self._sys_line(f"could not write {mcp_mod.CONFIG_PATH}: {e}", warn=True)
+            return
+        client = mcp_mod.registry().clients.pop(name, None)
+        if client is not None:
+            client.close()
+        self._sys_line(f"{name} removed", ok=True)
+
+    def _mcp_toggle(self, rest: list[str], enabled: bool) -> None:
+        if not rest:
+            self._sys_line(f"usage: /mcp {'enable' if enabled else 'disable'} <name>",
+                           warn=True)
+            return
+        name = rest[0].strip()
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        found = False
+        for cfg in servers:
+            if cfg.name == name:
+                cfg.enabled = enabled
+                found = True
+        if not found:
+            self._sys_line(f"no MCP server named {name}", warn=True)
+            return
+        try:
+            mcp_mod.save_config(servers)
+        except OSError as e:
+            self._sys_line(f"could not write {mcp_mod.CONFIG_PATH}: {e}", warn=True)
+            return
+        if not enabled:
+            client = mcp_mod.registry().clients.pop(name, None)
+            if client is not None:
+                client.close()
+        self._sys_line(f"{name} {'enabled' if enabled else 'disabled'}", ok=True)
 
     def _cmd_limits(self, args=None) -> None:
         """/limits — what this session will stop at, and where each number comes from.
@@ -9788,6 +10098,7 @@ class ZimZillaApp(App):
             ("/load", "restore a saved session", "load"),
             ("/compact", "summarise history to free context", "compact"),
             ("/limits", "context window, round caps and timeouts", "limits"),
+            ("/mcp", "connect MCP servers — their tools join the tool set", "mcp"),
             ("/team", "fan the task out across parallel agents", "team"),
             ("/osint", "open-source recon on a target", "osint"),
             ("/osint-tree", "re-show a finished recon as a result tree", "osint"),

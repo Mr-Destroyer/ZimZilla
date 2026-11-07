@@ -99,6 +99,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/load", "restore a saved session"),
     ("/compact", "summarise history to free context"),
     ("/limits", "context window, round caps and timeouts"),
+    ("/mcp", "connect MCP servers — their tools join the tool set"),
     ("/team", "fan the task out across parallel agents"),
     ("/osint", "open-source recon on a target"),
     ("/osint-tree", "re-show a finished recon as a result tree"),
