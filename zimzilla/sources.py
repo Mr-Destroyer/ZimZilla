@@ -1007,6 +1007,27 @@ def message_cap_for(base_url: str) -> int | None:
     return None
 
 
+def message_chars_for(base_url: str) -> int | None:
+    """The most characters the active route accepts in one message, or ``None``.
+
+    The companion to :func:`message_cap_for`, and it exists for the same
+    failure: Flex caps the *last* message at 2000 characters and the transport
+    trims it, keeping the head. That is right for a tool result and wrong for a
+    summariser prompt, whose tail is the recent turns — so ``compact()`` reads
+    this to build a prompt that already fits instead of letting the transport
+    cut the part worth summarising off the end.
+
+    ``None`` for every other route: an API does not cap message length, and a
+    caller that treated "no answer" as a number would truncate a healthy
+    prompt.
+    """
+    key = active_key(base_url)
+    if key == "flex":
+        from . import flex as flex_mod
+        return flex_mod.MAX_MESSAGE_CHARS
+    return None
+
+
 def max_output_for(base_url: str, model: str) -> int | None:
     """The active model's real output ceiling, from its source's live catalog.
 

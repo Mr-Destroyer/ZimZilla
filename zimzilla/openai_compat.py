@@ -506,6 +506,25 @@ def translate_messages(system: Any, messages: list[dict]) -> list[dict]:
     return out
 
 
+def wire_message_count(system: Any, messages: list[dict]) -> int:
+    """How many messages the wire will actually carry for this history.
+
+    Not ``len(messages)``, and the difference is what a capped route trips on.
+    One Anthropic user message can become several Chat Completions messages:
+    each ``tool_result`` block is its own ``role: tool`` message, and the system
+    prompt is a message of its own. Measured on a three-message history holding
+    three tool results, the wire carried six.
+
+    A playground caps the *wire* count (Flex: ten, system included), so a
+    trigger that counted the Anthropic history would under-count by one per
+    parallel tool call and let the transport trim the oldest turns silently —
+    the exact loss the count trigger exists to prevent. Counting by running the
+    same translation the request will run is the only way the two cannot
+    disagree.
+    """
+    return len(translate_messages(system, messages))
+
+
 def translate_tools(schemas: list[dict] | None) -> list[dict]:
     """Anthropic tool schemas -> OpenAI function tools.
 

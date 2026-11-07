@@ -2069,8 +2069,11 @@ class ZimZillaApp(App):
             bar.cost = self.agent.session_cost + team_cost + ev["cost"]
             bar.render_bar()
             # ev["input"] is this one call's prompt size — the closest thing to
-            # a live context reading available.
-            self._last_call_input = ev["input"]
+            # a live context reading available. On a route that reports no
+            # usage it is 0, so the agent sends the estimate alongside as
+            # ``context``: the gauge must show the prompt growing even where
+            # nothing is billed, or it would read 0% right up to the compaction.
+            self._last_call_input = ev.get("context") or ev["input"]
             if tele is not None:
                 # The window is passed alongside so the gauge's percentage is a
                 # share of *this model's* window, not of the configured

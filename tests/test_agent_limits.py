@@ -308,10 +308,17 @@ async def test_auto_compact_fires_above_the_threshold(tmp: Path) -> None:
     # so the compaction happened before it rather than after.
     check("auto: the first request carried the full history",
           len(seen) == 2 and seen[0] > 1, str(seen))
+    # Two, not one: the summary plus the instruction this turn is working on,
+    # restated after the compaction. A summary is not an instruction, so a
+    # mid-turn compaction that left only the summary would have the model
+    # carrying on with no idea what it was asked to do.
     check("auto: the second request carried the compacted history",
-          len(seen) == 2 and seen[1] == 1, str(seen))
+          len(seen) == 2 and seen[1] == 2, str(seen))
     check("auto: the compaction therefore preceded the request it protects",
           len(seen) == 2 and seen[1] < seen[0], str(seen))
+    check("auto: the turn's instruction was restated after the summary",
+          any("still running" in str(m.get("content")) for m in agent.messages),
+          str(agent.messages))
     check("auto: it was not compacted repeatedly",
           len(_of(events, "compacting")) == 1, str(kinds))
     check("auto: the turn still completed", kinds[-1] == "turn_end", str(kinds))

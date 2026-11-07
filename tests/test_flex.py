@@ -463,6 +463,297 @@ def test_usage_falls_back_to_the_estimate() -> None:
           "playground sends no usage block" in agent_src)
 
 
+def test_the_estimate_counts_the_system_prompt() -> None:
+    """The fallback figure must be the size of the *prompt*, not the history.
+
+    The system prompt is a message on the wire and it is not small — measured
+    in uncensored mode it is ~6,000 characters, about 1,500 tokens, which is
+    larger than a whole ten-message Flex history. A route that sends no usage
+    block measures the threshold against this figure, so omitting the system
+    prompt would under-report the prompt by more than the history itself.
+    """
+    from zimzilla.agent import Agent
+    from zimzilla.config import Config
+
+    agent = Agent(Config(base_url="https://eu.api.flex.ai/api/playground/chat",
+                         model="DeepSeek-V4-Flash-0731", mode="uncensored"))
+    agent.messages = [{"role": "user", "content": "x" * 4000}]
+    system_tokens = len(agent.system_prompt()) // 4
+    check("estimate: the system prompt is counted",
+          agent.history_tokens() >= system_tokens, str(agent.history_tokens()))
+    check("estimate: and it is not a rounding error",
+          system_tokens > 500, str(system_tokens))
+
+
+def test_the_count_trigger_counts_the_wire() -> None:
+    """The cap counts what is sent, and a tool-heavy round sends more.
+
+    One Anthropic user message carrying three ``tool_result`` blocks becomes
+    three ``role: tool`` messages plus the system prompt. A trigger counting
+    ``len(self.messages)`` would under-count by one per parallel tool call and
+    let the transport trim the oldest turns silently — the exact loss the count
+    trigger exists to prevent.
+    """
+    from zimzilla import openai_compat as oc
+    from zimzilla.agent import Agent
+    from zimzilla.config import Config
+
+    history = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "a", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "b", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "c", "name": "bash", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "1"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "2"},
+            {"type": "tool_result", "tool_use_id": "c", "content": "3"},
+        ]},
+    ]
+    wire = oc.wire_message_count("SYS", history)
+    check("wire: the system prompt is a message", wire > len(history), str(wire))
+    check("wire: each tool result is its own message", wire == 6, str(wire))
+
+    agent = Agent(Config(base_url="https://eu.api.flex.ai/api/playground/chat",
+                         model="DeepSeek-V4-Flash-0731", protocol="openai"))
+    agent.messages = history
+    check("wire: the agent counts the wire, not the history",
+          agent.wire_messages() == wire, str(agent.wire_messages()))
+
+    # The regression this pins: a history that is comfortably under the cap by
+    # ``len(messages)`` but over it on the wire. Two tool rounds of three
+    # parallel calls each is five Anthropic messages and nine wire messages —
+    # so a trigger counting the history would let the transport trim the oldest
+    # turns silently, which is the loss the count trigger exists to prevent.
+    agent.messages = history + [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "d", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "e", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "f", "name": "bash", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "d", "content": "4"},
+            {"type": "tool_result", "tool_use_id": "e", "content": "5"},
+            {"type": "tool_result", "tool_use_id": "f", "content": "6"},
+        ]},
+    ]
+    check("wire: the history is under the cap by message count",
+          len(agent.messages) < 8, str(len(agent.messages)))
+    check("wire: but over it on the wire",
+          agent.wire_messages() >= 8, str(agent.wire_messages()))
+    check("wire: so the count trigger fires",
+          agent._should_compact(32_768) is True, str(agent.wire_messages()))
+
+
+def test_compaction_fits_the_routes_message_cap() -> None:
+    """The summariser prompt and the summary must both fit the last-message cap.
+
+    Two failures this pins, both measured on Flex:
+
+    * The transport trims the last message to 2000 characters and keeps the
+      HEAD. A summariser prompt built past that limit therefore reached the
+      model as the instruction header plus the OLDEST turns — the recent ones,
+      the ones worth summarising, cut off the end.
+    * The summary becomes the last message of the next request, so a trim there
+      would cut the end off the summary, which is where the next steps are.
+    """
+    import asyncio
+
+    from zimzilla import sources as s
+    from zimzilla.agent import Agent
+    from zimzilla.config import Config
+
+    check("chars: the registry reports the playground's 2000",
+          s.message_chars_for("https://eu.api.flex.ai/api/playground/chat") == 2000)
+    check("chars: an uncapped route reports None",
+          s.message_chars_for("https://api.inferbase.ai/v1") is None)
+
+    agent = Agent(Config(base_url="https://eu.api.flex.ai/api/playground/chat",
+                         model="DeepSeek-V4-Flash-0731", protocol="openai"))
+    check("chars: the agent reads it", agent.message_chars() == 2000)
+
+    sent: list[str] = []
+
+    class _Messages:
+        async def create(self, **kw):
+            sent.append(kw["messages"][-1]["content"])
+
+            class _M:
+                content = [type("B", (), {"type": "text", "text": "S" * 4000})()]
+                usage = None
+            return _M()
+
+    class _Client:
+        messages = _Messages()
+
+    agent._client = _Client()
+    agent.messages = [{"role": "user", "content": "GOAL: build it. " + "a" * 3000}]
+    for i in range(6):
+        agent.messages.append({"role": "assistant",
+                               "content": f"step {i} " + "b" * 3000})
+    ok, note = asyncio.run(agent.compact())
+    check("chars: the compaction succeeded", ok, note[:60])
+    check("chars: the summariser prompt fits the cap",
+          len(sent[0]) <= 2000, str(len(sent[0])))
+    check("chars: and it carries the recent turns, not just the oldest",
+          "step 5" in sent[0], sent[0][-120:])
+    check("chars: the stored summary fits the cap too",
+          len(agent.messages[0]["content"]) <= 2000,
+          str(len(agent.messages[0]["content"])))
+    check("chars: a shortened summary says so",
+          "shortened" in agent.messages[0]["content"],
+          agent.messages[0]["content"][-80:])
+
+
+def test_a_mid_turn_compaction_restates_the_instruction() -> None:
+    """A summary is not an instruction: the turn must not lose its task.
+
+    The instruction the turn is working on is folded into the summary with
+    everything else, so a compaction mid-turn would leave the model carrying on
+    with no idea what it was asked to do. Re-stated after the summary, and only
+    mid-turn — a compaction between turns has no live instruction to lose.
+    """
+    import asyncio
+
+    from zimzilla.agent import Agent
+    from zimzilla.config import Config
+
+    agent = Agent(Config(base_url="https://eu.api.flex.ai/api/playground/chat",
+                         model="DeepSeek-V4-Flash-0731", protocol="openai",
+                         max_iterations=2, auto_compact=True, compact_at=0.5))
+    agent.cfg.context_window = 1_000
+
+    class _Blk:
+        def __init__(self, **k):
+            self.__dict__.update(k)
+
+        def model_dump(self, exclude_none=False):
+            return dict(self.__dict__)
+
+    class _Usage:
+        input_tokens = 900
+        output_tokens = 10
+
+    class _Msg:
+        def __init__(self, content, stop):
+            self.content, self.stop_reason, self.usage = content, stop, _Usage()
+
+    replies = [
+        _Msg([_Blk(type="tool_use", id="t", name="bash",
+                   input={"command": "true"})], "tool_use"),
+        _Msg([_Blk(type="text", text="Done.")], "end_turn"),
+    ]
+    state = {"n": 0}
+
+    async def fake_stream(max_tokens=None):
+        msg = replies[min(state["n"], len(replies) - 1)]
+        state["n"] += 1
+        yield (None, msg)
+
+    agent._stream_once = fake_stream  # type: ignore[assignment]
+
+    async def fake_compact():
+        agent.messages = [{"role": "user", "content": "[summary]"}]
+        return True, "a summary"
+
+    agent.compact = fake_compact  # type: ignore[assignment]
+    # Long enough on the WIRE to trip the cap: the count trigger counts what is
+    # sent, and a tool-heavy history sends more messages than it holds. Two
+    # tool rounds of three parallel calls is five Anthropic messages and nine
+    # wire messages, against a cap of ten with two messages of headroom.
+    agent.messages = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "a", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "b", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "c", "name": "bash", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "1"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "2"},
+            {"type": "tool_result", "tool_use_id": "c", "content": "3"},
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "d", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "e", "name": "bash", "input": {}},
+            {"type": "tool_use", "id": "f", "name": "bash", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "d", "content": "4"},
+            {"type": "tool_result", "tool_use_id": "e", "content": "5"},
+            {"type": "tool_result", "tool_use_id": "f", "content": "6"},
+        ]},
+    ]
+
+    async def drive():
+        return [e async for e in agent.run_turn("BUILD THE THING")]
+
+    events = asyncio.run(drive())
+    check("restate: the compaction fired",
+          any(e["type"] == "compacting" for e in events),
+          str([e["type"] for e in events]))
+    check("restate: the instruction survives the compaction",
+          any("BUILD THE THING" in str(m.get("content")) for m in agent.messages),
+          str(agent.messages))
+    check("restate: and it is marked as the live instruction",
+          any("still running" in str(m.get("content")) for m in agent.messages),
+          str(agent.messages))
+
+
+def test_the_gauge_reads_the_estimate_when_nothing_is_billed() -> None:
+    """The gauge must show the prompt growing even where nothing is billed.
+
+    ``usage.input`` is the *billed* figure, and on a route that reports no usage
+    it is 0 — correctly, because the Flex playground costs nothing and a
+    non-zero figure there would invent a charge. But the gauge draws the prompt
+    size, and reading ``input`` for it left the bar at 0% for the whole session
+    while compaction was in fact working. So the agent sends the estimate
+    alongside as ``context``, and the UI prefers it.
+    """
+    import asyncio
+
+    from zimzilla.agent import Agent
+    from zimzilla.config import Config
+
+    agent = Agent(Config(base_url="https://eu.api.flex.ai/api/playground/chat",
+                         model="DeepSeek-V4-Flash-0731", protocol="openai"))
+
+    class _Blk:
+        def __init__(self, **k):
+            self.__dict__.update(k)
+
+        def model_dump(self, exclude_none=False):
+            return dict(self.__dict__)
+
+    class _Msg:
+        content = [_Blk(type="text", text="hi")]
+        stop_reason = "end_turn"
+        usage = None  # a playground sends no usage block at all
+
+    async def fake_stream(max_tokens=None):
+        yield (None, _Msg())
+
+    agent._stream_once = fake_stream  # type: ignore[assignment]
+
+    async def drive():
+        return [e async for e in agent.run_turn("hello")]
+
+    events = asyncio.run(drive())
+    usage = [e for e in events if e["type"] == "usage"]
+    check("gauge: a usage event was emitted", len(usage) == 1, str(usage))
+    check("gauge: the billed figure stays zero on a free route",
+          usage and usage[0]["input"] == 0, str(usage))
+    check("gauge: the context reading is the estimate, not zero",
+          usage and usage[0].get("context", 0) > 0, str(usage))
+    check("gauge: and it is the prompt size the threshold reads",
+          usage and usage[0]["context"] == agent._last_input_tokens, str(usage))
+
+    app_src = (ROOT / "zimzilla" / "ui" / "app.py").read_text(encoding="utf-8")
+    check("gauge: the UI prefers the context reading",
+          'ev.get("context") or ev["input"]' in app_src)
+
+
 def test_is_flex_matches_by_host() -> None:
     from zimzilla import flex as fx
 
@@ -618,6 +909,11 @@ def main() -> int:
         test_config_reads_the_published_limits()
         test_the_agent_compacts_before_the_wire_trims()
         test_usage_falls_back_to_the_estimate()
+        test_the_estimate_counts_the_system_prompt()
+        test_the_count_trigger_counts_the_wire()
+        test_compaction_fits_the_routes_message_cap()
+        test_a_mid_turn_compaction_restates_the_instruction()
+        test_the_gauge_reads_the_estimate_when_nothing_is_billed()
         test_is_flex_matches_by_host()
         test_sources_registry_dispatch()
         test_discovery_needs_no_key()

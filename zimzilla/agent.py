@@ -914,6 +914,27 @@ class Agent:
                     # threshold would still read as exceeded and every remaining
                     # round would compact again.
                     self._last_input_tokens = 0
+                    # The instruction this turn is working on was folded into
+                    # the summary along with everything else, and a summary is
+                    # not an instruction: the model would carry on with no idea
+                    # what it was asked to do. Re-stated after the summary, so
+                    # the turn continues on the same task rather than on a
+                    # description of it.
+                    #
+                    # Unconditional, because the instruction is in the history
+                    # from the moment ``run_turn`` appends it — so a compaction
+                    # at the first round loses it just as surely as one at the
+                    # fifth. The only compaction with no live instruction is the
+                    # operator's own ``/compact``, which calls ``compact()``
+                    # directly and never reaches this loop.
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "[the turn is still running — the instruction it "
+                            "is working on, restated after the compaction]\n\n"
+                            + user_text
+                        ),
+                    })
 
             try:
                 final = None
@@ -959,6 +980,20 @@ class Agent:
                     }
                     if ok:
                         self._last_input_tokens = 0
+                        # The instruction this turn is working on went into the
+                        # summary with everything else, and a summary is not an
+                        # instruction. Re-stated so the retry continues the same
+                        # task rather than a description of it. Unconditional
+                        # for the same reason as the threshold path above: the
+                        # instruction is in the history from the first round.
+                        self.messages.append({
+                            "role": "user",
+                            "content": (
+                                "[the turn is still running — the instruction "
+                                "it is working on, restated after the "
+                                "compaction]\n\n" + user_text
+                            ),
+                        })
                         # `compact()` rebuilt the history from a summary, so the
                         # dangling-user problem the pop below guards against does
                         # not exist here — retry the round with the shorter
@@ -974,33 +1009,61 @@ class Agent:
                 break
 
             # ---- usage accounting
+            # The prompt size this call actually sent. Stored so the next round
+            # can decide whether to compact before sending a bigger one, and so
+            # the UI can draw the gauge against a real number.
+            #
+            # A playground sends no usage block at all — measured on Flex, every
+            # reply carries `choices` and nothing else — so `tin` is 0 there and
+            # the measured figure would never arrive. Falling back to the
+            # estimate is what keeps auto-compaction alive on such a route:
+            # without it `_should_compact` returns False forever and the history
+            # is silently trimmed at the wire instead, which loses the oldest
+            # turns with no compaction event and no transcript line saying so.
+            #
+            # Recorded OUTSIDE the ``usage is not None`` branch, and that is the
+            # whole point: a route that sends no usage block at all leaves
+            # ``usage`` as ``None``, so a fallback written inside the branch
+            # would never run on exactly the route it exists for. Measured on
+            # Flex, the estimate stayed 0 for the whole session and the gauge
+            # read 0% while compaction was working.
             usage = getattr(final, "usage", None)
+            tin = getattr(usage, "input_tokens", 0) or 0 if usage is not None else 0
+            tout = getattr(usage, "output_tokens", 0) or 0 if usage is not None else 0
+            self._last_input_tokens = tin or self.history_tokens()
             if usage is not None:
-                tin = getattr(usage, "input_tokens", 0) or 0
-                tout = getattr(usage, "output_tokens", 0) or 0
                 pin, pout = self._prices()
                 cost = (tin / 1e6) * pin + (tout / 1e6) * pout
                 turn_in += tin
                 turn_out += tout
                 turn_cost += cost
-                # The prompt size this call actually sent. Stored so the next
-                # round can decide whether to compact before sending a bigger
-                # one, and so the UI can draw the gauge against a real number.
-                #
-                # A playground sends no usage block at all — measured on Flex,
-                # every reply carries `choices` and nothing else — so `tin` is 0
-                # there and the measured figure would never arrive. Falling back
-                # to the estimate is what keeps auto-compaction alive on such a
-                # route: without it `_should_compact` returns False forever and
-                # the history is silently trimmed at the wire instead, which
-                # loses the oldest turns with no compaction event and no
-                # transcript line saying so.
-                self._last_input_tokens = tin or self.history_tokens()
                 yield {
                     "type": "usage",
                     "input": tin,
                     "output": tout,
                     "cost": cost,
+                    # The prompt size to draw the gauge against, which is not
+                    # ``input`` on a route that reports no usage: ``input`` is
+                    # the *billed* figure and must stay 0 there, or the cost
+                    # line would invent a charge for a free route. The gauge
+                    # needs the size of the prompt, and on such a route the
+                    # estimate is the only figure there is — so it is sent
+                    # separately rather than by falsifying the accounting.
+                    "context": self._last_input_tokens,
+                }
+            else:
+                # No usage block, so nothing was billed and nothing is claimed.
+                # The event is still emitted, because the gauge and the context
+                # reading are not billing: without it the bar would sit at 0%
+                # for the whole session on a route where compaction is in fact
+                # working, and the operator would have no way to see the wall
+                # coming.
+                yield {
+                    "type": "usage",
+                    "input": 0,
+                    "output": 0,
+                    "cost": 0.0,
+                    "context": self._last_input_tokens,
                 }
 
             # ---- store assistant turn verbatim
@@ -1793,6 +1856,32 @@ class Agent:
         except Exception:  # noqa: BLE001 - a lookup must not break a turn
             return None
 
+    def wire_messages(self) -> int:
+        """How many messages the next request will actually carry.
+
+        Not ``len(self.messages)``, and the difference is the whole reason this
+        exists. The cap is on the *wire* count, and one Anthropic message can
+        become several: the system prompt is a message of its own, and each
+        ``tool_result`` block becomes its own ``role: tool`` message. Measured
+        on a three-message history holding three tool results, the wire carried
+        six — so a trigger counting the Anthropic history would under-count by
+        one per parallel tool call and let the transport trim the oldest turns
+        silently, which is the exact loss the count trigger exists to prevent.
+
+        Counted by running the same translation the request runs, so the two
+        cannot disagree. A protocol that does not translate (Anthropic Messages)
+        sends the history as it stands, plus the system prompt as a parameter
+        rather than a message — so the count is the history alone.
+        """
+        if self.protocol != "openai":
+            return len(self.messages)
+        try:
+            from . import openai_compat
+            return openai_compat.wire_message_count(self.system_prompt(),
+                                                    self.messages)
+        except Exception:  # noqa: BLE001 - a count must not break a turn
+            return len(self.messages)
+
     def _should_compact(self, window: int) -> bool:
         """Whether the prompt is close enough to the threshold to compact first."""
         if not self.cfg.auto_compact:
@@ -1807,8 +1896,11 @@ class Agent:
         # never approaches a 32K window, so a token threshold would never fire
         # and the transport would trim instead. Two messages of headroom are
         # left for the turn about to be sent and its reply.
+        #
+        # Counted on the wire, not in the history: the cap counts what is sent,
+        # and a tool-heavy round sends more messages than the history holds.
         cap = self.message_cap()
-        if cap is not None and len(self.messages) >= max(4, cap - 2):
+        if cap is not None and self.wire_messages() >= max(4, cap - 2):
             return True
         if self._last_input_tokens <= 0:
             return False
@@ -1977,14 +2069,27 @@ class Agent:
         return 0
 
     def history_tokens(self) -> int:
-        """Rough size of the current history in tokens, for the freed figure.
+        """Rough size of the prompt in tokens, for the freed figure and the gauge.
 
-        Four characters per token, the usual English approximation. Used only
-        to report what a compaction actually achieved — the gauge and the
-        threshold both work from the endpoint's measured ``input_tokens``, which
-        is exact and arrives with the next call.
+        Four characters per token, the usual English approximation.
+
+        The system prompt is counted, and that is not a detail: it is a message
+        on the wire and it is not small. Measured in uncensored mode it is
+        ~6,000 characters — about 1,500 tokens — which is larger than a whole
+        ten-message Flex history. A route that sends no usage block falls back
+        to this figure for the compaction check, so omitting the system prompt
+        would under-report the prompt by more than the history itself, and the
+        threshold would then be measured against a number that is not the
+        prompt. It is also the right term for the "freed" figure: ``used`` is
+        the whole prompt before the compaction, so ``after`` must be the whole
+        prompt after it, or the difference would be a subtraction of two
+        different quantities.
         """
         chars = 0
+        try:
+            chars += len(self.system_prompt())
+        except Exception:  # noqa: BLE001 - a prompt must not break a count
+            pass
         for m in self.messages:
             content = m.get("content")
             if isinstance(content, str):
@@ -1999,6 +2104,24 @@ class Agent:
                         if value:
                             chars += len(value if isinstance(value, str) else str(value))
         return max(1, chars // 4)
+
+    def message_chars(self) -> int | None:
+        """The most characters this route accepts in one message, or ``None``.
+
+        The companion to :meth:`message_cap`, and needed for the same reason:
+        Flex caps the *last* message at 2000 characters and the transport trims
+        it to fit. That trim keeps the head and drops the tail, which is right
+        for a tool result and wrong for a summariser prompt — the tail is the
+        recent turns, the part worth summarising. So ``compact()`` has to build
+        a prompt that already fits rather than let the transport cut it.
+
+        Never raises: a lookup must not break a turn.
+        """
+        try:
+            from . import sources as sources_mod
+            return sources_mod.message_chars_for(self.cfg.base_url)
+        except Exception:  # noqa: BLE001 - a lookup must not break a turn
+            return None
 
     async def compact(self) -> tuple[bool, str]:
         """Summarise the conversation so far into a single recap message."""
@@ -2022,14 +2145,40 @@ class Agent:
                     elif t == "tool_result":
                         c = str(b.get("content", ""))[:1500]
                         transcript.append(f"{m['role']}: [result] {c}")
-        joined = "\n".join(transcript)[-60000:]
 
-        prompt = (
+        header = (
             "Summarise this agent session for continuation. Preserve: the goal, "
             "files created or modified (with paths), commands run and their "
             "outcomes, key decisions, open questions and next steps. Be dense "
-            "and concrete; drop pleasantries.\n\n" + joined
+            "and concrete; drop pleasantries.\n\n"
         )
+        # How much transcript the prompt may carry. A capped route trims the
+        # last message to its own limit and keeps the HEAD, so a prompt built
+        # past that limit would reach the summariser as the instruction header
+        # plus the OLDEST turns — the recent ones, the ones worth summarising,
+        # cut off the end. Measured on Flex: a 4,276-character prompt arrived as
+        # 2,000 characters and the last six turns were gone. So the budget is
+        # the route's own cap, and the transcript is trimmed to it here, where
+        # the tail is what survives.
+        budget = 60_000
+        cap = self.message_chars()
+        if cap:
+            budget = max(500, cap - len(header) - 200)
+        # Each line is trimmed before the tail is taken, and that is the
+        # difference between a summary of the session and a summary of its last
+        # message. One 3,000-character tool result would otherwise fill the
+        # whole budget on its own and the turns before it would be cut away —
+        # measured, a six-turn history reached the summariser as the tail of a
+        # single message. A quarter of the budget per line keeps at least four
+        # turns in view, which is what "the recent work" means.
+        per_line = max(200, budget // 4)
+        trimmed = [
+            line if len(line) <= per_line else line[:per_line] + " …"
+            for line in transcript
+        ]
+        joined = "\n".join(trimmed)[-budget:]
+
+        prompt = header + joined
         import anthropic
 
         # The same knob the turn path sends, and subject to the same rule: a
@@ -2077,10 +2226,17 @@ class Agent:
             self.session_output_tokens += tout
             self.session_cost += cost
 
-        self.messages = [
-            {
-                "role": "user",
-                "content": "[session summary — earlier history compacted]\n\n" + summary,
-            }
-        ]
+        prefix = "[session summary — earlier history compacted]\n\n"
+        # The summary becomes the last message of the next request, so a capped
+        # route trims it there — and a trim would cut the end off the summary,
+        # which is where the next steps are. Capped here instead, so what the
+        # model reads is a whole summary rather than a truncated one, and the
+        # note says it was shortened rather than leaving it to look complete.
+        if cap:
+            room = cap - len(prefix)
+            if room > 0 and len(summary) > room:
+                mark = "\n…[summary shortened to fit this route's message cap]"
+                summary = summary[: max(0, room - len(mark))] + mark
+
+        self.messages = [{"role": "user", "content": prefix + summary}]
         return True, summary
