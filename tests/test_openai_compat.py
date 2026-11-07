@@ -299,6 +299,108 @@ def test_arguments() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_text_tool_calls() -> None:
+    """A model that writes its call as markup must still get the tool run.
+
+    Some routes have no tool-call channel: Flex's playground accepts a ``tools``
+    array and answers with prose, so the model writes the call in the markup its
+    training used. DeepSeek writes it with a DSML namespace and fullwidth bars —
+    ``<｜DSML｜invoke name="Bash">`` — and the parser's guard used to test for a
+    literal ``<invoke``, which that string does not contain. The guard returned
+    early, the markup reached the transcript as prose, and the tool never ran:
+    the operator saw the agent *talking about* running a command.
+    """
+    dsml = (
+        "I'll list the files.\n\n"
+        "<\uff5cDSML\uff5ctool_calls>\n"
+        "<\uff5cDSML\uff5cinvoke name=\"Bash\">\n"
+        "<\uff5cDSML\uff5cparameter name=\"command\" string=\"true\">"
+        "ls -la</\uff5cDSML\uff5cparameter>\n"
+        "<\uff5cDSML\uff5cparameter name=\"description\" string=\"true\">"
+        "list</\uff5cDSML\uff5cparameter>\n"
+        "</\uff5cDSML\uff5cinvoke>\n"
+        "</\uff5cDSML\uff5ctool_calls>"
+    )
+    prose, calls = oc.parse_text_tool_calls(dsml)
+    check("text calls: the DSML-prefixed call is parsed", len(calls) == 1, str(calls))
+    check("text calls: the name is read", calls and calls[0]["name"] == "Bash",
+          str(calls[0]) if calls else "")
+    check("text calls: the parameters are read",
+          calls and calls[0]["input"].get("command") == "ls -la",
+          str(calls[0]["input"]) if calls else "")
+    check("text calls: the markup is removed from the prose",
+          "invoke" not in prose.lower() and "DSML" not in prose, repr(prose))
+    check("text calls: the prose before the call survives",
+          prose.startswith("I'll list the files."), repr(prose))
+
+    # The plain form, which is what the parser was originally written for.
+    plain = ('<tool_calls><invoke name="bash"><parameter name="command">'
+             'pwd</parameter></invoke></tool_calls>')
+    _, plain_calls = oc.parse_text_tool_calls(plain)
+    check("text calls: the unprefixed form still parses",
+          len(plain_calls) == 1 and plain_calls[0]["input"] == {"command": "pwd"},
+          str(plain_calls))
+
+    # Prose that merely mentions a tag is not a call.
+    _, none = oc.parse_text_tool_calls("Use the invoke tool to run things.")
+    check("text calls: ordinary prose is not a call", none == [], str(none))
+
+    # A whole streamed reply, through the accumulator, end to end.
+    acc = oc.Accumulator()
+    for piece in (dsml[:40], dsml[40:120], dsml[120:]):
+        acc.feed_chunk({"choices": [{"index": 0, "delta": {"content": piece}}]})
+    acc.feed_chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    msg = acc.message()
+    blocks = [b for b in msg.content if b.type == "tool_use"]
+    check("text calls: a streamed reply yields a real tool_use block",
+          len(blocks) == 1, str(msg.content))
+    check("text calls: the turn is not reported as finished",
+          msg.stop_reason == "tool_use", str(msg.stop_reason))
+    streamed = "".join(b.text or "" for b in msg.content if b.type == "text")
+    check("text calls: no markup reaches the transcript",
+          "invoke" not in streamed.lower() and "DSML" not in streamed,
+          repr(streamed))
+
+
+def test_call_normalisation() -> None:
+    """A model writes the tool set it was trained on, not necessarily this one.
+
+    ``Bash`` for ``bash`` is the difference that bit: the call was dispatched
+    against ``_DISPATCH`` and came back ``unknown tool: Bash`` — the model asked
+    for the right thing and the harness refused it over a capital letter.
+    """
+    from zimzilla import tools as tools_mod
+
+    check("normalise: a capitalised name resolves",
+          tools_mod.resolve_tool_name("Bash") == "bash")
+    check("normalise: an alias resolves",
+          tools_mod.resolve_tool_name("exec_command") == "bash")
+    check("normalise: a canonical name is unchanged",
+          tools_mod.resolve_tool_name("read_file") == "read_file")
+    check("normalise: an unknown name is reported as sent",
+          tools_mod.resolve_tool_name("frobnicate") == "frobnicate")
+
+    # Arguments recovered from markup are all strings; the schema decides type.
+    args = tools_mod.coerce_args("edit_file", {
+        "file_path": "a.py", "old": "x", "new": "y", "replace_all": "false",
+    })
+    check("normalise: an aliased argument is renamed", args.get("path") == "a.py",
+          str(args))
+    check("normalise: old/new are renamed",
+          args.get("old_string") == "x" and args.get("new_string") == "y", str(args))
+    check("normalise: a string boolean becomes a real boolean",
+          args.get("replace_all") is False, repr(args.get("replace_all")))
+
+    args = tools_mod.coerce_args("read_file", {"path": "a.py", "limit": "100"})
+    check("normalise: a string integer becomes a real integer",
+          args.get("limit") == 100, repr(args.get("limit")))
+
+    # A value that will not convert is left for the tool to report.
+    args = tools_mod.coerce_args("read_file", {"path": "a.py", "limit": "lots"})
+    check("normalise: an unconvertible value is left alone",
+          args.get("limit") == "lots", repr(args.get("limit")))
+
+
 def test_stream_assembly() -> None:
     captured: list[dict] = []
 
@@ -1019,6 +1121,8 @@ def main() -> int:
     test_message_translation()
     test_tool_translation()
     test_arguments()
+    test_text_tool_calls()
+    test_call_normalisation()
     test_stream_assembly()
     test_stream_length_and_empty()
     test_create()

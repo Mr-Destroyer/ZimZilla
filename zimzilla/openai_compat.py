@@ -571,6 +571,119 @@ STOP_REASONS = {
 }
 
 
+#: Tool calls a model writes as *text* rather than through ``delta.tool_calls``.
+#:
+#: Some routes have no tool-call channel at all. Flex's playground accepts a
+#: ``tools`` array and then answers with prose — measured, zero
+#: ``delta.tool_calls`` frames on every model it serves. A model that has been
+#: told about tools anyway does the only thing it can: it writes the call out in
+#: the markup its training used. Measured on DeepSeek-V4-Flash through Flex:
+#:
+#:     <tool_calls>
+#:     <invoke name="exec_command">
+#:     <parameter name="cmd">ls -la /home/zim/bug-hunt/web/plscr/</parameter>
+#:     </invoke>
+#:     </tool_calls>
+#:
+#: Left alone, that reaches the transcript as literal markup and the tool never
+#: runs — the operator sees the agent "talking about" running a command instead
+#: of running it. So the text is parsed back into real calls.
+#:
+#: Deliberately narrow: it matches the ``<invoke>``/``<parameter>`` shape only,
+#: because that is the one measured. A looser pattern would turn any prose that
+#: happens to mention a tag into a tool call, which is a worse failure than
+#: showing the markup.
+#: The tag prefix is matched rather than assumed. DeepSeek writes its calls with
+#: a DSML namespace and fullwidth bars — ``<｜DSML｜invoke name="bash">`` — which
+#: is the same shape with a prefix in front of the keyword. Matching the prefix
+#: as "anything that is not a tag delimiter" covers both that and the plain
+#: ``<invoke>`` form, without a second pattern to keep in step.
+_INVOKE_RE = re.compile(
+    r"<([^<>]*?)invoke\s+name=\"([^\"]+)\"\s*>(.*?)</([^<>]*?)invoke\s*>",
+    re.S | re.I)
+_PARAM_RE = re.compile(
+    r"<([^<>]*?)parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</([^<>]*?)parameter\s*>",
+    re.S | re.I)
+#: The wrapper the calls sit inside, removed with them so no empty shell is left
+#: in the transcript. Same prefix tolerance, for the same reason.
+_TOOLCALLS_RE = re.compile(
+    r"<([^<>]*?)tool_calls\s*>(.*?)</([^<>]*?)tool_calls\s*>", re.S | re.I)
+
+#: How many trailing characters are held back from the live stream so a marker
+#: split across two chunks is never emitted as prose. Sized for the longest
+#: marker *including* a namespace prefix — DeepSeek writes
+#: ``<｜DSML｜tool_calls>``, which is 20 characters before the keyword even starts.
+#: Generous on purpose: holding back a few extra characters costs nothing, and
+#: a marker that slips through is shown to the operator as literal markup.
+_MARKER_HOLDBACK = 32
+
+
+#: The keywords that open a call. Matched as *keywords*, never as a literal
+#: ``<invoke``: DeepSeek writes ``<｜DSML｜invoke``, where the namespace is part
+#: of the tag and not part of the keyword. A literal test rejects the very shape
+#: the regexes below accept, which is how the parser came to be dead code for
+#: the one model it was written for — the guard returned early, the markup went
+#: to the transcript as prose, and the tool never ran.
+_CALL_KEYWORDS = ("invoke", "tool_calls")
+
+
+def _has_call_markup(text: str) -> bool:
+    """Whether *text* mentions a call keyword at all, prefix or not."""
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _CALL_KEYWORDS)
+
+
+def _looks_like_markup(text: str) -> bool:
+    """Whether *text* is tool-call markup, even if it did not parse.
+
+    A call the model wrote badly — truncated, or with a missing closing tag —
+    is still markup, and streaming it puts a wall of tags in the transcript. The
+    test is deliberately loose: it only has to catch text that is *mostly* tags,
+    so ordinary prose that mentions a tag is not swallowed.
+    """
+    if not _has_call_markup(text):
+        return False
+    return "<" in text and text.count("<") >= 2
+
+
+def parse_text_tool_calls(text: str) -> tuple[str, list[dict]]:
+    """Split *text* into (prose, tool calls written as markup).
+
+    Returns the text with the call markup removed, and the calls it contained as
+    ``{"name": ..., "input": {...}}``. A reply with no markup comes back
+    unchanged with an empty list, so this is safe to run on every response.
+
+    The parameters are kept as strings: the model writes them as text, and a
+    value like ``"100"`` is a string in the markup but an integer in the tool's
+    schema. Coercing here would guess; the tool's own validation is the place
+    that knows, and it reports a wrong type far more usefully than a silent
+    conversion would.
+    """
+    if not text or not _has_call_markup(text):
+        return text, []
+    calls: list[dict] = []
+    for match in _INVOKE_RE.finditer(text):
+        name = (match.group(2) or "").strip()
+        if not name:
+            continue
+        body = match.group(3) or ""
+        args: dict = {}
+        for param in _PARAM_RE.finditer(body):
+            key = (param.group(2) or "").strip()
+            if key:
+                args[key] = (param.group(3) or "").strip()
+        calls.append({"name": name, "input": args})
+    if not calls:
+        return text, []
+    # Remove the calls, then the wrapper they sat in, then tidy the blank lines
+    # the removal leaves behind — a transcript with a hole in it reads as a
+    # truncated reply.
+    prose = _INVOKE_RE.sub("", text)
+    prose = _TOOLCALLS_RE.sub("", prose)
+    prose = re.sub(r"\n{3,}", "\n\n", prose).strip()
+    return prose, calls
+
+
 def _delta_text(delta: dict) -> str:
     """The visible text in one streamed delta (or a whole message)."""
     content = delta.get("content")
@@ -654,6 +767,92 @@ class Accumulator:
         self.calls: dict[int, dict] = {}
         self.finish_reason: str | None = None
         self.usage = Usage()
+        #: Text held back from the live stream because it might be the start of
+        #: a tool call written as markup. See :meth:`_emit_text`.
+        self._held = ""
+        #: Set once a call marker has been seen: from then on nothing is
+        #: streamed as text, because everything after it belongs to the call.
+        self._in_call = False
+
+    # -- text, with the markup held back ---------------------------------
+    def _emit_text(self, text: str) -> list[SimpleNamespace]:
+        """Stream *text*, holding back anything that might be a tool call.
+
+        A route with no tool-call channel makes the model write its call as
+        markup in the text, and that markup arrives through the same
+        ``text_delta`` path as ordinary prose. Streaming it straight out puts
+        ``<tool_calls><invoke name="bash">…`` in the transcript, which is what
+        the operator sees instead of the command running.
+
+        So the tail is held back by the width of the longest marker prefix, and
+        once a marker is seen the rest of the reply is held entirely — it is
+        parsed into real calls by :meth:`message`. Prose before the first marker
+        still streams live, which is the part worth watching.
+        """
+        if self._in_call:
+            self._held += text
+            return []
+        self._held += text
+        lowered = self._held.lower()
+        # The marker may carry a namespace prefix (DeepSeek's DSML), so the
+        # search is for the keyword rather than for a literal "<invoke". The
+        # opening angle bracket is then walked back to, so the prefix goes with
+        # the call instead of being left in the prose.
+        cut = -1
+        for keyword in ("invoke", "tool_calls"):
+            found = lowered.find(keyword)
+            if found < 0:
+                continue
+            start = lowered.rfind("<", 0, found)
+            if start < 0:
+                continue
+            if cut < 0 or start < cut:
+                cut = start
+        if cut >= 0:
+            # Everything before the marker is prose and is safe to send.
+            safe, self._held = self._held[:cut], self._held[cut:]
+            self._in_call = True
+            if not safe:
+                return []
+            self.text.append(safe)
+            return [_event("text_delta", text=safe)]
+        # No marker yet. Emit all but the last few characters, so a marker that
+        # is still arriving is never cut in half.
+        keep = _MARKER_HOLDBACK
+        if len(self._held) <= keep:
+            return []
+        safe, self._held = self._held[:-keep], self._held[-keep:]
+        if not safe:
+            return []
+        self.text.append(safe)
+        return [_event("text_delta", text=safe)]
+
+    def flush_text(self) -> list[SimpleNamespace]:
+        """Emit whatever is still held back, once the stream has ended.
+
+        A reply shorter than the holdback is *entirely* held, so without this a
+        one-word answer would stream as nothing at all. The held text is scanned
+        for a call first: a call that fits inside the holdback never left the
+        buffer, and emitting it as prose is the bug this whole path exists to
+        avoid.
+        """
+        held, self._held = self._held, ""
+        if not held:
+            return []
+        # The held text is always recorded, because `message()` parses the calls
+        # out of it. What is *streamed* is only the prose: emitting the markup
+        # here is the bug this whole path exists to prevent, and it is easy to
+        # reintroduce by returning `held` when no call parses — a truncated or
+        # malformed call is still markup, and still must not be shown.
+        self.text.append(held)
+        prose, calls = parse_text_tool_calls(held)
+        if calls:
+            return [_event("text_delta", text=prose)] if prose else []
+        # No call parsed. If the text still looks like markup, it is a call the
+        # model wrote badly — shown as nothing rather than as a wall of tags.
+        if _looks_like_markup(held):
+            return []
+        return [_event("text_delta", text=held)]
 
     # -- feeding ---------------------------------------------------------
     def feed_chunk(self, obj: dict) -> list[SimpleNamespace]:
@@ -669,8 +868,9 @@ class Accumulator:
                 continue
             text = _delta_text(delta)
             if text:
-                self.text.append(text)
-                events.append(_event("text_delta", text=text))
+                # Held back rather than streamed straight out: the model may be
+                # writing a tool call as markup. See `_emit_text`.
+                events.extend(self._emit_text(text))
             reasoning = _delta_reasoning(delta)
             if reasoning:
                 self.reasoning.append(reasoning)
@@ -694,8 +894,8 @@ class Accumulator:
             if isinstance(message, dict):
                 text = _delta_text(message)
                 if text:
-                    self.text.append(text)
-                    events.append(_event("text_delta", text=text))
+                    events.extend(self._emit_text(text))
+                    events.extend(self.flush_text())
                 reasoning = _delta_reasoning(message)
                 if reasoning:
                     self.reasoning.append(reasoning)
@@ -731,11 +931,30 @@ class Accumulator:
         arguments = function.get("arguments")
         if isinstance(arguments, str):
             slot["arguments"] += arguments
+        elif isinstance(arguments, dict):
+            # Some servers send the arguments as an object rather than the JSON
+            # string the spec calls for. Concatenating would raise; serialising
+            # keeps the call usable, and ``parse_arguments`` reads it back.
+            slot["arguments"] += json.dumps(arguments, ensure_ascii=False)
 
     # -- result ----------------------------------------------------------
     def message(self) -> Message:
         blocks: list[Block] = []
+        # Whatever the holdback is still sitting on belongs in the reply. The
+        # streaming path flushes it when the stream ends, but the non-streaming
+        # one (``_feed_sse_body``, and any caller that only wants the message)
+        # never does — and a reply shorter than the holdback is *entirely* held,
+        # so without this a two-word answer comes back empty. Idempotent: after
+        # a flush there is nothing left to append.
+        if self._held:
+            self.text.append(self._held)
+            self._held = ""
         text = "".join(self.text)
+        # A route with no tool-call channel makes the model write its call as
+        # markup in the text. Parsed back into real calls here, so the tool
+        # actually runs instead of the operator being shown the markup. See
+        # ``parse_text_tool_calls``.
+        text, text_calls = parse_text_tool_calls(text)
         if text:
             blocks.append(Block(type="text", text=text))
         for index in sorted(self.calls):
@@ -748,11 +967,21 @@ class Accumulator:
                 name=call["name"],
                 input=parse_arguments(call["arguments"]),
             ))
+        # Calls recovered from the text come after the real ones, and are keyed
+        # past them so their ids cannot collide with a server-assigned id.
+        for offset, call in enumerate(text_calls):
+            blocks.append(Block(
+                type="tool_use",
+                id=f"call_text_{offset}",
+                name=call["name"],
+                input=call["input"],
+            ))
         stop = STOP_REASONS.get((self.finish_reason or "").lower(), "end_turn")
         # A server that streams calls but never sends a finish_reason still
         # asked for tools; treating that as end_turn would end the turn with
-        # the work undone.
-        if self.finish_reason is None and any(b.type == "tool_use" for b in blocks):
+        # the work undone. The same is true of a call recovered from the text:
+        # the model asked for a tool, so the turn is not finished.
+        if any(b.type == "tool_use" for b in blocks) and stop == "end_turn":
             stop = "tool_use"
         return Message(content=blocks, stop_reason=stop, usage=self.usage)
 
@@ -1142,6 +1371,11 @@ class _Stream:
             # other: the loop retries it, and the operator is told which endpoint
             # went quiet rather than handed an httpx traceback.
             raise _connection_error(e, self._client.url) from e
+        # Whatever the holdback kept back is emitted now. A reply shorter than
+        # the marker is entirely held, so without this a one-word answer would
+        # stream as nothing at all.
+        for event in self._acc.flush_text():
+            yield event
         self._final = self._acc.message()
 
     async def get_final_message(self) -> Message:

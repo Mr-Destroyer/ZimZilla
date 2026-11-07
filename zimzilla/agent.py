@@ -1066,6 +1066,23 @@ class Agent:
                     "context": self._last_input_tokens,
                 }
 
+            # ---- normalise the calls before anything reads them
+            #
+            # A model writes the tool set it was trained on, not necessarily the
+            # one advertised here: ``Bash`` for ``bash``, ``exec_command`` for
+            # the same tool, ``file_path`` for ``path``. Left alone, the call is
+            # dispatched against ``_DISPATCH`` and comes back ``unknown tool:
+            # Bash`` — the model asked for the right thing and the harness
+            # refused it over a capital letter. Normalised here, once, so the
+            # stored turn, the permission gate, the preview and the execution
+            # all see the same canonical name and arguments.
+            for block in final.content:
+                if getattr(block, "type", None) != "tool_use":
+                    continue
+                block.name = tools_mod.resolve_tool_name(block.name)
+                block.input = tools_mod.coerce_args(
+                    block.name, dict(block.input or {}))
+
             # ---- store assistant turn verbatim
             depth = len(self.messages)
             content = [self._block_to_dict(b) for b in final.content]

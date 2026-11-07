@@ -572,6 +572,174 @@ def needs_permission(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Call normalisation
+# ---------------------------------------------------------------------------
+
+#: Names a model writes for a tool that is not the name this harness advertises.
+#:
+#: A model that was trained on a different agent's tool set writes *that* set's
+#: names, and the call is then dispatched against ``_DISPATCH`` and comes back
+#: ``unknown tool: Bash`` — the model asked for the right thing and the harness
+#: refused it over a capital letter. Measured on DeepSeek through the Flex
+#: playground, which writes ``Bash`` for ``bash`` and ``exec_command`` for the
+#: same tool on other routes.
+#:
+#: Keys are lowercased and compared after the name is lowercased, so ``Bash``,
+#: ``BASH`` and ``bash`` all land on the same entry. Only names that are
+#: unambiguous are listed: ``search`` is deliberately absent because it could
+#: mean ``grep`` or ``search_web``, and guessing wrong is worse than the model
+#: being told the name it used is unknown.
+TOOL_ALIASES: dict[str, str] = {
+    # shell
+    "exec_command": "bash",
+    "execute_command": "bash",
+    "run_command": "bash",
+    "shell": "bash",
+    "terminal": "bash",
+    "cmd": "bash",
+    "run": "bash",
+    # read
+    "read": "read_file",
+    "readfile": "read_file",
+    "cat": "read_file",
+    "view": "read_file",
+    "open_file": "read_file",
+    # write
+    "write": "write_file",
+    "writefile": "write_file",
+    "create_file": "write_file",
+    "save_file": "write_file",
+    # edit
+    "edit": "edit_file",
+    "editfile": "edit_file",
+    "replace": "edit_file",
+    "str_replace": "edit_file",
+    "apply_patch": "edit_file",
+    # find
+    "find": "glob",
+    "find_files": "glob",
+    "glob_files": "glob",
+    # grep
+    "ripgrep": "grep",
+    "rg": "grep",
+    "grep_files": "grep",
+    # list
+    "ls": "list_dir",
+    "list": "list_dir",
+    "list_files": "list_dir",
+    "listdir": "list_dir",
+    # web
+    "web_search": "search_web",
+    "fetch": "web_fetch",
+    "fetch_url": "web_fetch",
+    "read_url": "web_fetch",
+}
+
+#: Argument names a model writes for a parameter this harness names differently.
+#: Keyed by the canonical tool name, then by the alias the model used.
+ARG_ALIASES: dict[str, dict[str, str]] = {
+    "bash": {"cmd": "command", "command_line": "command", "script": "command"},
+    "read_file": {"file_path": "path", "filename": "path", "file": "path"},
+    "write_file": {
+        "file_path": "path", "filename": "path", "file": "path",
+        "text": "content", "body": "content", "contents": "content",
+        "data": "content",
+    },
+    "edit_file": {
+        "file_path": "path", "filename": "path", "file": "path",
+        "old": "old_string", "old_text": "old_string", "find": "old_string",
+        "new": "new_string", "new_text": "new_string", "replace": "new_string",
+    },
+    "glob": {"dir": "path", "directory": "path", "glob": "pattern"},
+    "grep": {"regex": "pattern", "query": "pattern", "dir": "path",
+             "directory": "path"},
+    "list_dir": {"dir": "path", "directory": "path"},
+    "search_web": {"q": "query", "search": "query"},
+    "web_fetch": {"uri": "url", "link": "url"},
+}
+
+#: ``input_schema`` per tool, for the type coercion in :func:`coerce_args`.
+_SCHEMAS: dict[str, dict] = {
+    schema["name"]: schema.get("input_schema") or {}
+    for schema in TOOL_SCHEMAS
+    if isinstance(schema, dict) and schema.get("name")
+}
+
+
+def resolve_tool_name(name: str) -> str:
+    """The canonical name for *name*, or *name* unchanged.
+
+    Case is folded first, because that is the difference that actually bit: a
+    model writing ``Bash`` is asking for ``bash`` and nothing else. An unknown
+    name is returned as given rather than guessed at — ``execute`` then reports
+    it, which tells the model what it actually sent.
+    """
+    if not isinstance(name, str):
+        return ""
+    lowered = name.strip().lower()
+    if not lowered:
+        return ""
+    if lowered in _DISPATCH:
+        return lowered
+    return TOOL_ALIASES.get(lowered, lowered)
+
+
+def coerce_args(name: str, args: dict) -> dict:
+    """Rename aliased arguments and coerce values to the schema's types.
+
+    A call recovered from text markup carries every value as a *string* — the
+    model wrote ``replace_all="false"`` and ``limit="100"``, and the tool then
+    does ``bool("false")`` (True) or ``int("100")`` (works, but only by luck).
+    The schema is the authority on what the type should be, so it is applied
+    here, once, rather than defended against in every tool.
+
+    A value that will not convert is left alone: the tool's own validation
+    reports it far more usefully than a silent substitution would.
+    """
+    if not isinstance(args, dict):
+        return {}
+    aliases = ARG_ALIASES.get(name, {})
+    renamed: dict = {}
+    for key, value in args.items():
+        target = aliases.get(str(key).strip().lower(), key)
+        # First spelling wins: a model that sends both ``path`` and ``file_path``
+        # meant the same thing, and the canonical one is the one to keep.
+        if target not in renamed:
+            renamed[target] = value
+
+    properties = (_SCHEMAS.get(name) or {}).get("properties") or {}
+    for key, value in list(renamed.items()):
+        spec = properties.get(key)
+        if not isinstance(spec, dict) or not isinstance(value, str):
+            continue
+        kind = spec.get("type")
+        if kind == "integer":
+            try:
+                renamed[key] = int(value.strip())
+            except (TypeError, ValueError):
+                pass
+        elif kind == "number":
+            try:
+                renamed[key] = float(value.strip())
+            except (TypeError, ValueError):
+                pass
+        elif kind == "boolean":
+            lowered = value.strip().lower()
+            if lowered in ("true", "1", "yes", "on"):
+                renamed[key] = True
+            elif lowered in ("false", "0", "no", "off"):
+                renamed[key] = False
+        elif kind in ("array", "object"):
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, (list, dict)):
+                renamed[key] = parsed
+    return renamed
+
+
+# ---------------------------------------------------------------------------
 # Preview builders (used by the permission gate)
 # ---------------------------------------------------------------------------
 
