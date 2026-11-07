@@ -440,11 +440,20 @@ def test_the_agent_compacts_before_the_wire_trims() -> None:
                       {"role": "assistant", "content": "y"}] * 2
     check("cap: a short history does not compact",
           agent._should_compact(32_768) is False)
-    # At the cap it must, even though the token count is zero.
+    # At the cap it must, even though the token count is zero. The trigger is
+    # the cap itself: the check runs before the request is built, so a history
+    # already at the cap is the one whose next round would overflow.
     agent.messages = [{"role": "user", "content": "x"},
                       {"role": "assistant", "content": "y"}] * 4
+    check("cap: one below the cap does not compact yet",
+          agent.wire_messages() == 9 and agent._should_compact(32_768) is False,
+          str(agent.wire_messages()))
+    agent.messages = [{"role": "user", "content": "x"},
+                      {"role": "assistant", "content": "y"}] * 4 + [
+                      {"role": "user", "content": "z"}]
     check("cap: a full history compacts on count alone",
-          agent._should_compact(32_768) is True)
+          agent.wire_messages() == 10 and agent._should_compact(32_768) is True,
+          str(agent.wire_messages()))
     # An uncapped route is unaffected: no count trigger, and no measured tokens
     # means no compaction.
     other = Agent(Config(base_url="https://api.inferbase.ai/v1", model="auto"))
@@ -598,12 +607,17 @@ def test_compaction_fits_the_routes_message_cap() -> None:
           len(sent[0]) <= 2000, str(len(sent[0])))
     check("chars: and it carries the recent turns, not just the oldest",
           "step 5" in sent[0], sent[0][-120:])
-    check("chars: the stored summary fits the cap too",
-          len(agent.messages[0]["content"]) <= 2000,
-          str(len(agent.messages[0]["content"])))
-    check("chars: a shortened summary says so",
-          "shortened" in agent.messages[0]["content"],
-          agent.messages[0]["content"][-80:])
+    # The summary is folded into the system prompt rather than carried as a
+    # message, so on a capped route it costs no wire message at all — the
+    # history after a compaction is empty, and the recap rides on the prompt
+    # that was already being sent.
+    check("chars: the history is emptied, not seeded with a summary message",
+          agent.messages == [], str(agent.messages))
+    check("chars: the summary rides on the system prompt",
+          "step 5" in agent.system_prompt() or "summary" in agent.system_prompt().lower(),
+          agent.system_prompt()[-200:])
+    check("chars: the summary is not truncated to the last-message cap",
+          len(agent._summary) > 2000, str(len(agent._summary)))
 
 
 def test_a_mid_turn_compaction_restates_the_instruction() -> None:

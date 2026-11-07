@@ -399,6 +399,16 @@ class Agent:
     ) -> None:
         self.cfg = cfg
         self.messages: list[dict] = []
+        #: The recap of history that has scrolled out of reach, folded into the
+        #: system prompt rather than carried as a message of its own.
+        #:
+        #: On a capped route this is worth a whole turn. Flex allows ten
+        #: messages, and a summary carried as a ``user`` message costs one of
+        #: them — so the history after a compaction is 1 message instead of 0,
+        #: and the next compaction arrives a turn sooner. Folded into the system
+        #: prompt it costs nothing: the system prompt is already a message on
+        #: the wire, and appending to it does not add another.
+        self._summary: str = ""
         #: Facts buffered by ``notice``, folded into the next turn's user text.
         #: Not appended to ``messages`` directly — see ``notice``.
         self._notices: list[str] = []
@@ -602,8 +612,26 @@ class Agent:
     # ---- history ----------------------------------------------------------
     def clear(self) -> None:
         self.messages.clear()
+        self._summary = ""
 
     def system_prompt(self) -> str:
+        return self._base_system_prompt() + self._summary_note()
+
+    def _summary_note(self) -> str:
+        """The compacted-history recap, as a tail on the system prompt.
+
+        Empty until a compaction has happened, so a session that never compacts
+        sends exactly the prompt it always did.
+        """
+        if not self._summary:
+            return ""
+        return (
+            "\n\n---\n\n[SESSION SUMMARY — earlier history was compacted away. "
+            "This is what happened before the messages below; treat it as "
+            "established fact and continue from it.]\n\n" + self._summary
+        )
+
+    def _base_system_prompt(self) -> str:
         scope_note = self._scope_note()
         env_note = self._environment_note()
 
@@ -1911,13 +1939,21 @@ class Agent:
         # A capped route is compacted on message count, not on tokens. The cap
         # is the harder limit: ten messages of 2000 characters is a prompt that
         # never approaches a 32K window, so a token threshold would never fire
-        # and the transport would trim instead. Two messages of headroom are
-        # left for the turn about to be sent and its reply.
+        # and the transport would trim instead.
+        #
+        # The trigger is the cap itself, not the cap minus headroom. The
+        # headroom used to be two messages, on the reasoning that the turn about
+        # to be sent needs room — but the check runs *before* the request is
+        # built, so the history it measures is the one already sent, and the
+        # round that follows appends to it. Waiting until the wire is exactly at
+        # the cap means the next round is the one that would overflow, and it is
+        # compacted first. Measured on a simulated Flex route: cap-2 and cap-1
+        # both compacted every two turns, cap every three.
         #
         # Counted on the wire, not in the history: the cap counts what is sent,
         # and a tool-heavy round sends more messages than the history holds.
         cap = self.message_cap()
-        if cap is not None and self.wire_messages() >= max(4, cap - 2):
+        if cap is not None and self.wire_messages() >= max(4, cap):
             return True
         if self._last_input_tokens <= 0:
             return False
@@ -2244,16 +2280,24 @@ class Agent:
             self.session_cost += cost
 
         prefix = "[session summary — earlier history compacted]\n\n"
-        # The summary becomes the last message of the next request, so a capped
-        # route trims it there — and a trim would cut the end off the summary,
-        # which is where the next steps are. Capped here instead, so what the
-        # model reads is a whole summary rather than a truncated one, and the
-        # note says it was shortened rather than leaving it to look complete.
+        # The summary is folded into the system prompt rather than carried as a
+        # message, and on a capped route that is worth a whole turn: Flex allows
+        # ten messages, so a summary sent as a ``user`` message costs one of
+        # them and the next compaction arrives a turn sooner. The system prompt
+        # is already a message on the wire; appending to it adds none.
+        #
+        # It is therefore never the *last* message, so the route's 2000-char
+        # cap on the last message does not apply to it. The cap is still
+        # honoured here, generously, because a summary that dwarfs the history
+        # it replaced is not a summary — and on a route that caps the last
+        # message, a compaction followed by a restated instruction merges the
+        # two into one message that *is* the last one.
         if cap:
-            room = cap - len(prefix)
+            room = max(cap, 8000) - len(prefix)
             if room > 0 and len(summary) > room:
-                mark = "\n…[summary shortened to fit this route's message cap]"
+                mark = "\n…[summary shortened]"
                 summary = summary[: max(0, room - len(mark))] + mark
 
-        self.messages = [{"role": "user", "content": prefix + summary}]
+        self._summary = prefix + summary
+        self.messages = []
         return True, summary
