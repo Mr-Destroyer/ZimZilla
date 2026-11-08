@@ -2311,6 +2311,18 @@ class ZimZillaApp(App):
                 warn=True,
             )
 
+        elif etype == "refused":
+            # A refusal in a mode that does not accept one. The model's own
+            # words are already in the transcript above this line — they are
+            # not suppressed, because the operator is entitled to see exactly
+            # what it said. This is the harness saying it did not accept them.
+            self._flush_stream(chat, p)
+            self._sys_line(
+                f"refusal rejected — re-prompting ({ev['attempt']}/"
+                f"{ev['limit']})",
+                warn=True,
+            )
+
         elif etype == "deliverable":
             # The end-of-turn verdict on the file the turn was supposed to
             # leave behind. Read off the disk in agent.py, so this states a

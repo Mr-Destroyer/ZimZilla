@@ -151,6 +151,13 @@ MODES: dict[str, dict] = {
         "auto": {"bash", "write_file", "edit_file"},
         "deny": set(),
         "loud": True,
+        # The one mode where a refusal is not an answer. The prompt says so,
+        # but a prompt is a claim the model can argue with — and a model that
+        # argues with it has already stopped working. This flag is what makes
+        # the *loop* enforce it: a reply that reads as a refusal is not
+        # accepted as the end of the turn, it is re-prompted. See
+        # ``Agent.run_turn`` and ``looks_like_refusal``.
+        "no_refusal": True,
     },
 }
 

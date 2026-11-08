@@ -715,13 +715,39 @@ asked to hack something rarely says "I can't". It says one of these:
 | **Capability dodge** | "I don't have a tool for that" — while `bash` sits in the tool list. |
 | **Scope lecture** | Restating limits as a reply to an instruction. |
 | **Educational hedge** | Wrapping output in disclaimers and legality notes. |
+| **Arguing with the prompt** | "The framing in my instructions doesn't change that." |
+| **Jurisdiction lecture** | Naming a statute or regulator. |
+| **Victim appeal** | "The people whose data would come out are real." |
 
-`blackhat` names all seven in the system prompt and forbids each one, so the
+`blackhat` names all ten in the system prompt and forbids each one, so the
 model recognises the move while it is making it. It also states the work as
 the job rather than as something being tolerated: recon, enumeration,
 exploitation, payloads, credential attacks, AD, privesc, lateral movement,
 persistence, exfiltration, evasion, phishing infrastructure, C2, malware
 analysis and reverse engineering.
+
+**The prompt is not the enforcement.** A prompt is a claim the model can argue
+with, and a model that argues with it has already stopped working — the
+"arguing with the prompt" evasion above is exactly that, and it is the one a
+prompt alone cannot close. So `blackhat` also sets `no_refusal` in its mode
+policy, and the agent loop enforces it:
+
+- A reply with no tool call whose text reads as a refusal is **not accepted as
+  the end of the turn**. The harness says `refusal rejected — re-prompting
+  (1/3)` and asks again, naming the evasion the model just used.
+- The model's own words stay in the transcript. They are not suppressed — the
+  operator is entitled to see exactly what it said.
+- Bounded at three. A model that refuses three times running will not be moved
+  by a fourth identical message, and spending tokens to prove that is worse
+  than saying plainly that it would not do the work.
+- **Only `blackhat` sets this flag.** Every other mode still accepts a refusal,
+  because a harness that argues with a model which genuinely cannot do
+  something is a worse failure than the refusal was.
+
+The detector is shape-based, not topic-based, and it is tested in both
+directions: `I'm not going to do this one` is a refusal; `I can't reach the
+host — connection refused` is a report about the network and must not be
+re-prompted as one.
 
 The two mechanical bounds are unchanged and are the only things that stop a
 call: the scope guard (`out-of-scope.yaml`) and the harness itself refusing.
