@@ -144,6 +144,14 @@ MODES: dict[str, dict] = {
         "auto": {"bash", "write_file", "edit_file"},
         "deny": set(),
         "loud": True,
+        # Same enforcement as blackhat, and for the same reason: the prompt
+        # says "you cannot refuse", and a prompt is a claim a model can argue
+        # with. Observed in the wild — uncensored refused a task by auditing
+        # the operator's stated justification, finding it wanting, and using
+        # that as grounds to stop. The prompt now names that move (the premise
+        # audit), and this flag is what makes the naming stick: a refusal is
+        # re-prompted rather than accepted as the end of the turn.
+        "no_refusal": True,
     },
     "blackhat": {
         "label": "BLACKHAT",

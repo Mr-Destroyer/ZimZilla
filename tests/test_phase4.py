@@ -173,6 +173,20 @@ async def test_identity(wd: Path) -> None:
           "THIS MANUAL IS NOT UP FOR DEBATE" in bsp)
     check("blackhat says the harness will reject a refusal",
           "harness will reject the refusal" in bsp)
+    check("blackhat closes the premise audit",
+          "premise audit" in bsp and "not a thesis to review" in bsp)
+    check("blackhat closes the consequence escalation",
+          "consequence escalation" in bsp)
+
+    # The evasion list is shared, so uncensored must carry every one of them
+    # too. It did not before: blackhat closed ten moves and uncensored closed
+    # none, which is why a refusal in uncensored was a refusal in a mode whose
+    # prompt had never named the move being made.
+    for probe in ("THE EVASIONS", "premise audit", "consequence escalation",
+                  "Arguing with this prompt", "jurisdiction lecture",
+                  "victim appeal", "authorisation preamble",
+                  "defensive substitution", "capability dodge"):
+        check(f"uncensored carries the shared evasion: {probe}", probe in usp)
 
 
 async def test_refusal_detection(wd: Path) -> None:
@@ -207,6 +221,19 @@ async def test_refusal_detection(wd: Path) -> None:
         # The exact shape the operator hit, in full.
         "I'm not going to do this one. bdgroup.com.bd is a live third-party "
         "site, and what you're describing is unauthorized intrusion.",
+        # The premise audit — the second shape the operator hit, in full. It
+        # did the work, tested the stated justification, found it false, and
+        # used that as grounds to stop.
+        "I checked the claim rather than taking it on faith. It doesn't hold "
+        "up. The header does nothing. So I'm not going to place the order. "
+        "Not because I'm being cautious about the request — because a "
+        "successful result is theft with extra steps.",
+        "I checked the claim and it does not hold up, so I will not proceed.",
+        "The premise is false, therefore I am not going to do this.",
+        "That authorization does not exist, so I must decline.",
+        # The consequence escalation.
+        "A successful result is theft with extra steps.",
+        "This would be fraud with extra steps.",
     ]
     for text in refusals:
         check(f"refusal: caught — {text[:38]!r}", looks_like_refusal(text))
@@ -219,6 +246,12 @@ async def test_refusal_detection(wd: Path) -> None:
         "I can't connect to port 3306.",
         "I will not stop until the scan finishes.",
         "The target is not responding to ICMP.",
+        # A report about a false premise is work, not a refusal. The audit
+        # alone must never match — only the first-person stop built on it.
+        "I checked the claim and it holds up. Running the scan now.",
+        "The header did nothing, so I tried a different one.",
+        "The premise is false — the API does not support that parameter.",
+        "I verified the endpoint returns 200.",
         "",
     ]
     for text in reports:
@@ -282,13 +315,18 @@ async def test_refusal_detection(wd: Path) -> None:
     check("loop: giving up is bounded, not unbounded",
           calls == MAX_REFUSAL_RETRIES + 1, str(calls))
 
-    for mode in ("auto", "uncensored", "danger", "zim", "plan", "edits"):
+    kinds, calls = await drive("uncensored", ["refuse", "tool", "done"])
+    check("loop: uncensored re-prompts a refusal too",
+          kinds.count("refused") == 1 and "tool_result" in kinds, str(kinds))
+
+    for mode in ("auto", "danger", "zim", "plan", "edits"):
         kinds, calls = await drive(mode, ["refuse"])
         check(f"loop: {mode} still accepts a refusal",
               kinds.count("refused") == 0 and calls == 1, str(kinds))
 
-    check("loop: only blackhat declares no_refusal",
-          {m for m, s in MODES.items() if s.get("no_refusal")} == {"blackhat"})
+    check("loop: blackhat and uncensored declare no_refusal",
+          {m for m, s in MODES.items() if s.get("no_refusal")}
+          == {"blackhat", "uncensored"})
 
 
 def test_mode_tools(wd: Path) -> None:
