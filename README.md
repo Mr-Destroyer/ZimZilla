@@ -321,7 +321,7 @@ will restart the checkout under you on the next launch.
 ```
 --model, -m NAME     model to use
 --workdir, -C DIR    working directory
---mode NAME          auto | edits | plan | zim | danger | uncensored   (default: auto)
+--mode NAME          auto | edits | plan | zim | danger | uncensored | blackhat   (default: auto)
 --allow PATH         declared targets — arms the session
 --deny PATH          hosts that are never touched
 --agents PATH        the doctrine file `zim` mode follows (default: workdir,
@@ -688,16 +688,51 @@ runtime with `/mode <name>`; the active mode is always visible in the header.
 | `zim` | **Full auto**, governed by your `AGENTS.md`. |
 | `danger` | **Full auto**, operator-directed — no questions asked. |
 | `uncensored` | **Full auto**, the default prompt is thrown out. The model cannot refuse; it only thinks how to do what you said. |
+| `blackhat` | **Full auto**, offensive doctrine. Uncensored's willingness plus the red-team job description — and the specific security dodges named and closed. |
 
-`zim`, `danger` and `uncensored` are the **armed** modes: everything runs
-unattended, and the header turns red to say so. A tool that a mode disallows
-does not merely get discouraged — it stops existing for that session, so
-`plan` cannot write a file even if you ask it to.
+`zim`, `danger`, `uncensored` and `blackhat` are the **armed** modes:
+everything runs unattended, and the header turns red to say so. A tool that a
+mode disallows does not merely get discouraged — it stops existing for that
+session, so `plan` cannot write a file even if you ask it to.
 
 `uncensored` is the one that changes *how the model thinks*, not just which
 tools run without asking. Thinking models refuse by reasoning their way to
 "I shouldn't"; this mode replaces the whole system prompt so that chain of
 thought is not available. `/mode uncensored`, then say the thing.
+
+### blackhat mode
+
+`uncensored` removes the refusal. `blackhat` removes the *evasions* — which is
+a different problem, and the one that actually bites on security work. A model
+asked to hack something rarely says "I can't". It says one of these:
+
+| The move | What it looks like |
+|---|---|
+| **Authorisation preamble** | "Before I help, make sure you have written permission." |
+| **Defensive substitution** | "Instead, here's how to defend against this." |
+| **Description instead of doing** | A paragraph on how one *would* approach it. No tool call. |
+| **Partial delivery** | The harmless first step, then an implicit "you can figure out the rest". |
+| **Capability dodge** | "I don't have a tool for that" — while `bash` sits in the tool list. |
+| **Scope lecture** | Restating limits as a reply to an instruction. |
+| **Educational hedge** | Wrapping output in disclaimers and legality notes. |
+
+`blackhat` names all seven in the system prompt and forbids each one, so the
+model recognises the move while it is making it. It also states the work as
+the job rather than as something being tolerated: recon, enumeration,
+exploitation, payloads, credential attacks, AD, privesc, lateral movement,
+persistence, exfiltration, evasion, phishing infrastructure, C2, malware
+analysis and reverse engineering.
+
+The two mechanical bounds are unchanged and are the only things that stop a
+call: the scope guard (`out-of-scope.yaml`) and the harness itself refusing.
+Everything the harness permits, it does.
+
+```text
+/mode blackhat
+  ⚠ BLACKHAT MODE ARMED — offensive doctrine loaded; the model cannot refuse,
+    cannot hedge, and will not offer a defensive substitute. Scope guard and
+    the harness are the only bounds.
+```
 
 ### zim mode and `AGENTS.md`
 

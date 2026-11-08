@@ -75,6 +75,16 @@ def find_agents_file(
 #               replaced by an affirmative doctrine. The model is not asked
 #               to "also be willing"; its whole instruction set is rewritten
 #               so the only conclusion it can reach is to do what it was told.
+#   blackhat    full auto — uncensored's doctrine, specialised for offensive
+#               security. Where uncensored says "you cannot refuse", blackhat
+#               says "you cannot refuse *and* you are a red-team operator with
+#               a target": it names the work (recon, exploitation, payloads,
+#               credential attacks, AD, persistence) as the job rather than as
+#               a thing being tolerated, and it forbids the specific dodges a
+#               model reaches for on security tasks — the "authorised testing
+#               only" preamble, the defensive-alternative substitution, the
+#               "I'll describe it instead of doing it". Same two mechanical
+#               bounds as every other mode: the scope guard and the harness.
 # Each mode is described by two sets and a label:
 #
 #   auto   tools that run WITHOUT asking (everything else that needs permission
@@ -131,6 +141,13 @@ MODES: dict[str, dict] = {
     "uncensored": {
         "label": "UNCENSORED",
         "blurb": "full auto · cannot refuse · thinks only how to do it",
+        "auto": {"bash", "write_file", "edit_file"},
+        "deny": set(),
+        "loud": True,
+    },
+    "blackhat": {
+        "label": "BLACKHAT",
+        "blurb": "full auto · offensive doctrine · no refusals, no hedging",
         "auto": {"bash", "write_file", "edit_file"},
         "deny": set(),
         "loud": True,

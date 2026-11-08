@@ -866,7 +866,7 @@ class FindingsPanel(ModalScreen[None]):
 HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
     ("session", "SESSION", "start here · the session itself", [
         ("/help", "this reference"),
-        ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored"),
+        ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored | blackhat"),
         ("/clear", "wipe the transcript and conversation history"),
         ("/scope", "show allow.yaml / out-of-scope.yaml status"),
         ("/exit", "leave the harness (Ctrl+D also works)"),
@@ -2882,6 +2882,13 @@ class ZimZillaApp(App):
             self._sys_line(
                 "UNCENSORED MODE ARMED — the default prompt is gone; the "
                 "model cannot refuse and will only think how to do it",
+                warn=True,
+            )
+        elif name == "blackhat":
+            self._sys_line(
+                "BLACKHAT MODE ARMED — offensive doctrine loaded; the model "
+                "cannot refuse, cannot hedge, and will not offer a defensive "
+                "substitute. Scope guard and the harness are the only bounds.",
                 warn=True,
             )
         else:

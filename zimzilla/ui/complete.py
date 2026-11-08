@@ -30,7 +30,7 @@ from ..theme import THEME_NAMES, Palette
 # (command, description)
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show the command reference"),
-    ("/mode", "switch mode: auto | edits | plan | zim | danger | uncensored"),
+    ("/mode", "switch mode: auto | edits | plan | zim | danger | uncensored | blackhat"),
     ("/model", "show or switch the model"),
     ("/cost", "session token and cost breakdown"),
     ("/scope", "show scope guard status"),
@@ -130,7 +130,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/exit", "leave the harness"),
 ]
 
-MODE_NAMES = ["auto", "edits", "plan", "zim", "danger", "uncensored"]
+MODE_NAMES = ["auto", "edits", "plan", "zim", "danger", "uncensored", "blackhat"]
 # THEME_NAMES is imported from theme.py rather than declared here, so the popup
 # and `/theme` cannot disagree about which themes exist — the two lists had
 # already drifted apart once.

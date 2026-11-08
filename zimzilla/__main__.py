@@ -63,8 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "low | medium | high | off (default: the level "
                              "remembered by /effort, else the model's own)")
     parser.add_argument("--mode", default=None,
-                        choices=["auto", "edits", "plan", "zim", "danger", "uncensored"],
-                        help="agent mode: auto | edits | plan | zim | danger | uncensored (default: auto)")
+                        choices=["auto", "edits", "plan", "zim", "danger",
+                                 "uncensored", "blackhat"],
+                        help="agent mode: auto | edits | plan | zim | danger | "
+                             "uncensored | blackhat (default: auto)")
     parser.add_argument("--agents", default=None,
                         help="path to AGENTS.md used by zim mode (default: workdir, "
                              "its parent, ~/.zimzilla, then ~)")
