@@ -106,6 +106,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "summarise history to free context"),
     ("/limits", "context window, round caps and timeouts"),
     ("/mcp", "connect MCP servers — their tools join the tool set"),
+    ("/connect", "generate an MCP bridge for an app — Kdenlive, desktop apps"),
     ("/team", "fan the task out across parallel agents"),
     ("/see", "open a page in a real browser — screenshots, video, comments"),
     ("/osint", "open-source recon on a target"),
@@ -395,6 +396,8 @@ class CompletionPopup(VerticalScroll):
                     # the popup that cannot be accepted without the domain it
                     # is a confirmation of.
                     "ad": ["tools"],
+                    "connect": ["list", "kdenlive", "remove", "--url",
+                                "--command"],
                     # The argument exists for OpenRouter, UnoRouter and AntSeed,
                     # whose catalogs are public and worth seeing before a key is
                     # set (AntSeed has no key at all). Offering all of them rather

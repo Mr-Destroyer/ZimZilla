@@ -32,6 +32,7 @@ from .. import ad as ad_mod
 from .. import aihubmix as ah_mod
 from .. import beatapi as bp_mod
 from .. import browser as browser_mod
+from .. import connect as connect_mod
 from .. import crack as crack_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
@@ -989,6 +990,14 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/reverse-engineer-tools [kind]", "RE tooling: what is here, what is missing"),
         ("/image-gen <prompt>", "generate an image and save it under images/"),
         ("/image-gen --models", "list the image models the route serves"),
+    ]),
+    ("connect", "CONNECT", "MCP bridges for applications that do not speak MCP", [
+        ("/connect", "list bridges and configured MCP servers"),
+        ("/connect kdenlive [project]", "generate a Kdenlive bridge — timeline edits + melt render"),
+        ("/connect <app>", "generate a desktop bridge — focus, type, keys, screenshot, OCR"),
+        ("/connect --url <url> [name]", "register an existing remote MCP server"),
+        ("/connect --command <name> <cmd...>", "register an existing stdio MCP server"),
+        ("/connect remove <name>", "remove a bridge or MCP entry"),
     ]),
     ("workspace", "WORKSPACE", "panes · sessions · parallel work", [
         ("/panes", "re-open this session under tmux — ctrl+b h/v split"),
@@ -2633,6 +2642,8 @@ class ZimZillaApp(App):
         # operator named. It starts no turn and touches nothing the live one
         # owns — and it is most useful *before* a turn, to see what is on offer.
         "mcp",
+        # /connect writes a bridge and starts an MCP child; it starts no turn.
+        "connect",
         # Same reasoning as /rain: a display toggle reads and writes only
         # harness state, starts no turn, and is most wanted while a turn is
         # running — which is exactly when the reasoning is on screen.
@@ -2677,6 +2688,7 @@ class ZimZillaApp(App):
             "compact": lambda a: self._cmd_compact(),
             "limits": lambda a: self._cmd_limits(),
             "mcp": lambda a: self._cmd_mcp(a),
+            "connect": lambda a: self._cmd_connect(a),
             "team": lambda a: self._cmd_team(a),
             "see": lambda a: self._cmd_see(a),
             "osint": lambda a: self._cmd_osint(a),
@@ -7290,6 +7302,166 @@ class ZimZillaApp(App):
             image_paths=[str(p) for p in cap.attachments],
         )
 
+    # ---- connect ----------------------------------------------------------
+    def _cmd_connect(self, args) -> None:
+        """/connect — generate or register an MCP bridge for an application."""
+        p = self.palette
+        if not args:
+            self._connect_list()
+            return
+        first = str(args[0]).strip()
+        rest = [str(a) for a in args[1:]]
+
+        if first.lower() in ("list", "status"):
+            self._connect_list()
+            return
+
+        if first.lower() == "remove":
+            name = rest[0] if rest else ""
+            if not name:
+                self._sys_line("usage: /connect remove <name>", warn=True)
+                return
+            try:
+                changed = connect_mod.remove(name)
+            except Exception as e:  # noqa: BLE001
+                self._sys_line(f"connect: {type(e).__name__}: {e}", warn=True)
+                return
+            if changed:
+                self._sys_line(f"removed {name} from MCP and the bridge directory",
+                               ok=True)
+            else:
+                self._sys_line(f"no bridge or MCP server named {name!r}",
+                               warn=True)
+            return
+
+        if first in ("--url", "-u"):
+            if not rest:
+                self._sys_line("usage: /connect --url <url> [name]", warn=True)
+                return
+            url = rest[0]
+            name = rest[1] if len(rest) > 1 else (
+                (url.split("//")[-1].split("/")[0].split(":")[0] or "remote"))
+            try:
+                cfg = mcp_mod.ServerConfig(name=connect_mod._safe_name(name),
+                                           url=url, enabled=True, timeout=120.0)
+                servers = [s for s in mcp_mod.load_config()
+                           if s.name != cfg.name] + [cfg]
+                mcp_mod.save_config(servers)
+            except Exception as e:  # noqa: BLE001
+                self._sys_line(f"connect: {type(e).__name__}: {e}", warn=True)
+                return
+            self._sys_line(f"registered remote MCP {cfg.name} — {url}", ok=True)
+            self._connect_worker(cfg)
+            return
+
+        if first in ("--command", "-c"):
+            if len(rest) < 2:
+                self._sys_line(
+                    "usage: /connect --command <name> <command> [args...]",
+                    warn=True)
+                return
+            name, command = rest[0], rest[1:]
+            try:
+                cfg = mcp_mod.ServerConfig(
+                    name=connect_mod._safe_name(name), command=command[0],
+                    args=command[1:], enabled=True, timeout=120.0)
+                servers = [s for s in mcp_mod.load_config()
+                           if s.name != cfg.name] + [cfg]
+                mcp_mod.save_config(servers)
+            except Exception as e:  # noqa: BLE001
+                self._sys_line(f"connect: {type(e).__name__}: {e}", warn=True)
+                return
+            self._sys_line(f"registered MCP {cfg.name} — {command[0]}", ok=True)
+            self._connect_worker(cfg)
+            return
+
+        replace = any(a in ("--replace", "-f") for a in args)
+        positional = [a for a in args if a not in ("--replace", "-f")]
+        spec = positional[0]
+        # Join the rest: a project path may contain spaces, and the TUI splits
+        # on whitespace without a shell to quote it for us.
+        project = " ".join(positional[1:]) if len(positional) > 1 else ""
+        try:
+            entry, info = connect_mod.create_bridge(
+                spec, project=project, replace=replace)
+        except connect_mod.ConnectError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        except Exception as e:  # noqa: BLE001
+            self._sys_line(f"connect: {type(e).__name__}: {e}", warn=True)
+            return
+        t = Text()
+        t.append("  ◈ BRIDGE     ", style=f"bold {p.accent}")
+        t.append(entry.name + "  ", style=f"bold {p.primary}")
+        t.append(f"({info['config']['adapter']})\n", style=p.dim)
+        t.append("  ◈ SERVER     ", style=f"bold {p.accent}")
+        t.append(info["server"] + "\n", style=p.dim)
+        if info["config"].get("project"):
+            t.append("  ◈ PROJECT    ", style=f"bold {p.accent}")
+            t.append(str(info["config"]["project"]) + "\n", style=p.dim)
+        t.append("  ◈ MCP        ", style=f"bold {p.accent}")
+        t.append("registered in ~/.zimzilla/mcp.json; connecting…\n",
+                 style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+        self._connect_worker(entry)
+
+    def _connect_list(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  MCP BRIDGES\n\n", style=f"bold {p.accent}")
+        bridges = connect_mod.list_bridges()
+        if bridges:
+            for info in bridges:
+                mark = "◉" if info.name in mcp_mod.registry().clients else "○"
+                t.append(f"  {mark} {info.name:<14}", style=f"bold {p.primary}")
+                t.append(f"{info.adapter:<10} {info.app:<14}", style=p.dim)
+                if info.project:
+                    t.append(Path(info.project).name, style=p.dim)
+                t.append("\n")
+        else:
+            t.append("  no generated bridges yet\n", style=p.dim)
+        try:
+            servers = mcp_mod.load_config()
+        except mcp_mod.MCPError as e:
+            self._sys_line(f"mcp.json: {e}", warn=True)
+            servers = []
+        other = [s for s in servers if s.name not in {b.name for b in bridges}]
+        if other:
+            t.append("\n  CONFIGURED MCP\n", style=f"bold {p.accent}")
+            for s in other:
+                mark = "◉" if s.name in mcp_mod.registry().clients else "○"
+                where = s.url or (s.command + (" " + " ".join(s.args) if s.args else ""))
+                t.append(f"  {mark} {s.name:<14}", style=f"bold {p.primary}")
+                t.append(where[:60] + "\n", style=p.dim)
+        t.append("\n  /connect kdenlive [project]   Kdenlive timeline + render\n",
+                 style=p.dim)
+        t.append("  /connect <app>                desktop bridge\n", style=p.dim)
+        t.append("  /connect --url <url>          existing remote MCP\n", style=p.dim)
+        t.append("  /connect --command <name> <cmd...>  existing stdio MCP\n",
+                 style=p.dim)
+        t.append("  /connect remove <name>        remove a bridge\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    @work(exclusive=True, thread=True, group="connect")
+    def _connect_worker(self, cfg) -> None:
+        ok, detail, tools = connect_mod.connect(cfg)
+        self.call_from_thread(self._connect_done, cfg, ok, detail, tools)
+
+    def _connect_done(self, cfg, ok: bool, detail: str, tools: list[str]) -> None:
+        if not ok:
+            self._sys_line(f"MCP {cfg.name}: {detail}", warn=True)
+            return
+        self._sys_line(
+            f"MCP {cfg.name} connected — {len(tools)} tool(s); they join the "
+            f"tool set from the next message", ok=True)
+        if tools:
+            prefix = f"mcp_{cfg.name}_"
+            short = [t[len(prefix):] if t.startswith(prefix) else t
+                     for t in tools]
+            self._sys_line("  " + ", ".join(short[:10])
+                           + (" …" if len(short) > 10 else ""))
+        self._sys_line("  tools stay gated; /mcp tools to inspect")
+
     # ---- osint ------------------------------------------------------------
     def _cmd_osint(self, args) -> None:
         """/osint [kind] <target> — recon on a declared target.
@@ -10638,6 +10810,8 @@ class ZimZillaApp(App):
             ("/compact", "summarise history to free context", "compact"),
             ("/limits", "context window, round caps and timeouts", "limits"),
             ("/mcp", "connect MCP servers — their tools join the tool set", "mcp"),
+            ("/connect", "generate an MCP bridge for an app — Kdenlive, desktop apps",
+             "connect"),
             ("/team", "fan the task out across parallel agents", "team"),
             ("/see", "open a page in a real browser — screenshots, video, comments",
              "see"),

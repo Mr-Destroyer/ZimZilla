@@ -891,6 +891,84 @@ one broken entry in `mcp.json` costs you that server, not the session.
 
 ---
 
+## Connect
+
+ZimZilla is an MCP client. Most desktop applications are not MCP servers, so
+`/connect` generates one for them, registers it in `~/.zimzilla/mcp.json`, and
+connects it immediately. Its tools then join the normal tool set.
+
+```bash
+/connect                                  # what is generated, what is connected
+/connect kdenlive ~/Videos/cut.kdenlive   # Kdenlive bridge, project attached
+/connect gimp                             # generic desktop bridge
+/connect --url https://host/mcp remote    # an existing remote MCP server
+/connect --command fetch npx -y server    # an existing stdio MCP server
+/connect remove kdenlive                  # unregister and delete the bridge
+```
+
+### Kdenlive
+
+Kdenlive has no MCP endpoint and no scripting API, but its project *is* MLT XML
+and `melt` is its render engine. That is the bridge's real interface — no
+pixel-clicking a timeline:
+
+| Tool | What it does |
+|---|---|
+| `kdenlive_create_project` | create a `.kdenlive` project with profile and tracks |
+| `kdenlive_project_info` | read tracks, clips, positions, in/out frames and duration |
+| `kdenlive_add_clip` | add a video/audio file to a track, at a frame or appended |
+| `kdenlive_add_image` | add a still (MLT `qimage`) for N seconds |
+| `kdenlive_trim_clip` | change the source in/out of a clip's timeline use(s) |
+| `kdenlive_add_effect` | attach an MLT filter — `brightness`, `volume`, `boxblur`, … |
+| `kdenlive_add_transition` | add an MLT transition (`mix` by default) between tracks |
+| `kdenlive_render` | render with `melt` (libx264/AAC) to an output file |
+| `kdenlive_open` | open the finished project in the Kdenlive GUI |
+| `app_focus` / `app_type` / `app_keys` | drive the GUI for what XML cannot express |
+| `app_screenshot` / `app_ocr` | see the application; `view_image` can read the screenshot |
+
+A typical professional flow is therefore: `create_project` → `add_clip` /
+`add_image` → `add_effect` / `add_transition` → `project_info` to check the
+timeline → `render` → `open` for the operator to review. The bridge writes real
+MLT, so Kdenlive opens the same project and a human can continue editing it.
+
+`kdenlive_render` calls `melt` directly. Kdenlive's own `--render` is available
+on the command line but was measured crashing on a minimal generated project,
+while the identical project renders through `melt`; the bridge uses the path
+that works and reports the render time and size.
+
+### Any other application
+
+`/connect <app>` generates a desktop bridge configured for that application's
+window class and launch command. Its tools are:
+
+- `app_list_windows`, `app_focus` — find and raise a window (Hyprland's Lua
+  dispatcher, with X11 `wmctrl` as fallback)
+- `app_type`, `app_keys` — type text and press shortcuts (`ctrl+s`, `F5`,
+  `ctrl+shift+z Return`) through `wtype` on Wayland or `xdotool` on X11
+- `app_screenshot`, `app_ocr` — capture the screen / read it with Tesseract
+- `app_launch` — start the application the bridge was generated for
+
+**What it deliberately does not do.** There is no shell tool: a bridge cannot
+become a general command runner. There are no synthetic mouse clicks on this
+Wayland setup — no `ydotool` backend is installed — so the supported paths are
+the application's keyboard shortcuts, its file/API adapter, or the Kdenlive
+timeline tools. A button that only responds to a mouse is not reachable through
+this bridge, and it says so instead of pretending.
+
+### Generated files
+
+```
+~/.zimzilla/bridges/<name>/
+  server.py        # thin stdio MCP launcher, run by the ZimZilla venv
+  bridge.json      # adapter, app, window class, launch command, project
+~/.zimzilla/mcp.json  # the registered server entry
+```
+
+The directory is mode 700 and `bridge.json`/`mcp.json` are mode 600. The
+bridge has no credentials of its own. MCP tools remain gated by the normal MCP
+permission rule, so a generated bridge does not turn the harness into an
+unattended desktop driver.
+
 ## Upstreams
 
 ZimZilla speaks the Anthropic Messages protocol to whatever `ANTHROPIC_BASE_URL`
@@ -1745,6 +1823,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/compact` | summarise history to free context |
 | `/limits` | context window, round caps and timeouts — and where each figure comes from |
 | `/mcp [add\|remove\|connect\|tools]` | connect MCP servers — their tools join the tool set |
+| `/connect [app\|list\|remove]` | generate an MCP bridge for a desktop app — Kdenlive or generic |
 | `/team <task>` | fan the task out across parallel agents |
 | `/see <url> [question]` | open a page in a real browser — screenshots attached, plus text, video, comments |
 | `/osint <kind> <target>` | open-source recon on a target |
@@ -3034,6 +3113,8 @@ zimzilla/                     the package
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
   payload.py                  /payload — the extension table, the argv, the build, the handler
   respan.py                   /zim-respan — free-only catalogue, native Messages
+  connect.py                  /connect — generate/register MCP app bridges
+  bridge.py                   the generated bridge's tools — Kdenlive MLT + desktop
   opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan / system palettes, and the
@@ -3085,6 +3166,7 @@ python tests/test_inferbase.py     # /inferbase-* — the price band, the two ro
 python tests/test_vision.py        # /see, browse, view_image — images, browser, screenshots
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
+python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so
