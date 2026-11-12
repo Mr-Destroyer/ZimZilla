@@ -52,6 +52,7 @@ Deliberate details
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -85,6 +86,13 @@ ANTHROPIC_HOSTS = (
     "openrouter.ai",
     "tokenharbor.ai",
     "unorouter.com",
+    # unrestricted.sh serves the Messages protocol natively at its bare host —
+    # measured: POST /v1/messages answers an Anthropic-shaped 401 with no key,
+    # and a real tool-using turn round-trips. The base URL carries no path, so
+    # without this entry the bare host would fall through to the final
+    # "otherwise Anthropic" rule and be right by accident; naming it here makes
+    # that deliberate rather than incidental.
+    "unrestricted.sh",
     "aihubmix.com",
     "beatapi.io",
     "gw.ldxhub.io",
@@ -411,6 +419,45 @@ def _append_text(out: list[dict], role: str, text: str) -> None:
     out.append({"role": role, "content": text})
 
 
+def _image_part(block: dict) -> dict | None:
+    """One Anthropic image block -> a Chat Completions ``image_url`` part.
+
+    A block stored in the conversation carries a path, not bytes — see
+    ``zimzilla.images``. The data is read here, at the boundary, which keeps
+    the history small and means a screenshot written to a case directory is
+    still the file that gets sent. A missing file drops the part rather than
+    failing the request: the text the tool also returned is the useful half.
+    """
+    from . import images as images_mod
+
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    data = source.get("data")
+    media_type = source.get("media_type") or block.get("media_type")
+    if not data:
+        prepared = images_mod.prepare(block.get("_path") or "")
+        if prepared is None:
+            return None
+        data = base64.b64encode(prepared.data).decode("ascii")
+        media_type = prepared.media_type
+    if not media_type:
+        return None
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media_type};base64,{data}",
+                      "detail": "auto"},
+    }
+
+
+def _block_images(block: dict) -> list[dict]:
+    """Every image inside one Anthropic block, flattened."""
+    if block.get("type") == "image":
+        return [block]
+    if block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+        return [b for b in block["content"]
+                if isinstance(b, dict) and b.get("type") == "image"]
+    return []
+
+
 def translate_messages(system: Any, messages: list[dict]) -> list[dict]:
     """Anthropic history -> OpenAI Chat Completions messages.
 
@@ -476,10 +523,14 @@ def translate_messages(system: Any, messages: list[dict]) -> list[dict]:
             out.append(entry)
             continue
 
-        # user: text, tool results, and images (which this transport cannot
-        # carry — said in the transcript rather than silently dropped).
+        # user: text, tool results, and images. Chat Completions has no image
+        # in a ``tool`` message, so an image that arrived inside a tool result
+        # is lifted out and sent in the user message that follows the tool
+        # messages — the same conversation, in the only shape this protocol
+        # can carry it.
         texts = []
         tool_messages: list[dict] = []
+        image_blocks: list[dict] = []
         for block in blocks:
             kind = block.get("type")
             if kind == "text":
@@ -487,6 +538,7 @@ def translate_messages(system: Any, messages: list[dict]) -> list[dict]:
                     texts.append(block["text"])
             elif kind == "tool_result":
                 body = _text_of(block.get("content"))
+                image_blocks.extend(_block_images(block))
                 if block.get("is_error"):
                     body = f"Error: {body}" if body else "Error"
                 tool_messages.append({
@@ -494,13 +546,31 @@ def translate_messages(system: Any, messages: list[dict]) -> list[dict]:
                     "tool_call_id": block.get("tool_use_id") or "",
                     "content": body or "(no output)",
                 })
-            elif kind in ("image", "document"):
-                texts.append(f"[{kind} omitted — this endpoint takes text only]")
+            elif kind == "image":
+                image_blocks.append(block)
+            elif kind == "document":
+                texts.append("[document omitted — this endpoint takes text and "
+                             "images only]")
 
         if tool_messages:
             out.extend(tool_messages)
-            _append_text(out, "user", "\n\n".join(texts))
-        else:
+        if image_blocks:
+            parts: list[dict] = []
+            if texts:
+                parts.append({"type": "text", "text": "\n\n".join(texts)})
+            for image in image_blocks:
+                part = _image_part(image)
+                if part is not None:
+                    parts.append(part)
+                else:
+                    # The block is there but its file is gone or it carries no
+                    # data. Saying so keeps the turn's shape visible instead of
+                    # silently dropping the only thing that was attached.
+                    parts.append({"type": "text",
+                                  "text": "[image omitted — not readable]"})
+            if parts:
+                out.append({"role": "user", "content": parts})
+        elif texts:
             _append_text(out, "user", "\n\n".join(texts))
 
     return out

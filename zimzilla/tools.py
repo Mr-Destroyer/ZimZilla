@@ -1,10 +1,12 @@
 """The tool layer: JSON schemas, permission previews and execution.
 
 The model is offered bash, read_file, write_file, edit_file, glob, grep,
-list_dir, search_web and web_fetch in an ordinary session. Reads are
-auto-approved; writes and bash go through the permission gate in the UI. The
-network tools are not gated — they are bounded by the scope guard instead, so an
-out-of-scope host is refused no matter which mode is armed.
+list_dir, search_web, web_fetch, browse, view_image and watch_video in an
+ordinary session. Reads are auto-approved; writes and bash go through the
+permission gate in the UI. The network tools are not gated — they are bounded
+by the scope guard instead, so an out-of-scope host is refused no matter which
+mode is armed. ``browse`` and ``watch_video`` return image paths in their
+``meta``, which the agent attaches to the tool result; see ``images.py``.
 
 Two more are advertised conditionally, and the two conditions are opposites:
 ``report_finding`` only inside a hunt (``Agent.can_report``), and
@@ -177,6 +179,131 @@ TOOL_SCHEMAS: list[dict] = [
                 "max_chars": {
                     "type": "integer",
                     "description": "Truncate the text at this many characters.",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        # A real browser, for the pages a fetched HTML body cannot show. This
+        # is the tool behind "see any site": the page is rendered, scrolled and
+        # photographed, and the screenshots are attached to the model's next
+        # request — not merely described. It also returns the rendered text,
+        # media, links and comments, because a model that can both look and
+        # read is harder to fool than one that can only do one.
+        "name": "browse",
+        "description": (
+            "Open a URL in a real headless Chromium and SEE it: the page is "
+            "rendered with its JavaScript, scrolled, and captured as "
+            "screenshots that are attached to this conversation. Returns the "
+            "visible text, headings, title, description, images, videos, GIFs, "
+            "thumbnails, links and comments. Use it for YouTube, TikTok, "
+            "Instagram, Facebook, X, Reddit, news sites, shops — any page whose "
+            "content a plain fetch would miss. Use web_fetch for raw HTML, "
+            "documentation and APIs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string",
+                        "description": "The page to open (http/https)."},
+                "scroll": {
+                    "type": "integer",
+                    "description": "How many screens to scroll before "
+                                   "capturing, which loads comments and lazy "
+                                   "images (default 2; max 10).",
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": "Extra wait after load for JavaScript to "
+                                   "settle (default 1500).",
+                },
+                "full_page": {
+                    "type": "boolean",
+                    "description": "Also capture a full-page screenshot "
+                                   "(default true).",
+                },
+                "click": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional CSS selectors to click before "
+                                   "capturing, e.g. a 'show more replies' "
+                                   "button. Each is tried once.",
+                },
+                "include_comments": {
+                    "type": "boolean",
+                    "description": "Extract comments (default true).",
+                },
+                "max_text": {
+                    "type": "integer",
+                    "description": "Cap on visible text characters (default "
+                                   "14000).",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        # Images are files the model can be handed directly. This is how it
+        # examines a screenshot more closely, opens a downloaded thumbnail, or
+        # looks at a GIF: the picture travels in the tool result, not a
+        # description of it.
+        "name": "view_image",
+        "description": (
+            "Look at an image file: a screenshot, a downloaded thumbnail, a "
+            "GIF, a diagram, a photo. The image is attached to this "
+            "conversation so you can describe and reason about what is in it. "
+            "For an animated GIF, frames=N returns N still frames spread "
+            "through it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Image path inside the working "
+                                        "directory."},
+                "frames": {
+                    "type": "integer",
+                    "description": "For an animated GIF, how many frames to "
+                                   "attach (default 1; max 6).",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        # The moving-picture half. A screenshot of a video page shows the
+        # player, not the video; this pulls the real metadata and samples the
+        # opening seconds into frames the model can look at.
+        "name": "watch_video",
+        "description": (
+            "Inspect a video (YouTube, TikTok, Instagram, Facebook, X, direct "
+            "MP4): pulls its real title, channel, duration, views, description "
+            "and caption languages with yt-dlp, downloads its thumbnail, and "
+            "samples frames from the opening seconds so you can SEE what the "
+            "video shows. Frames default to 4 over the first 20 seconds; set "
+            "start/duration to look elsewhere. Use browse first to see the "
+            "page around it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string",
+                        "description": "The video page or media URL."},
+                "frames": {
+                    "type": "integer",
+                    "description": "How many still frames to sample (default "
+                                   "4; 0 = metadata and thumbnail only; max 8).",
+                },
+                "start": {
+                    "type": "number",
+                    "description": "Seconds into the video to start sampling "
+                                   "(default 0).",
+                },
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds of video to download and sample "
+                                   "(default 20; max 120).",
                 },
             },
             "required": ["url"],
@@ -644,6 +771,17 @@ TOOL_ALIASES: dict[str, str] = {
     "fetch": "web_fetch",
     "fetch_url": "web_fetch",
     "read_url": "web_fetch",
+    # The visual browser. Models trained on other harnesses write "browser",
+    # "see_site" and "screenshot"; all of them mean this one tool.
+    "browser": "browse",
+    "see": "browse",
+    "see_site": "browse",
+    "render_page": "browse",
+    "watch": "watch_video",
+    "video_info": "watch_video",
+    "open_image": "view_image",
+    "look": "view_image",
+    "look_at": "view_image",
 }
 
 #: Argument names a model writes for a parameter this harness names differently.
@@ -667,6 +805,13 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
     "list_dir": {"dir": "path", "directory": "path"},
     "search_web": {"q": "query", "search": "query"},
     "web_fetch": {"uri": "url", "link": "url"},
+    "browse": {"uri": "url", "link": "url", "page": "url", "site": "url",
+               "href": "url", "wait": "wait_ms", "clicks": "click",
+               "text": "max_text", "comments": "include_comments"},
+    "view_image": {"file": "path", "image": "path", "image_path": "path",
+                   "file_path": "path", "count": "frames"},
+    "watch_video": {"video": "url", "uri": "url", "link": "url",
+                    "href": "url", "count": "frames", "from": "start"},
 }
 
 #: ``input_schema`` per tool, for the type coercion in :func:`coerce_args`.
@@ -1201,6 +1346,232 @@ def _tool_web_fetch(args: dict, cfg) -> ToolResult:
     return ToolResult(
         _truncate(header + text, cfg.max_output_chars),
         meta={"url": final_url},
+    )
+
+
+def _vision_outdir(cfg, host: str) -> Path:
+    """A fresh directory for one page/video's evidence, under the state dir.
+
+    Delegates to ``browser.evidence_dir`` so the tool and ``/see`` cannot end up
+    with two different layouts for the same pictures.
+    """
+    from . import browser as browser_mod
+
+    return browser_mod.evidence_dir(
+        getattr(cfg, "state_dir", Path.home() / ".zimzilla"), host)
+
+
+def _tool_browse(args: dict, cfg) -> ToolResult:
+    """Render a page in Chromium and hand back what is on it.
+
+    The scope guard runs before the browser opens: a denied host must not be
+    fetched by this route either, and a page's subresources are not a reason to
+    weaken that check. The screenshots travel through ``meta["images"]`` and
+    the agent attaches them to the tool result; the text report is the index.
+    """
+    from . import browser as browser_mod
+
+    url = _text(args.get("url", "")).strip()
+    if not url:
+        return ToolResult("a url is required", is_error=True)
+    try:
+        clean = browser_mod.normalise_url(url)
+    except browser_mod.BrowserError as e:
+        return ToolResult(str(e), is_error=True)
+    scope = _scope_of(cfg)
+    if scope is not None:
+        allowed, reason = scope.allows(_host_of(clean))
+        if not allowed:
+            return ToolResult(
+                f"BLOCKED by scope guard — {_host_of(clean)}: {reason}",
+                is_error=True, meta={"blocked": True})
+
+    try:
+        scroll = max(0, min(int(args.get("scroll", 2)), 10))
+    except (TypeError, ValueError):
+        scroll = 2
+    try:
+        wait_ms = max(0, min(int(args.get("wait_ms", 1500)), 15_000))
+    except (TypeError, ValueError):
+        wait_ms = 1500
+    try:
+        max_text = max(500, min(int(args.get("max_text") or 14_000),
+                                cfg.max_output_chars))
+    except (TypeError, ValueError):
+        max_text = 14_000
+    clicks = args.get("click")
+    if isinstance(clicks, str):
+        clicks = [clicks]
+    if not isinstance(clicks, list):
+        clicks = []
+    clicks = [str(c).strip() for c in clicks if str(c).strip()][:6]
+
+    outdir = _vision_outdir(cfg, _host_of(clean))
+    try:
+        cap = browser_mod.capture(
+            clean, outdir,
+            scroll=scroll,
+            wait_ms=wait_ms,
+            full_page=bool(args.get("full_page", True)),
+            click=clicks,
+            include_comments=bool(args.get("include_comments", True)),
+            max_text=max_text,
+        )
+    except browser_mod.BrowserError as e:
+        return ToolResult(f"browse failed: {e}", is_error=True)
+    except Exception as e:  # noqa: BLE001 - a page must not crash a turn
+        return ToolResult(f"browse failed: {type(e).__name__}: {e}", is_error=True)
+    if not cap.ok:
+        return ToolResult(f"browse failed: {cap.error}", is_error=True)
+
+    text = cap.report(max_text=max_text)
+    images = [str(p) for p in cap.attachments]
+    return ToolResult(
+        _truncate(text, cfg.max_output_chars),
+        meta={
+            "images": images,
+            "url": cap.final_url,
+            "title": cap.title,
+            "screenshots": [str(p) for p in cap.screenshots],
+            "evidence": str(outdir),
+            "comments": len(cap.comments),
+            "media": len(cap.all_media()),
+        },
+    )
+
+
+def _resolve_image(cfg, raw: str) -> Path:
+    """An image path inside the jail *or* the harness's own state directory.
+
+    Screenshots and sampled frames live under ``<state_dir>/vision`` — evidence,
+    not project files — so a model that browses a page and then wants a closer
+    look at the same screenshot would be refused by the workdir jail alone. The
+    state dir is the harness's own store, so reading it grants nothing the tool
+    did not just write.
+    """
+    try:
+        return resolve_in_jail(cfg.workdir, raw, cfg.unsafe, must_exist=True)
+    except SandboxError:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise
+        resolved = candidate.resolve()
+        state = Path(getattr(cfg, "state_dir", Path.home() / ".zimzilla")).resolve()
+        if resolved == state or state in resolved.parents:
+            if not resolved.exists():
+                raise SandboxError(f"path does not exist: {raw}") from None
+            return resolved
+        raise
+
+
+def _tool_view_image(args: dict, cfg) -> ToolResult:
+    """Attach a local image so the model can look at it."""
+    from . import images as images_mod
+
+    raw = _text(args.get("path", "")).strip()
+    if not raw:
+        return ToolResult("a path is required", is_error=True)
+    path = _resolve_image(cfg, raw)
+    if not path.is_file():
+        return ToolResult(f"not a file: {raw}", is_error=True)
+    try:
+        frames = max(1, min(int(args.get("frames") or 1), 6))
+    except (TypeError, ValueError):
+        frames = 1
+    paths: list[Path] = [path]
+    suffix = path.suffix.lower()
+    if frames > 1 and suffix == ".gif":
+        paths = images_mod.gif_frames(path, count=frames)
+    blocks = images_mod.placeholders(paths, limit=6)
+    if not blocks:
+        return ToolResult(
+            f"not a readable image (png, jpeg, gif or webp): {raw}",
+            is_error=True)
+    label = images_mod.describe(images_mod.prepare(path))
+    extra = (f" ({len(blocks)} frames attached)" if len(blocks) > 1 else "")
+    return ToolResult(
+        f"attached {len(blocks)} image(s): {label}{extra}",
+        meta={"images": [str(p) for p in paths[:len(blocks)]]},
+    )
+
+
+def _tool_watch_video(args: dict, cfg) -> ToolResult:
+    """Metadata, thumbnail and sampled frames from a video."""
+    from . import browser as browser_mod
+
+    url = _text(args.get("url", "")).strip()
+    if not url:
+        return ToolResult("a url is required", is_error=True)
+    try:
+        clean = browser_mod.normalise_url(url)
+    except browser_mod.BrowserError as e:
+        return ToolResult(str(e), is_error=True)
+    scope = _scope_of(cfg)
+    if scope is not None:
+        allowed, reason = scope.allows(_host_of(clean))
+        if not allowed:
+            return ToolResult(
+                f"BLOCKED by scope guard — {_host_of(clean)}: {reason}",
+                is_error=True, meta={"blocked": True})
+    try:
+        frames = max(0, min(int(args.get("frames", 4)), 8))
+    except (TypeError, ValueError):
+        frames = 4
+    try:
+        start = max(0.0, float(args.get("start", 0)))
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        duration = max(1.0, min(float(args.get("duration", 20)), 120.0))
+    except (TypeError, ValueError):
+        duration = 20.0
+
+    outdir = _vision_outdir(cfg, _host_of(clean))
+    info, err = browser_mod.video_info(clean)
+    thumb = None
+    if info is not None and info.get("thumbnail"):
+        thumb = browser_mod.download_thumbnail(str(info["thumbnail"]), outdir)
+    shots: list[Path] = []
+    frame_err = ""
+    if frames:
+        shots, frame_err = browser_mod.sample_frames(
+            clean, outdir, frames=frames, start=start, duration=duration)
+    if info is None and not shots:
+        return ToolResult(f"watch_video failed: {err or frame_err}",
+                          is_error=True)
+
+    lines = [f"VIDEO: {clean}"]
+    if info is not None:
+        for key, label in (
+            ("title", "TITLE"), ("channel", "CHANNEL"), ("duration", "DURATION_S"),
+            ("view_count", "VIEWS"), ("like_count", "LIKES"),
+            ("comment_count", "COMMENTS"), ("upload_date", "UPLOADED"),
+            ("extractor", "EXTRACTOR"), ("is_live", "LIVE"),
+        ):
+            if info.get(key) not in (None, ""):
+                lines.append(f"{label}: {info[key]}")
+        if info.get("subtitles"):
+            lines.append("SUBTITLES: " + ", ".join(info["subtitles"]))
+        if info.get("automatic_captions"):
+            lines.append("AUTO CAPTIONS: " + ", ".join(info["automatic_captions"]))
+        if info.get("description"):
+            lines.append("DESCRIPTION:\n" + str(info["description"])[:2500])
+        lines.append(f"FORMATS: {info.get('formats') or 0}")
+    if err and info is None:
+        lines.append(f"METADATA ERROR: {err}")
+    if frame_err:
+        lines.append(f"FRAME ERROR: {frame_err}")
+    if shots:
+        lines.append(f"FRAMES ({len(shots)}, from {start:.0f}s for "
+                     f"{duration:.0f}s): " + ", ".join(str(p) for p in shots))
+    if thumb:
+        lines.append(f"THUMBNAIL: {thumb}")
+    images = ([str(thumb)] if thumb else []) + [str(p) for p in shots]
+    return ToolResult(
+        _truncate("\n".join(lines), cfg.max_output_chars),
+        meta={"images": images, "title": (info or {}).get("title", ""),
+              "channel": (info or {}).get("channel", ""),
+              "evidence": str(outdir)},
     )
 
 
@@ -1830,6 +2201,9 @@ _DISPATCH = {
     "list_dir": _tool_list_dir,
     "search_web": _tool_web_search,
     "web_fetch": _tool_web_fetch,
+    "browse": _tool_browse,
+    "view_image": _tool_view_image,
+    "watch_video": _tool_watch_video,
     "generate_image": _tool_generate_image,
     "report_finding": _tool_report_finding,
     "hunt_findings": _tool_hunt_findings,
@@ -1862,6 +2236,14 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
     if name == "web_fetch":
         u = str(args.get("url", ""))
         return u if len(u) <= max_len else u[: max_len - 1] + "…"
+    if name == "browse":
+        u = str(args.get("url", ""))
+        return "$ " + (u if len(u) <= max_len else u[: max_len - 2] + "…")
+    if name == "view_image":
+        return str(args.get("path", ""))
+    if name == "watch_video":
+        u = str(args.get("url", ""))
+        return "▶ " + (u if len(u) <= max_len else u[: max_len - 2] + "…")
     if name == "generate_image":
         prompt = str(args.get("prompt", ""))
         label = "image: " + prompt

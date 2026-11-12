@@ -786,6 +786,15 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import unorouter as uno_mod
         cached = uno_mod.cached_ids()
         return tuple(cached) if cached else None
+    if key == "unrestricted":
+        # Its own module cache, and that is the list `/model` must offer: the
+        # catalogue is public, so a cold cache is the normal state on a fresh
+        # launch and the declared fallback would be a name from another
+        # provider. `cached_ids` is filtered to text models, which is what the
+        # picker wants.
+        from . import unrestricted as unr_mod
+        cached = unr_mod.cached_ids()
+        return tuple(cached) if cached else None
     if key == "antseed":
         from . import antseed as as_mod
         cached = as_mod.cached_ids()
@@ -826,6 +835,9 @@ def catalog_models(key: str) -> list | None:
     if key == "unorouter":
         from . import unorouter as uno_mod
         return uno_mod.cached_models()
+    if key == "unrestricted":
+        from . import unrestricted as unr_mod
+        return unr_mod.cached_models()
     if key == "antseed":
         from . import antseed as as_mod
         return as_mod.cached_models()
@@ -964,6 +976,22 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # model. A cold cache answering None would fall through to the estimate
         # table and bill a free model at DEFAULT_PRICE.
         return (0.0, 0.0)
+    if key == "unrestricted":
+        # NOT the NVIDIA case: this catalogue publishes real dollars per million
+        # tokens, so a warm cache prices a model exactly and must be believed
+        # over the estimate table — which has never heard of these ids and would
+        # bill every one of them at DEFAULT_PRICE ($1/$3). Measured: qwen is
+        # $0.50/$1.00 and deepseek is $0.00/$0.00, so the estimate is wrong in
+        # both directions at once.
+        #
+        # A cold cache is the one case that must not fall through either: the
+        # default model is the zero-priced one, and billing it at DEFAULT_PRICE
+        # is the exact discrepancy this function exists to prevent. (0, 0) is
+        # the honest answer for it warm or cold; a pinned paid model gets its
+        # published rate as soon as the catalogue is read.
+        cached = catalog_models(key)
+        if not cached:
+            return (0.0, 0.0)
     cached = catalog_models(key)
     if not cached:
         return None
@@ -1324,10 +1352,10 @@ def switchable(exclude: str | None = None) -> list[str]:
     """
     found = discover()
     out: list[str] = []
-    for key in ("openrouter", "unorouter", "aihubmix", "beatapi",
-                "tokenharbour", "moonmath", "infronai", "iteracompute",
-                "antseed", "nvidia", "tokenjuice", "logfare", "wandb",
-                "inferx", "inferbase", "flex"):
+    for key in ("openrouter", "unorouter", "unrestricted", "aihubmix",
+                "beatapi", "tokenharbour", "moonmath", "infronai",
+                "iteracompute", "antseed", "nvidia", "tokenjuice", "logfare",
+                "wandb", "inferx", "inferbase", "flex"):
         if key == exclude or key in UNDER_CONSTRUCTION:
             continue
         if key in found:
@@ -1371,12 +1399,13 @@ def _gateway_module(key: str):
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
+    from . import unrestricted as unr_mod
     from . import wandb as wb_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
         "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
         "wandb": wb_mod, "inferx": ix_mod, "inferbase": ib_mod,
-        "flex": flex_mod, "gemini": gm_mod,
+        "flex": flex_mod, "gemini": gm_mod, "unrestricted": unr_mod,
     }.get(key)
 
 
@@ -1441,7 +1470,7 @@ def _state_file() -> Path:
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
                           "aihubmix", "beatapi", "moonmath", "wandb", "inferx",
-                          "inferbase", "flex"})
+                          "inferbase", "flex", "unrestricted"})
 
 
 def current_key() -> str | None:
@@ -1503,6 +1532,7 @@ def active_key(base_url: str) -> str | None:
     from . import openrouter as or_mod
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
+    from . import unrestricted as unr_mod
     from . import wandb as wb_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
@@ -1510,6 +1540,11 @@ def active_key(base_url: str) -> str | None:
         return "openrouter"
     if uno_mod.is_unorouter(base_url):
         return "unorouter"
+    # Hosted and Anthropic-native, like UnoRouter one line up: identified by
+    # host, because the Messages base URL is the bare host and there is no port
+    # or path to match on.
+    if unr_mod.is_unrestricted(base_url):
+        return "unrestricted"
     if ah_mod.is_aihubmix(base_url):
         return "aihubmix"
     if bp_mod.is_beatapi(base_url):

@@ -847,7 +847,12 @@ def test_tui_surfaces() -> None:
     check("tui: the model picker knows it",
           'if active == "aihubmix" else None' in app_src)
     check("tui: /model refetches for it", 'elif active == "aihubmix":' in app_src)
-    check("tui: /models accepts it", '"unorouter", "antseed", "aihubmix"' in app_src)
+    # Membership, not adjacency: the /models set is a list of source keys that
+    # grows every time a source is added, and pinning the exact neighbours made
+    # this fail on a change that was correct. What the check is for is that
+    # aihubmix is in the set at all.
+    _known = app_src.split('known = {"logfare"', 1)[-1].split("}", 1)[0]
+    check("tui: /models accepts it", '"aihubmix"' in _known, _known[:120])
     check("tui: the launcher restores it",
           '("aihubmix", ah_mod)' in main_src)
     check("tui: the module is imported by the app",

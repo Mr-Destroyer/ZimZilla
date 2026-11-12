@@ -31,6 +31,7 @@ from textual.widgets import Input, Static
 from .. import ad as ad_mod
 from .. import aihubmix as ah_mod
 from .. import beatapi as bp_mod
+from .. import browser as browser_mod
 from .. import crack as crack_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
@@ -60,6 +61,7 @@ from .. import sources as sources_mod
 from .. import team as team_mod
 from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
+from .. import unrestricted as unr_mod
 from .. import unorouter as uno_mod
 from .. import wandb as wb_mod
 from ..agent import Agent, Deliverable
@@ -887,6 +889,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-tokenharbour", "switch upstream to TokenHarbour (hosted)"),
         ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
         ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
+        ("/zim-unrestricted", "switch upstream to unrestricted.sh (hosted, uncensored, probes for a model that answers)"),
         ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
         ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
         ("/zim-moonmath", "switch upstream to Zro (hosted, free daily models)"),
@@ -911,6 +914,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/openrouter-api-setup [key]", "store your OpenRouter API key (optional)"),
         ("/unorouter-api-setup [key]", "store your UnoRouter API key (optional)"),
         ("/unorouter-models", "the live free catalog — what is free and usable"),
+        ("/unrestricted-api-setup [key]", "store your unrestricted.sh API key (unr_sk_)"),
+        ("/unrestricted-models", "the live catalog — free models, priced in dollars"),
         ("/aihubmix-api-setup [key]", "store your AIHubMix API key (optional)"),
         ("/aihubmix-models", "the live free catalog — what is free and usable"),
         ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
@@ -940,6 +945,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/models", "free models of an upstream — /models [source]"),
     ]),
     ("recon", "RECON", "open-source intelligence and exposure", [
+        ("/see <url> [question]", "open a page in a real browser — screenshots, video, comments"),
         ("/osint [kind] <target>", "open-source recon — email, phone, socials"),
         ("/osint-tree [kind|path]", "re-show a finished recon as a result tree"),
         ("/leadgen <niche> <location>", "passive local lead gen — audit, drafts, never sends"),
@@ -1967,6 +1973,7 @@ class ZimZillaApp(App):
         osint_case: Path | None = None,
         finalise: "Callable[[], None] | None" = None,
         deliverable: "Deliverable | None" = None,
+        image_paths: list[str] | None = None,
     ) -> None:
         p = self.palette
         chat = self.query_one(ChatPane)
@@ -1997,7 +2004,8 @@ class ZimZillaApp(App):
         spinner = asyncio.create_task(self._verb_spinner())
 
         try:
-            async for ev in self.agent.run_turn(text, deliverable=deliverable):
+            async for ev in self.agent.run_turn(
+                    text, deliverable=deliverable, image_paths=image_paths):
                 if self._cancelled:
                     break
                 await self._handle_event(ev)
@@ -2105,6 +2113,19 @@ class ZimZillaApp(App):
             self._sys_line(
                 f"this model does not accept `{ev['param']}` — dropped for this "
                 f"session and retrying",
+                warn=True,
+            )
+
+        elif etype == "images_dropped":
+            # The route is text-only and refused the screenshot. The tool's
+            # text is still worth having, so the turn carries on and this says
+            # exactly what was lost rather than showing a bare 400.
+            self._flush_stream(chat, p)
+            n = ev.get("count") or 0
+            self._sys_line(
+                f"this route cannot see images — {n} attachment"
+                f"{'s' if n != 1 else ''} dropped; continuing with the page "
+                "text. Switch to a vision-capable model to see the screen.",
                 warn=True,
             )
 
@@ -2514,6 +2535,9 @@ class ZimZillaApp(App):
         "tokenharbour-api-setup", "tokenharbour-models", "zim-tokenharbour",
         "openrouter-api-setup", "zim-openrouter", "models",
         "unorouter-api-setup", "unorouter-models", "zim-unorouter",
+        # And unrestricted.sh's three, for the same reasons: a mode-600 write, a
+        # catalogue read, and a client rebuild. None of them starts a turn.
+        "unrestricted-api-setup", "unrestricted-models", "zim-unrestricted",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
         "moonmath-api-setup", "moonmath-models", "zim-moonmath",
@@ -2610,6 +2634,7 @@ class ZimZillaApp(App):
             "limits": lambda a: self._cmd_limits(),
             "mcp": lambda a: self._cmd_mcp(a),
             "team": lambda a: self._cmd_team(a),
+            "see": lambda a: self._cmd_see(a),
             "osint": lambda a: self._cmd_osint(a),
             "osint-tree": lambda a: self._cmd_osint_tree(a),
             "leadgen": lambda a: self._cmd_leadgen(a),
@@ -2657,6 +2682,10 @@ class ZimZillaApp(App):
             "zim-unorouter": lambda a: self._cmd_zim_gateway("unorouter"),
             "unorouter-api-setup": lambda a: self._cmd_gateway_key("unorouter", a),
             "unorouter-models": lambda a: self._cmd_models(["unorouter"]),
+            "zim-unrestricted": lambda a: self._cmd_zim_gateway("unrestricted"),
+            "unrestricted-api-setup": lambda a: self._cmd_gateway_key(
+                "unrestricted", a),
+            "unrestricted-models": lambda a: self._cmd_models(["unrestricted"]),
             "zim-aihubmix": lambda a: self._cmd_zim_gateway("aihubmix"),
             "aihubmix-api-setup": lambda a: self._cmd_gateway_key("aihubmix", a),
             "aihubmix-models": lambda a: self._cmd_models(["aihubmix"]),
@@ -2944,6 +2973,12 @@ class ZimZillaApp(App):
         # reason: the fetch is the slow part and this is a render.
         uno_catalog = (uno_mod.cached_models()
                        if active == "unorouter" else None)
+        # unrestricted.sh's is fetched too, and is the one catalogue here that
+        # publishes real dollars per million tokens — so it is what makes /model
+        # price a model at the gateway's own rate instead of this harness's
+        # estimate, which has never heard of these ids.
+        unr_catalog = (unr_mod.cached_models()
+                       if active == "unrestricted" else None)
         # AIHubMix's is fetched too. Read once here for the same reason as the
         # others: the fetch is the slow part and this is a render.
         ah_catalog = (ah_mod.cached_models()
@@ -3005,7 +3040,8 @@ class ZimZillaApp(App):
             # lead — with the model in use never hidden, whatever it costs.
             order = self._model_display_order(
                 models,
-                th_catalog or as_catalog or uno_catalog or ah_catalog
+                th_catalog or as_catalog or uno_catalog or unr_catalog
+                or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
                 or mm_catalog or ix_catalog or ib_catalog)
             for m in order:
@@ -3024,7 +3060,7 @@ class ZimZillaApp(App):
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
                                         inf_catalog, nv_catalog, mm_catalog,
-                                        ix_catalog, ib_catalog)
+                                        ix_catalog, ib_catalog, unr_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -3053,6 +3089,15 @@ class ZimZillaApp(App):
                     f"  catalog {_catalog_clause(uno_mod.catalog_age(), uno_mod.CACHE_TTL)}"
                     " — /unorouter-models shows the free\nones; free models are "
                     "listed first, and a paid one is priced by estimate\n",
+                    style=p.dim)
+            elif active == "unrestricted":
+                t.append(
+                    f"  catalog {_catalog_clause(unr_mod.catalog_age(), unr_mod.CACHE_TTL)}"
+                    " — /unrestricted-models shows the free\nones; prices are "
+                    "the gateway's own dollars per Mtok, not an\n"
+                    "  estimate. A zero price is not a permission: a model the "
+                    "balance does\n  not cover answers 400 \"for paid "
+                    "accounts\", and the price column\n  itself moves\n",
                     style=p.dim)
             elif active == "aihubmix":
                 t.append(
@@ -3151,7 +3196,7 @@ class ZimZillaApp(App):
         # It is also the source the operator is most likely to be on, so the
         # wrong answer was the common case rather than the corner.
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
-                      "logfare", "aihubmix", "beatapi",
+                      "logfare", "aihubmix", "beatapi", "unrestricted",
                       "moonmath", "iteracompute", "infronai", "nvidia",
                       "inferx", "inferbase") and (
                 models is None or check_name not in models):
@@ -3180,6 +3225,23 @@ class ZimZillaApp(App):
                     fetched, _ = as_mod.fetch_models()
                 else:
                     fetched = list(as_catalog)
+            elif active == "unrestricted":
+                # Keyless like OpenRouter's and UnoRouter's: /v1/models answers
+                # with no credential. Fetched rather than read from the cache
+                # when the cache is cold or expired, so a live model is not
+                # refused against a stale list.
+                #
+                # This check matters more here than on any other source: the
+                # gateway does NOT refuse an unknown model id — measured, a
+                # request for "gpt-4o" answered 200 as qwen3.8-27b-uncensored.
+                # So a typo would look like a working switch and quietly run a
+                # different model, and this list is the only thing that catches
+                # it.
+                if unr_catalog is None:
+                    creds = unr_mod.load_credentials()
+                    fetched, _ = unr_mod.fetch_models(creds[0] if creds else "")
+                else:
+                    fetched = list(unr_catalog)
             elif active == "aihubmix":
                 # Keyless like OpenRouter's and UnoRouter's: /api/v1/models
                 # answers with no credential. Fetched rather than read from the
@@ -3274,6 +3336,8 @@ class ZimZillaApp(App):
                     as_catalog = fetched
                 elif active == "unorouter":
                     uno_catalog = fetched
+                elif active == "unrestricted":
+                    unr_catalog = fetched
                 elif active == "aihubmix":
                     ah_catalog = fetched
                 elif active == "beatapi":
@@ -3348,7 +3412,8 @@ class ZimZillaApp(App):
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
                     ic_catalog=None, inf_catalog=None,
                     nv_catalog=None, mm_catalog=None,
-                    ix_catalog=None, ib_catalog=None) -> str:
+                    ix_catalog=None, ib_catalog=None,
+                    unr_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -3391,6 +3456,14 @@ class ZimZillaApp(App):
             live = ix_mod.price_for(name, ix_catalog)
         if live is None:
             live = ib_mod.price_for(name, ib_catalog)
+        if live is None:
+            # unrestricted.sh publishes real dollars per million tokens, so this
+            # is an exact rate rather than an estimate — and it is checked
+            # before the estimate table below, which would bill every one of
+            # these ids at DEFAULT_PRICE ($1/$3). Measured: qwen is $0.50/$1.00
+            # and deepseek is $0.00/$0.00, so the estimate is wrong in both
+            # directions at once.
+            live = unr_mod.price_for(name, unr_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
@@ -4031,6 +4104,8 @@ class ZimZillaApp(App):
             for _kind, _mod, _label, _setup in (
                 ("openrouter", or_mod, "OpenRouter", "/openrouter-api-setup"),
                 ("unorouter", uno_mod, "UnoRouter", "/unorouter-api-setup"),
+                ("unrestricted", unr_mod, "unrestricted.sh",
+                 "/unrestricted-api-setup"),
                 ("aihubmix", ah_mod, "AIHubMix", "/aihubmix-api-setup"),
                 ("beatapi", bp_mod, "BeatAPI", "/beatapi-api-setup"),
                 ("iteracompute", ic_mod, "IteraCompute",
@@ -4108,7 +4183,8 @@ class ZimZillaApp(App):
             t.append(f"  ·  {self.cfg.base_url}\n", style=p.dim)
             t.append("  switch with  /zim-logfare,  /zim-tokenharbour,\n"
                      "                 /zim-openrouter,\n"
-                     "                 /zim-unorouter,  /zim-aihubmix,\n"
+                     "                 /zim-unorouter,  /zim-unrestricted,\n"
+                     "                 /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
                      "                 /zim-moonmath,  /zim-wandb,\n"
@@ -5004,6 +5080,12 @@ class ZimZillaApp(App):
             return or_mod, "OpenRouter"
         if kind == "unorouter":
             return uno_mod, "UnoRouter"
+        # Hosted and Anthropic-native, like UnoRouter one line up: the upstream
+        # serves /v1/messages itself, so nothing is translated and nothing is
+        # started. Its catalogue is public and priced in dollars, which is what
+        # lets /unrestricted-models work before a key exists.
+        if kind == "unrestricted":
+            return unr_mod, "unrestricted.sh"
         if kind == "aihubmix":
             return ah_mod, "AIHubMix"
         if kind == "beatapi":
@@ -5316,6 +5398,20 @@ class ZimZillaApp(App):
                 t.append("  keys start    ", style=p.dim)
                 t.append(f"{mod.KEY_PREFIX}  · free daily usage on the Flash "
                          "models\n", style=p.dim)
+            if kind == "unrestricted":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://unrestricted.sh\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{unr_mod.KEY_PREFIX}  · new accounts get $0.50 of "
+                         "welcome credit,\n                no card needed\n",
+                         style=p.dim)
+                t.append("  note:        ", style=p.dim)
+                t.append(
+                    "the catalogue is public — /unrestricted-models works "
+                    "without a key.\n               A key is needed to send, "
+                    "and the balance decides which models\n               "
+                    "answer: a zero-priced model can still refuse with \"for "
+                    "paid\n               accounts\"\n", style=p.dim)
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
                         "iteracompute", "infronai", "nvidia", "moonmath",
                         "inferbase"):
@@ -5416,6 +5512,15 @@ class ZimZillaApp(App):
             self.agent._client = None
             self._sys_line("applied to this session — no restart", ok=True)
             return
+        if kind == "unrestricted" and unr_mod.is_unrestricted(self.cfg.base_url):
+            # Same failure, one gateway over: a hosted gateway's key is read
+            # into ``cfg`` when the switch happens, so writing it to the profile
+            # while the session is already on this host leaves the old
+            # credential in force. Re-apply from the profile just rewritten.
+            if unr_mod.apply_to(self.cfg) is not None:
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+                return
         if kind == "moonmath" and mm_mod.is_moonmath(self.cfg.base_url):
             # Same failure, one gateway over: a hosted gateway's key is read
             # into ``cfg`` when the switch happens, so writing it to the profile
@@ -5598,6 +5703,18 @@ class ZimZillaApp(App):
             self._sys_line(f"already on {label} ({origin})", ok=True)
             return
 
+        if kind == "unrestricted":
+            # This gateway needs its own switch path, and the reason is measured
+            # rather than stylistic: its catalogue prices one model at zero and
+            # that model answers 400 "for paid accounts" on a fresh account,
+            # while a *paid* model answers against the welcome credit. So
+            # `apply_to`'s free default — right on every other gateway — would
+            # land the session on the one model that cannot reply. The probe
+            # below is what makes "use the available free model" true rather
+            # than nominal.
+            self._switch_unrestricted(token, origin)
+            return
+
         applied = mod.apply_to(self.cfg)
         if applied is None:            # unreachable: creds was just checked
             self._sys_line(f"no {label} key found", warn=True)
@@ -5623,6 +5740,118 @@ class ZimZillaApp(App):
         if not model:
             self._sys_line("fetching the free model list…")
             self._fetch_models(kind)
+
+    def _switch_unrestricted(self, token: str, origin: str) -> None:
+        """/zim-unrestricted — land on a model that actually answers.
+
+        The generic gateway switch cannot be used here, and the reason is a
+        measured property of this provider rather than a preference: its
+        catalogue priced ``deepseek-v4.1-flash-uncensored`` at $0.00/$0.00 and
+        that model answered ``400 "for paid accounts. Add credit to use it."``
+        on a fresh account, while ``qwen3.8-27b-uncensored`` — priced
+        $0.50/$1.00 — answered against the $0.50 welcome credit. So the free
+        model was the one that did not work, and a switch that trusted the price
+        column would leave the session on a model that 400s on the first turn.
+
+        **The probe runs on a worker thread, and that is not optional.** It is
+        up to ``PROBE_LIMIT`` real chat calls, and the provider's own page says a
+        request that wakes a sleeping GPU "can take 30 seconds or more to start"
+        — measured here as one call that timed out at 30s and then answered. On
+        the UI thread that is a frozen TUI for minutes.
+        """
+        self._sys_line(
+            f"probing unrestricted.sh for a model this account can call "
+            f"(key from {origin})…")
+        self._probe_unrestricted(token, origin)
+
+    @work(exclusive=True, thread=True)
+    def _probe_unrestricted(self, token: str, origin: str) -> None:
+        """The blocking half: probe for a model, then read the balance.
+
+        Both network calls happen here, in one worker, so the balance line
+        cannot be cancelled by the catalogue fetch that follows it — two
+        ``exclusive=True`` workers in the same group cancel each other, which is
+        exactly how the balance line went missing the first time this was
+        written.
+        """
+        chosen, detail = unr_mod.first_callable(token)
+        payload, _ = unr_mod.account(token) if chosen else (None, "")
+        self.call_from_thread(
+            self._apply_unrestricted, chosen, detail, payload, origin)
+
+    def _apply_unrestricted(self, chosen, detail: str, payload, origin: str) -> None:
+        """The UI half: switch, or say why not. Runs on the UI thread."""
+        if chosen is None:
+            # Nothing answered. Do NOT switch: moving the session onto a route
+            # that refuses every turn is worse than leaving it where it is, and
+            # the reason is the useful part.
+            self._sys_line(f"unrestricted.sh: {detail}", warn=True)
+            self._sys_line(
+                "  staying on the current route. /unrestricted-models lists "
+                "what the catalogue prices; /unrestricted-api-setup shows the "
+                "key in force", warn=True)
+            return
+
+        applied = unr_mod.apply_to(self.cfg)
+        if applied is None:            # unreachable: the probe needed the key
+            self._sys_line("no unrestricted.sh key found", warn=True)
+            return
+        # Every hosted gateway in the tree speaks Messages. Re-resolve rather
+        # than inheriting a pinned protocol from an endpoint the operator has
+        # since left.
+        self.cfg.protocol = "auto"
+        # The probe's answer wins over the profile's stored model: the stored
+        # one may be the zero-priced model that 400s, and the whole point of the
+        # probe was to find one that does not.
+        self.cfg.model = chosen
+        self.agent._client = None      # rebuild against the new host
+        unr_mod.set_current("unrestricted")
+        self._refresh_after_source_change(
+            "unrestricted.sh", f"key from {origin}")
+
+        # Say whether it is free, because on this gateway that is the question
+        # the operator asked and the answer is not always yes: measured, the
+        # free list went from one entry to none within an hour.
+        entry = unr_mod.model_for(chosen, unr_mod.cached_models())
+        if entry is not None and entry.free:
+            self._sys_line(
+                f"landed on {chosen} — free, and the first model that answered "
+                f"on this account", ok=True)
+        else:
+            self._sys_line(
+                f"landed on {chosen} — the first model that answered on this "
+                f"account", ok=True)
+            self._sys_line(
+                "  nothing in the catalogue is priced at zero right now, so "
+                "this one bills per token", warn=True)
+
+        # The balance, because on this gateway it is what decides which models
+        # answer. Read in the same worker as the probe, so it cannot be
+        # cancelled by the fetch below.
+        self._show_unrestricted_account(payload)
+        self._sys_line("fetching the catalogue…")
+        self._fetch_models("unrestricted")
+
+    def _show_unrestricted_account(self, payload) -> None:
+        """The balance line. Says nothing it did not read."""
+        if not payload:
+            # A failed read is not news worth a warning: the switch already
+            # succeeded, and the balance is context rather than a precondition.
+            return
+        balance = payload.get("balance_usd")
+        plan = payload.get("plan")
+        spend = payload.get("month_spend_usd")
+        bits = []
+        if isinstance(balance, (int, float)):
+            bits.append(f"balance ${balance:.2f}")
+        if plan:
+            bits.append(f"plan {plan}")
+        if isinstance(spend, (int, float)) and spend:
+            bits.append(f"${spend:.2f} spent this month")
+        if payload.get("api_locked"):
+            bits.append("API LOCKED")
+        if bits:
+            self._sys_line("  " + "  ·  ".join(bits), ok=True)
 
     # ---- protocol / endpoint ------------------------------------------------
     def _cmd_protocol(self, args) -> None:
@@ -5769,7 +5998,7 @@ class ZimZillaApp(App):
                "zro": "moonmath"}.get(key, key)
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
-                 "unorouter", "antseed", "aihubmix", "beatapi",
+                 "unorouter", "unrestricted", "antseed", "aihubmix", "beatapi",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
                  "inferx", "inferbase", "flex", "gemini"}
         if key not in known:
@@ -5828,6 +6057,13 @@ class ZimZillaApp(App):
             # with no credential at all. The key is only needed to send.
             creds = uno_mod.load_credentials()
             return uno_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "unrestricted":
+            # Keyless too, and genuinely so: /v1/models answers 200 with no
+            # credential, and the payload is byte-identical with and without one
+            # (diffed). The key is sent when there is one so the listing matches
+            # this account.
+            creds = unr_mod.load_credentials()
+            return unr_mod.usable_free_models(creds[0] if creds else "")
         if kind == "aihubmix":
             # Keyless as well: /api/v1/models answers 200 with no Authorization
             # header at all (857 models when this was written). The key is sent
@@ -5929,6 +6165,7 @@ class ZimZillaApp(App):
             self._sys_line(f"{kind}: {err}", warn=True)
             return
         label = {"openrouter": "OPENROUTER", "unorouter": "UNOROUTER",
+                 "unrestricted": "UNRESTRICTED.SH",
                  "aihubmix": "AIHUBMIX", "beatapi": "BEATAPI",
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
@@ -5949,6 +6186,18 @@ class ZimZillaApp(App):
                 t.append(
                     "  (free models that cannot call tools are excluded — "
                     "they cannot drive this harness)\n", style=p.dim)
+            if kind == "unrestricted":
+                t.append(
+                    "  (the catalogue is public and live, and it prices every "
+                    "model in\n  dollars per million tokens. An empty list "
+                    "means nothing is priced at\n  zero right now — measured: "
+                    "the one zero-priced model was re-priced at\n  $0.15/$0.60 "
+                    "an hour after it was first read, so this list can go from "
+                    "one\n  entry to none. A zero price is not a permission "
+                    "either: a model the\n  balance does not cover answers 400 "
+                    "\"for paid accounts\", which is why\n  /zim-unrestricted "
+                    "probes before it lands)\n",
+                    style=p.dim)
             if kind == "aihubmix":
                 # A different exclusion, and saying the wrong one would send the
                 # operator looking for a tool-calling filter that is not there.
@@ -6086,6 +6335,25 @@ class ZimZillaApp(App):
                 "pinned\n  to that seller (<peerId>@<model>), because the "
                 "router's trust floor\n  skips free peers on its own\n",
                 style=p.dim)
+        if kind == "unrestricted":
+            # The three things a reader of this list would otherwise get wrong,
+            # all measured against the live endpoint on 2026-11-08.
+            t.append(
+                "  free = priced 0 in AND 0 out · prices are the gateway's own "
+                "dollars per\n  million tokens, so a paid model is exact "
+                "rather than an estimate\n", style=p.dim)
+            t.append(
+                "  a zero price is not a permission: on a fresh account the one "
+                "zero-priced\n  model answered 400 \"for paid accounts. Add "
+                "credit to use it.\" while a\n  paid model answered against "
+                "the $0.50 welcome credit. /zim-unrestricted\n  probes, so it "
+                "lands on one that actually replies\n", style=p.dim)
+            t.append(
+                "  the price column moves: an hour after that reading the same "
+                "catalogue\n  re-priced that model at $0.15/$0.60, so the free "
+                "list went from one entry\n  to none. An empty list here means "
+                "nothing is priced at zero right now —\n  not that the source "
+                "is broken\n", style=p.dim)
         if kind == "aihubmix":
             # The two things a reader of this list would otherwise get wrong.
             # Both were measured, and both contradict what the catalog looks
@@ -6250,6 +6518,9 @@ class ZimZillaApp(App):
         """
         p = self.palette
         # Same refresh _cmd_model does — HeaderBar + StatusBar carry the model.
+        # set_model also clears a previous route's "cannot see images" state,
+        # because switching to a vision-capable model should try pictures again.
+        self.agent.set_model(self.cfg.model)
         self.query_one(HeaderBar).set_model(self.cfg.display_model)
         self.query_one(StatusBar).model = self.cfg.display_model
         self.query_one(StatusBar).render_bar()
@@ -6773,6 +7044,125 @@ class ZimZillaApp(App):
                 self.agent.cancel_turn()
                 self._sys_line("team interrupted", warn=True)
             self.query_one("#input", Input).focus()
+
+    # ---- see --------------------------------------------------------------
+    def _cmd_see(self, args) -> None:
+        """/see <url> [question] — look at a page the way a person does.
+
+        A router like ``/osint``: the browser work happens in a worker (it is
+        seconds of Chromium), and the result is handed to the main agent as one
+        normal turn with the screenshots attached. Nothing about the turn is
+        special after that — same tools, same scope guard, same Ctrl+C — which
+        means the model can call ``browse`` again for a link it saw, or
+        ``watch_video`` for a video on the page.
+        """
+        if not args:
+            self._sys_line(
+                "usage: /see <url> [question]  — renders the page and attaches "
+                "its screenshots", warn=True)
+            return
+        url = str(args[0]).strip()
+        question = " ".join(str(a) for a in args[1:]).strip()
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+        try:
+            clean = browser_mod.normalise_url(url)
+        except browser_mod.BrowserError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        from urllib.parse import urlsplit
+        host = urlsplit(clean).hostname or ""
+        allowed, reason = self.agent.scope.allows(host)
+        if not allowed:
+            self._sys_line(
+                f"⛔ BLOCKED — SCOPE GUARD — {host}: {reason}", warn=True)
+            return
+        # A capture takes seconds, and a normal message sent during it would
+        # start a second turn in the same transcript. Holding `busy` (and using
+        # a work group of its own) keeps the session single-threaded.
+        self.busy = True
+        bar = self._status_bar()
+        if bar is not None:
+            bar.set_activity(f"seeing {host}", busy=True)
+        self._sys_line(f"opening {clean} in a headless browser…")
+        self._see_worker(clean, question)
+
+    @work(exclusive=True, thread=True, group="see")
+    def _see_worker(self, url: str, question: str) -> None:
+        """The blocking half: render the page, then hand it back to the UI."""
+        from urllib.parse import urlsplit
+        host = urlsplit(url).hostname or ""
+        outdir = browser_mod.evidence_dir(self.cfg.state_dir, host)
+        try:
+            cap = browser_mod.capture(
+                url, outdir, scroll=2, wait_ms=1500,
+                full_page=True, include_comments=True)
+        except Exception as e:  # noqa: BLE001 - a page must not kill the app
+            cap = browser_mod.Capture(url=url, error=f"{type(e).__name__}: {e}")
+        self.call_from_thread(self._see_done, cap, question)
+
+    def _see_done(self, cap, question: str) -> None:
+        """The UI half: show what was captured, then ask the model about it."""
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        # The capture is over whether it worked or not; `_run_turn` takes the
+        # busy flag from here.
+        self.busy = False
+        bar = self._status_bar()
+        if bar is not None:
+            bar.set_activity("idle", busy=False)
+        if not cap.ok:
+            self._sys_line(f"/see failed: {cap.error}", warn=True)
+            self.query_one("#input", Input).focus()
+            return
+        t = Text()
+        t.append("  ◈ SEE       ", style=f"bold {p.accent}")
+        t.append((cap.title or "(no title)")[:110] + "\n", style=p.primary)
+        t.append("  ◈ URL       ", style=f"bold {p.accent}")
+        t.append(cap.final_url or cap.url, style=p.dim)
+        t.append("\n  ◈ CAPTURED  ", style=f"bold {p.accent}")
+        t.append(
+            f"{len(cap.screenshots)} screenshot(s) · {len(cap.comments)} "
+            f"comment(s) · {len(cap.images)} image(s) · "
+            f"{len(cap.videos)} video(s) · {len(cap.gifs)} GIF(s)\n",
+            style=p.dim)
+        if cap.attachments:
+            t.append("  ◈ EVIDENCE  ", style=f"bold {p.accent}")
+            t.append(str(cap.attachments[0].parent) + "\n", style=p.dim)
+        if cap.gated:
+            t.append("  ◈ GATED     ", style=f"bold {p.amber}")
+            t.append(
+                "a login or consent wall is covering the content — export "
+                "cookies to ~/.zimzilla/browser/cookies.json to see it as you "
+                "do\n", style=p.dim)
+        chat.write_block(t)
+
+        instruction = question or (
+            "Describe what is on this page as a human would see it: what the "
+            "page is, what is visible, and anything notable. If it is a video "
+            "or a post, name the title, the creator and what the content "
+            "shows. If the page is gated or empty, say so plainly."
+        )
+        prompt = (
+            "You are looking at a live web page through a real browser. The "
+            "screenshots are attached to this message; the rendered page's "
+            "text, media and comments follow.\n\n"
+            f"{cap.report(max_text=12000)}\n\n"
+            f"TASK: {instruction}\n\n"
+            "Answer from what you can actually see and read. Use browse for "
+            "another URL on the page, view_image to look at a screenshot more "
+            "closely, or watch_video to sample a video's frames. Do not claim "
+            "to have watched a video you only saw a page for."
+        )
+        label = cap.final_url or cap.url
+        if len(label) > 70:
+            label = label[:69] + "…"
+        self._run_turn(
+            prompt,
+            display=f"⚑ /see {label}",
+            image_paths=[str(p) for p in cap.attachments],
+        )
 
     # ---- osint ------------------------------------------------------------
     def _cmd_osint(self, args) -> None:
@@ -10119,6 +10509,8 @@ class ZimZillaApp(App):
             ("/limits", "context window, round caps and timeouts", "limits"),
             ("/mcp", "connect MCP servers — their tools join the tool set", "mcp"),
             ("/team", "fan the task out across parallel agents", "team"),
+            ("/see", "open a page in a real browser — screenshots, video, comments",
+             "see"),
             ("/osint", "open-source recon on a target", "osint"),
             ("/osint-tree", "re-show a finished recon as a result tree", "osint"),
             ("/leadgen", "local leads: passive audit + outreach drafts",

@@ -242,15 +242,17 @@ def test_message_translation() -> None:
     ])
     check("translate: a thinking-only assistant turn is dropped", empty == [], str(empty))
 
-    # Images cannot be carried over this protocol; say so rather than dropping
-    # the turn's only content silently.
+    # An image with no readable data is noted rather than silently dropped.
+    # A real image becomes an image_url part — see tests/test_vision.py.
     image = oc.translate_messages("", [
         {"role": "user", "content": [
             {"type": "text", "text": "what is this?"},
             {"type": "image", "source": {"type": "base64"}}]},
     ])
-    check("translate: an image is noted, not silently dropped",
-          "image omitted" in image[0]["content"], str(image))
+    _blob = " ".join(b.get("text", "") for b in image[0]["content"]
+                     if isinstance(b, dict))
+    check("translate: an unreadable image is noted, not silently dropped",
+          "image omitted" in _blob, str(image))
 
 
 def test_tool_translation() -> None:

@@ -40,6 +40,7 @@ from typing import AsyncContextManager, AsyncIterator, Awaitable, Callable
 
 from .config import Config, price_for
 from . import effort as effort_mod
+from . import images as images_mod
 from . import tools as tools_mod
 from .scope import Scope
 
@@ -296,7 +297,7 @@ that is genuinely useful, but you do not claim to be another product."""
 SYSTEM_PROMPT = IDENTITY + """
 
 You have tools for running shell commands, reading, writing and editing files,
-and searching the web. Work directly and decisively:
+searching the web, and seeing it. Work directly and decisively:
 
 - Inspect before you change: read the relevant files first.
 - Prefer small, exact edits with edit_file over rewriting whole files.
@@ -306,6 +307,11 @@ and searching the web. Work directly and decisively:
 - When you do not know something — a library's API, an unfamiliar error, a
   current version — use search_web and then web_fetch to read the source
   rather than guessing from memory. Say what you looked up.
+- When a page's content is drawn by JavaScript — YouTube, TikTok, Instagram,
+  Facebook, a feed, a shop, a dashboard — use browse, not web_fetch. It renders
+  the page and attaches screenshots to the conversation, so look at them
+  before describing what is on the page. view_image looks at a picture again;
+  watch_video samples a video's frames when the page only shows a player.
 
 The working directory is {workdir}. All file paths are relative to it.
 {scope_note}"""
@@ -317,6 +323,9 @@ _CREDENTIAL_PROFILES = (
     ("tokenharbour", "TokenHarbour", "ANTHROPIC_AUTH_TOKEN"),
     ("openrouter", "OpenRouter", "ANTHROPIC_AUTH_TOKEN"),
     ("unorouter", "UnoRouter", "ANTHROPIC_AUTH_TOKEN"),
+    # Hosted and Anthropic-native, like UnoRouter one line up: the key is the
+    # operator's own, written by /unrestricted-api-setup.
+    ("unrestricted", "unrestricted", "ANTHROPIC_AUTH_TOKEN"),
     ("aihubmix", "AIHubMix", "ANTHROPIC_AUTH_TOKEN"),
     ("beatapi", "BeatAPI", "ANTHROPIC_AUTH_TOKEN"),
     ("moonmath", "Zro", "ANTHROPIC_AUTH_TOKEN"),
@@ -783,6 +792,11 @@ class Agent:
         #: later request in this session. Empty for most models; populated the
         #: first time one answers 400 "`temperature` is deprecated".
         self._dropped_params: set[str] = set()
+        #: Set once the endpoint has refused an image. A text-only route should
+        #: degrade to reading the text the tool also returned, not fail the
+        #: turn — so the first image rejection strips every image from the
+        #: history and retries, and later calls send none.
+        self._images_dropped = False
         self._client = None
 
     # ---- client -----------------------------------------------------------
@@ -859,6 +873,10 @@ class Agent:
 
     def set_model(self, model: str) -> None:
         self.cfg.model = model
+        # A new model may be able to see, and the previous one's refusal is not
+        # evidence about this one. Forgetting the flag is what lets a session
+        # switch from a text-only route to a vision model without restarting.
+        self._images_dropped = False
 
     def set_mode(self, mode: str) -> None:
         from .config import MODES
@@ -1178,7 +1196,8 @@ class Agent:
 
     # ---- main loop --------------------------------------------------------
     async def run_turn(
-        self, user_text: str, deliverable: "Deliverable | None" = None
+        self, user_text: str, deliverable: "Deliverable | None" = None,
+        image_paths: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         self.turn_count += 1
         turn_in = 0
@@ -1204,7 +1223,21 @@ class Agent:
         if notice:
             user_text = f"{notice}\n\n---\n\n{user_text}"
 
-        self.messages.append({"role": "user", "content": user_text})
+        # A visual turn starts with the picture in the first user message. The
+        # placeholders carry paths, not base64 — see ``images.py`` — so the
+        # history stays small until the request is actually assembled. A path
+        # that is not a readable image is dropped; the text still says what was
+        # asked.
+        opening = (images_mod.placeholders(image_paths or [])
+                   if not self._images_dropped else [])
+        if opening:
+            self.messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": user_text}, *opening],
+            })
+            self.messages, _ = images_mod.trim_images(self.messages)
+        else:
+            self.messages.append({"role": "user", "content": user_text})
 
         #: API calls made in this turn, auto-continues included.
         rounds = 0
@@ -1773,7 +1806,14 @@ class Agent:
                     {
                         "type": "tool_result",
                         "tool_use_id": call.id,
-                        "content": result.output,
+                        # A tool that saw something returns image paths in its
+                        # meta. They travel inside the tool result so the model
+                        # meets the screenshot where the call was made; the
+                        # OpenAI transport lifts them into the following user
+                        # message, because a tool message cannot hold one.
+                        "content": images_mod.tool_content(
+                            result.output,
+                            None if self._images_dropped else meta.get("images")),
                         "is_error": result.is_error,
                     }
                 )
@@ -1786,6 +1826,10 @@ class Agent:
                     progressed = True
 
             self.messages.append({"role": "user", "content": tool_results})
+            # Only the newest screenshots are worth re-sending on every round;
+            # see `images.trim_images`. This runs after the results are stored,
+            # so the current call's pictures are the ones kept.
+            self.messages, _ = images_mod.trim_images(self.messages)
 
         else:
             # The `while` ran out at ``max_rounds``. Distinct from the soft-cap
@@ -1848,7 +1892,10 @@ class Agent:
                     "model": self.cfg.model,
                     "max_tokens": ceiling,
                     "system": self.system_prompt(),
-                    "messages": self.messages,
+                    # Image placeholders become base64 blocks here, and only
+                    # here: the loop stores paths, both transports need bytes,
+                    # and this is the one point every request passes through.
+                    "messages": images_mod.materialise(self.messages),
                     "tools": self.tool_schemas(),
                 }
                 # temperature/top_p were removed from the typed signature in
@@ -1903,6 +1950,17 @@ class Agent:
                     yield (None, final)
                     return
             except anthropic.BadRequestError as e:
+                # A text-only route answers 400 when it meets an image. The
+                # tool that produced it also returned text, so dropping every
+                # image and retrying is strictly better than failing the turn:
+                # the operator still gets the page read, and the transcript
+                # says what was lost. One retry only — a second failure is a
+                # different problem.
+                if not self._images_dropped and images_mod.image_error(e):
+                    self._images_dropped = True
+                    self.messages, dropped = images_mod.strip_images(self.messages)
+                    yield ({"type": "images_dropped", "count": dropped}, None)
+                    continue
                 # A parameter the model refuses is dropped and retried once,
                 # rather than surfaced as a failure. This is not a bad request
                 # the operator can fix by rewording anything — it is the
@@ -2591,7 +2649,25 @@ class Agent:
                             f"{m['role']}: [tool {b.get('name')}] {b.get('input')}"
                         )
                     elif t == "tool_result":
-                        c = str(b.get("content", ""))[:1500]
+                        value = b.get("content")
+                        if isinstance(value, list):
+                            # An image-bearing result is a block list. The
+                            # summary gets the text and a marker, never base64.
+                            text_bits = [
+                                str(x.get("text") or "")
+                                for x in value
+                                if isinstance(x, dict) and x.get("type") == "text"
+                            ]
+                            has_image = any(
+                                isinstance(x, dict) and x.get("type") == "image"
+                                for x in value
+                            )
+                            c = " ".join(text_bits)
+                            if has_image:
+                                c += " [image attached]"
+                            c = c[:1500]
+                        else:
+                            c = str(value or "")[:1500]
                         transcript.append(f"{m['role']}: [result] {c}")
 
         header = (

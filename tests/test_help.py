@@ -171,7 +171,7 @@ async def test_filter(tmp: Path) -> None:
         check("filter: another section is not",
               "/phish" not in blob and "OFFENSIVE" not in blob, blob[-300:])
         check("filter: the count is the section's",
-              "11 commands · 1 group" in blob, blob[:300])
+              "12 commands · 1 group" in blob, blob[:300])
 
         fresh()
         app._handle_command("/help all")

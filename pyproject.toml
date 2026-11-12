@@ -12,6 +12,7 @@ dependencies = [
     "textual>=0.80",
     "rich>=13.7",
     "pyyaml>=6.0",
+    "playwright>=1.49",
 ]
 
 [project.scripts]

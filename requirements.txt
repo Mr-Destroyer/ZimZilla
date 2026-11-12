@@ -27,6 +27,13 @@ pyyaml>=6.0
 # release can take away without anything here noticing until import time.
 markdown-it-py>=2.2.0
 
+# The visual browser (/see, browse, watch_video). Playwright drives a real
+# Chromium so a page's JavaScript has run before it is read; the browser binary
+# itself is installed separately (`python -m playwright install chromium`), and
+# `browser.py` falls back to a system chromium when it is not. The Python
+# package is small; the browser download is the part that is opt-in.
+playwright>=1.49
+
 # zimzilla itself, editable, so the `zimzilla` console script is installed and
 # the package is importable from any directory.
 -e .

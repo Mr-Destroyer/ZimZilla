@@ -73,6 +73,10 @@ want; it works out the steps, does them, and shows you everything it did.
   makes the change — reading files, running commands, editing code.
 - **Sees your project.** Point it at any directory and it works there: it can
   read, search, and reason across the whole tree.
+- **Sees the web.** A real headless browser renders the page, scrolls it, and
+  hands the model screenshots plus the text, media and comments — so YouTube,
+  TikTok, Instagram, Facebook and any JavaScript-heavy site are readable, not
+  just fetchable.
 - **Runs real commands.** A full shell, wired straight into the loop, with
   output captured and shown inline.
 - **Edits like a human.** Changes arrive as diffs you can read before they land.
@@ -212,6 +216,11 @@ python3 -m venv .venv && pip install -r requirements.txt
 package and drops a `zimzilla` command into your venv's `bin/`. The launcher
 uses the checkout's `.venv` when it exists, then an activated `$VIRTUAL_ENV`,
 then `python3` on `PATH` — so a venv of your own works too.
+
+The visual browser (`/see`, `browse`, `watch_video`) needs its Chromium
+separately: `python -m playwright install chromium`. A machine with Chromium
+already on `PATH` does not need that line — the harness launches the system
+binary when Playwright's bundled browser is absent.
 
 `requirements.txt` covers the **harness** only, and that is all the default
 route needs: Logfare is reached directly over Chat Completions, so no LiteLLM
@@ -830,6 +839,9 @@ the file up too.
 | `list_dir` | no | List a directory. |
 | `search_web` | no | Search the web. |
 | `web_fetch` | no | Pull down a URL. |
+| `browse` | no | Render a page in a real browser and **see** it: screenshots attached, plus text, media, links and comments. |
+| `view_image` | no | Look at a local image, screenshot or GIF (animated GIFs can be sampled into frames). |
+| `watch_video` | no | Pull a video's metadata and thumbnail, and sample frames from the opening seconds. |
 | `generate_image` | no | Generate an image from a prompt and save it under `images/` (needs a Logfare key). |
 | `mcp_<server>_<tool>` | **yes** | Any tool from a connected MCP server. See [MCP](#mcp). |
 
@@ -1688,6 +1700,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/limits` | context window, round caps and timeouts — and where each figure comes from |
 | `/mcp [add\|remove\|connect\|tools]` | connect MCP servers — their tools join the tool set |
 | `/team <task>` | fan the task out across parallel agents |
+| `/see <url> [question]` | open a page in a real browser — screenshots attached, plus text, video, comments |
 | `/osint <kind> <target>` | open-source recon on a target |
 | `/osint-tree [kind\|path]` | re-show a finished recon as a result tree |
 | `/leadgen <niche> <location>` | local leads — passive audit, outreach drafts, never sends |
@@ -1797,6 +1810,85 @@ The palette is the fastest way to reach anything: hit `Ctrl+K` and type a few
 letters. It searches every slash command, every mode, every model on your
 upstream, and every file in the working directory — so `/mode zim` is `mkz`,
 and a file you half-remember is three characters away.
+
+---
+
+## Seeing the web
+
+`/see <url> [question]` opens a page in a real headless Chromium, waits for its
+JavaScript, scrolls it (which is what loads comments and lazy thumbnails),
+captures a viewport and a full-page screenshot, reads the rendered DOM, and
+hands all of that to the model as one turn. The screenshots are **attached to
+the conversation**, not described to it — the model can see the page and read
+it at the same time.
+
+```
+/see https://www.youtube.com/watch?v=dQw4w9WgXcQ
+/see https://www.tiktok.com/@charlidamelio what is this account posting lately?
+/see https://news.ycombinator.com summarise the front page
+```
+
+The transcript names what was captured, and the evidence lands under
+`<state_dir>/vision/<host>-<timestamp>/`: the screenshots, the rendered HTML,
+and any thumbnails or GIF frames that were attached. A page that is gated —
+Instagram and Facebook show a login wall to strangers — is reported as gated
+rather than as empty.
+
+**It is not only a command.** The model has the same browser as a tool, so a
+conversation can go deeper on its own:
+
+| Tool | What it does |
+|---|---|
+| `browse` | Render any URL. Returns text, headings, title, description, images, videos, GIFs, thumbnails, links and comments, with screenshots attached. `scroll`, `wait_ms`, `full_page` and `click` (CSS selectors) shape the capture. |
+| `view_image` | Look at an image file — a screenshot the browser just took, a downloaded thumbnail, a diagram. For an animated GIF, `frames=N` attaches stills spread through it. |
+| `watch_video` | The moving-picture half: real title, channel, duration, views, description and caption languages via `yt-dlp`, the thumbnail, and `frames` stills sampled from the opening seconds (`start`/`duration` to look elsewhere). |
+
+**Seeing needs a vision-capable model.** The default Logfare route was measured
+on 2026-11-11: `gemma-4-31b-it` read a test image correctly, and so did
+`qwen-3.8-27b`, `glm-5.3-flash` and `deepseek-v4.1-flash-1017`; Gemini's
+`gemini-flash-lite-latest` did too. If the active route is text-only, the first
+request that carries an image comes back 400 — the harness then drops every
+image, says so in the transcript, and retries with the page text. The read still
+works; the picture does not.
+
+**How the pictures travel.** An image is stored in the conversation as a path
+and read at request time, so sessions stay small and a screenshot is always the
+file the operator can open. On Anthropic Messages it becomes a base64 `image`
+block inside the tool result; on Chat Completions it becomes an `image_url` part
+in the user message after the tool result, because a `tool` message cannot hold
+one. Both shapes are tested, and an image the file system has lost is reported
+rather than silently omitted.
+
+**Video.** A page screenshot shows the player, not the video. `watch_video`
+downloads a low-resolution slice (the first 20 seconds by default, capped at
+120), samples frames with `ffmpeg`, and attaches them — so "what happens in this
+clip" is answerable without a video-capable model. It needs `yt-dlp` and
+`ffmpeg` on `PATH`; both are optional, and the tool says which is missing.
+
+**Logged-in pages.** The browser starts with no session of its own. To see what
+you see, export cookies once — a Playwright storage-state JSON file
+(`{"cookies": [...]}`) or a Netscape `cookies.txt` — and point
+`ZIMZILLA_BROWSER_COOKIES` at it, or put it at
+`~/.zimzilla/browser/cookies.json`. Nothing here logs in, solves a challenge or
+guesses a credential.
+
+**Scope and limits.** A URL whose host is in `out-of-scope.yaml` is refused
+*before* Chromium opens. The browser is read-only: it does not post, like,
+follow, purchase or log in. It does not bypass a CAPTCHA, a paywall or DRM, and
+a site that refuses a headless browser is reported as refusing it. Screenshots
+are capped at 4200px tall and six attachments per capture; a page that is
+nothing but a 40,000px feed is summarised from its top screens and its text.
+
+**Install.** The Python package is in `requirements.txt`; the browser binary is
+a separate download:
+
+```bash
+python -m playwright install chromium
+```
+
+A machine that already has Chromium does not need that line — `browser.py`
+launches the system binary when Playwright's bundled one is absent, which is
+what makes `/see` work out of the box here.
 
 ---
 
@@ -2836,8 +2928,10 @@ zimzilla/                     the package
   config.py                   modes, defaults, model registry, pricing
   effort.py                   /effort levels, the per-protocol translation, and
                               the remembered choice ($ZIMZILLA_HOME/effort)
-  tools.py                    the nine tools
+  tools.py                    the tool layer — schemas, previews, dispatch
   sandbox.py                  the filesystem jail
+  images.py                   image attachments — read, fit, hand to either protocol
+  browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
@@ -2896,6 +2990,7 @@ python tests/test_shodan.py        # /shodan-* — the key, the query, the resul
 python tests/test_payload.py       # /payload — the table, the argv, the traps, the wiring
 python tests/test_inferx.py        # /inferx-* — the key-gated catalog, the tenant allowance, the wiring
 python tests/test_inferbase.py     # /inferbase-* — the price band, the two routes, the wiring
+python tests/test_vision.py        # /see, browse, view_image — images, browser, screenshots
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

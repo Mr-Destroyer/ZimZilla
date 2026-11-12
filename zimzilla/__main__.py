@@ -18,6 +18,7 @@ from . import openrouter as or_mod
 from . import sources as sources_mod
 from . import session as session_mod
 from . import tokenharbour as th_mod
+from . import unrestricted as unr_mod
 from . import unorouter as uno_mod
 from . import update as update_mod
 from .config import KNOWN_MODELS, Config, DEFAULT_MODEL, find_agents_file
@@ -282,7 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     # then silently reverted on the next launch.
     _remembered = sources_mod.current_key()
     for _key, _mod in (("tokenharbour", th_mod), ("openrouter", or_mod),
-                       ("unorouter", uno_mod), ("antseed", as_mod),
+                       ("unorouter", uno_mod), ("unrestricted", unr_mod),
+                       ("antseed", as_mod),
                        ("aihubmix", ah_mod), ("beatapi", bp_mod),
                        ("moonmath", mm_mod)):
         if _remembered != _key:
