@@ -13,6 +13,7 @@ from . import aihubmix as ah_mod
 from . import antseed as as_mod
 from . import beatapi as bp_mod
 from . import logfare as lf_mod
+from . import coarena as co_mod
 from . import moonmath as mm_mod
 from . import openrouter as or_mod
 from . import sources as sources_mod
@@ -295,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
                        ("respan", rp_mod),
                        ("antseed", as_mod),
                        ("aihubmix", ah_mod), ("beatapi", bp_mod),
-                       ("moonmath", mm_mod)):
+                       ("moonmath", mm_mod), ("coarena", co_mod)):
         if _remembered != _key:
             continue
         if (_mod.applies_to_default_endpoint(cfg.base_url)

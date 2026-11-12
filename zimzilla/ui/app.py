@@ -33,6 +33,7 @@ from .. import ad as ad_mod
 from .. import aihubmix as ah_mod
 from .. import beatapi as bp_mod
 from .. import browser as browser_mod
+from .. import coarena as co_mod
 from .. import connect as connect_mod
 from .. import crack as crack_mod
 from .. import antseed as as_mod
@@ -899,6 +900,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-respan", "switch upstream to Respan (hosted, free models only)"),
         ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
         ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
+        ("/zim-coarena", "switch upstream to Coarena (hosted, free Model API)"),
         ("/zim-moonmath", "switch upstream to Zro (hosted, free daily models)"),
         ("/zim-iteracompute [proxy]", "switch upstream to IteraCompute (direct; `proxy` → :4002)"),
         ("/zim-infronai [proxy]", "switch upstream to InfronAI (direct; `proxy` to go via :4003)"),
@@ -929,6 +931,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/aihubmix-models", "the live free catalog — what is free and usable"),
         ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
         ("/beatapi-models", "the live free catalog — what is free and usable"),
+        ("/coarena-api-setup [key]", "store your Coarena API key (free Model API)"),
+        ("/coarena-models", "the live free catalog — what is free and usable"),
         ("/moonmath-api-setup [key]", "store your Zro (MoonMath.ai) API key"),
         ("/moonmath-models", "the live free catalog — the Free plan's models"),
         ("/iteracompute-api-setup [key]", "store your IteraCompute API key"),
@@ -1591,6 +1595,8 @@ class ZimZillaApp(App):
         # the gateway prices for itself.
         elif sources_mod.active_key(self.cfg.base_url) == "moonmath":
             self._warm_moonmath_catalog()
+        elif sources_mod.active_key(self.cfg.base_url) == "coarena":
+            self._warm_coarena_catalog()
         # Connect any configured MCP servers. Off the UI thread: a stdio server
         # is a child process that has to start and answer a handshake, and a
         # slow one must not hold up the prompt. The tools join the tool set as
@@ -2690,6 +2696,7 @@ class ZimZillaApp(App):
         "respan-api-setup", "respan-models", "zim-respan",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
+        "coarena-api-setup", "coarena-models", "zim-coarena",
         "moonmath-api-setup", "moonmath-models", "zim-moonmath",
         "zro-moonmath-api-setup", "zro-moonmath-models", "zim-zro-moonmath",
         # The provider is spelled MoonMath; "moonmatch" is a common misspelling
@@ -2856,6 +2863,9 @@ class ZimZillaApp(App):
             # `zro-` spellings are accepted as aliases: the provider brands
             # itself Zro, and a command named for the brand should not read as
             # missing on the one machine that has it set up.
+            "zim-coarena": lambda a: self._cmd_zim_gateway("coarena"),
+            "coarena-api-setup": lambda a: self._cmd_gateway_key("coarena", a),
+            "coarena-models": lambda a: self._cmd_models(["coarena"]),
             "zim-moonmath": lambda a: self._cmd_zim_gateway("moonmath"),
             "zim-zro-moonmath": lambda a: self._cmd_zim_gateway("moonmath"),
             "moonmath-api-setup": lambda a: self._cmd_gateway_key("moonmath", a),
@@ -3168,6 +3178,12 @@ class ZimZillaApp(App):
         # free daily models first and price the rest correctly.
         mm_catalog = (mm_mod.cached_models()
                       if active == "moonmath" else None)
+        # Coarena's is fetched too, and is the one catalog here that prices
+        # every model at zero while the account is metered against a daily
+        # allowance — so it is what makes /model say "free" instead of billing
+        # a model at DEFAULT_PRICE.
+        co_catalog = (co_mod.cached_models()
+                      if active == "coarena" else None)
         # InferX's is fetched as well, and is read once here for the same
         # reason: the fetch is the slow part and this is a render. Every entry
         # is free on the tenant's quota, so this is what makes /model say
@@ -3193,7 +3209,8 @@ class ZimZillaApp(App):
                 hosted = {"tokenharbour": "TokenHarbour", "openrouter": "OpenRouter",
                           "unorouter": "UnoRouter", "aihubmix": "AIHubMix",
                           "beatapi": "BeatAPI", "antseed": "AntSeed",
-                          "respan": "Respan", "moonmath": "Zro (MoonMath.ai)"}
+                          "respan": "Respan", "moonmath": "Zro (MoonMath.ai)",
+                          "coarena": "Coarena"}
                 label = src.label if src else hosted.get(active, active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
@@ -3207,7 +3224,7 @@ class ZimZillaApp(App):
                 th_catalog or as_catalog or uno_catalog or unr_catalog
                 or resp_catalog or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
-                or mm_catalog or ix_catalog or ib_catalog)
+                or mm_catalog or co_catalog or ix_catalog or ib_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -3224,8 +3241,8 @@ class ZimZillaApp(App):
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
                                         inf_catalog, nv_catalog, mm_catalog,
-                                        ix_catalog, ib_catalog, unr_catalog,
-                                        resp_catalog)
+                                        co_catalog, ix_catalog, ib_catalog,
+                                        unr_catalog, resp_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -3321,6 +3338,13 @@ class ZimZillaApp(App):
                     "Free plan's daily allowance, and every model\n"
                     "  still carries a published rate\n",
                     style=p.dim)
+            elif active == "coarena":
+                t.append(
+                    f"  catalog {_catalog_clause(co_mod.catalog_age(), co_mod.CACHE_TTL)}"
+                    " — /coarena-models shows the\nfree ones; free means no "
+                    "per-token charge, and the account is metered\n"
+                    "  against a $5/day allowance instead\n",
+                    style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -3362,8 +3386,8 @@ class ZimZillaApp(App):
         # wrong answer was the common case rather than the corner.
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi", "unrestricted",
-                      "respan", "moonmath", "iteracompute", "infronai",
-                      "nvidia", "inferx", "inferbase") and (
+                      "respan", "moonmath", "coarena", "iteracompute",
+                      "infronai", "nvidia", "inferx", "inferbase") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -3495,6 +3519,18 @@ class ZimZillaApp(App):
                     fetched = [m for m in (got or []) if m.chat] or None
                 else:
                     fetched = list(mm_catalog)
+            elif active == "coarena":
+                # Keyless and public: /api/v1/models answers 200 with no
+                # credential (and with a bad one too, measured). Fetched when
+                # the cache is cold or expired so a live model is not refused
+                # against a stale list — and this list matters more here than
+                # on most sources, because the provider switches models off at
+                # will: the docs name 22 and the catalog listed 18.
+                if co_catalog is None:
+                    got, _ = co_mod.fetch_models()
+                    fetched = [m for m in (got or []) if m.chat] or None
+                else:
+                    fetched = list(co_catalog)
             elif active == "logfare":
                 if lf_catalog is None:
                     # The status API is public — no key, so this works before
@@ -3529,6 +3565,8 @@ class ZimZillaApp(App):
                     ib_catalog = fetched
                 elif active == "moonmath":
                     mm_catalog = fetched
+                elif active == "coarena":
+                    co_catalog = fetched
                 elif active == "logfare":
                     lf_catalog = fetched
                 models = tuple(m.id for m in fetched)
@@ -3586,7 +3624,7 @@ class ZimZillaApp(App):
     def _model_note(self, name: str, catalog, lf_catalog=None,
                     as_catalog=None, uno_catalog=None, bp_catalog=None,
                     ic_catalog=None, inf_catalog=None,
-                    nv_catalog=None, mm_catalog=None,
+                    nv_catalog=None, mm_catalog=None, co_catalog=None,
                     ix_catalog=None, ib_catalog=None,
                     unr_catalog=None, resp_catalog=None) -> str:
         """The price/context note beside a model in /model.
@@ -3628,6 +3666,8 @@ class ZimZillaApp(App):
         if live is None:
             live = mm_mod.price_for(name, mm_catalog)
         if live is None:
+            live = co_mod.price_for(name, co_catalog)
+        if live is None:
             live = ix_mod.price_for(name, ix_catalog)
         if live is None:
             live = ib_mod.price_for(name, ib_catalog)
@@ -3658,6 +3698,13 @@ class ZimZillaApp(App):
             # catalog publishes no rate at all, so the estimate table would be
             # printing a figure nothing here can know.
             return "free (tenant quota)"
+        if co_mod.is_coarena(self.cfg.base_url):
+            # The catalog prices every listed model at $0 in and $0 out, and
+            # the account is metered against a daily allowance instead — so
+            # "free" is the true per-token answer warm or cold. Falling through
+            # to the estimate table would print $1.00/$3.00 beside a model that
+            # costs nothing per token.
+            return "free (daily allowance)"
         if ib_mod.is_inferbase(self.cfg.base_url):
             # Not the NVIDIA case: this catalog DOES publish a rate, so a warm
             # cache prices a model exactly. A cold one cannot, and the estimate
@@ -4291,6 +4338,7 @@ class ZimZillaApp(App):
                 ("infronai", inf_mod, "InfronAI", "/infronai-api-setup"),
                 ("nvidia", nv_mod, "NVIDIA NIM", "/nvidia-api-setup"),
                 ("moonmath", mm_mod, "Zro", "/moonmath-api-setup"),
+                ("coarena", co_mod, "Coarena", "/coarena-api-setup"),
                 ("inferx", ix_mod, "InferX", "/inferx-api-setup"),
                 ("inferbase", ib_mod, "Inferbase", "/inferbase-api-setup"),
                 ("flex", flex_mod, "Flex playground", "no key needed"),
@@ -4365,7 +4413,8 @@ class ZimZillaApp(App):
                      "                 /zim-respan,  /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
-                     "                 /zim-moonmath,  /zim-wandb,\n"
+                     "                 /zim-moonmath,  /zim-coarena,\n"
+                     "                 /zim-wandb,\n"
                      "                 /zim-inferx,  /zim-inferbase,\n"
                      "                 /zim-flex,  /zim-gemini,\n"
                      "                 or  /zim-antseed\n",
@@ -5148,6 +5197,43 @@ class ZimZillaApp(App):
         ok, detail = mm_mod.verify_key(token)
         self.call_from_thread(self._report_moonmath_key, ok, detail)
 
+    @work(exclusive=True, thread=True)
+    def _warm_coarena_catalog(self) -> None:
+        """Fetch Coarena's catalog once at startup, silently.
+
+        Silent for the same reason the other warm-ups are: a launch that cannot
+        reach the public catalog is still a working launch, /model falls back to
+        the declared list, and /coarena-models reports the failure on demand.
+        A catalog that is merely fresh is not news.
+        """
+        co_mod.fetch_models()
+
+    @work(exclusive=True, thread=True)
+    def _verify_coarena_key(self, token: str) -> None:
+        """Prove a just-stored Coarena key with one read-only request. Blocking.
+
+        Runs on the worker thread: ``/coarena-api-setup`` must not stall the UI
+        on a network call, and the answer is worth having before the first turn
+        rather than after it. The probe is ``GET /api/v1/limits`` — the one
+        route that answers 401 without a credential — and its reply carries the
+        day's allowance, which is the number that decides whether the next turn
+        will be refused.
+        """
+        ok, detail = co_mod.verify_key(token)
+        self.call_from_thread(self._report_coarena_key, ok, detail)
+
+    def _report_coarena_key(self, ok: bool, detail: str) -> None:
+        """Say what the probe found, without claiming more than it proved.
+
+        ``ok`` is False only for a rejected key or an unreachable host; a 429 or
+        5xx comes back True with the reason in ``detail``, so the line names the
+        check rather than declaring the key good or bad.
+        """
+        if ok:
+            self._sys_line(f"Coarena key check: {detail}", ok=True)
+        else:
+            self._sys_line(f"Coarena key check failed: {detail}", warn=True)
+
     def _report_moonmath_key(self, ok: bool, detail: str) -> None:
         """Say what the probe found, without claiming more than it proved.
 
@@ -5278,6 +5364,12 @@ class ZimZillaApp(App):
         # and nothing is started.
         if kind == "moonmath":
             return mm_mod, "Zro (MoonMath.ai)"
+        # Hosted and Anthropic-native, like Zro one line up: the gateway serves
+        # ``/api/v1/messages`` itself, so nothing is translated and nothing is
+        # started. Its catalog is public, which is what lets /coarena-models
+        # work before a key exists.
+        if kind == "coarena":
+            return co_mod, "Coarena"
         # Not a hosted gateway: IteraCompute has no Messages endpoint, so it is
         # a local proxy source — `/zim-iteracompute` goes through
         # `_cmd_zim_source` like Logfare, and (since the harness speaks Chat
@@ -5581,6 +5673,18 @@ class ZimZillaApp(App):
                 t.append("  keys start    ", style=p.dim)
                 t.append(f"{mod.KEY_PREFIX}  · free daily usage on the Flash "
                          "models\n", style=p.dim)
+            if kind == "coarena":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://coarena.ai/account/api/keys\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append(f"{mod.KEY_PREFIX}  · free Model API, $5/day allowance,\n"
+                         "                30 requests/min, 2 calls at once\n",
+                         style=p.dim)
+                t.append("  note:        ", style=p.dim)
+                t.append(
+                    "every prompt and reply is stored by Coarena and may be "
+                    "used in\n               datasets it licenses — do not send "
+                    "anything you would not publish\n", style=p.dim)
             if kind == "unrestricted":
                 t.append("  get a key at  ", style=p.dim)
                 t.append("https://unrestricted.sh\n", style=p.primary)
@@ -5609,7 +5713,7 @@ class ZimZillaApp(App):
                     "BYOK key are added\n", style=p.dim)
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
                         "iteracompute", "infronai", "nvidia", "moonmath",
-                        "inferbase", "respan"):
+                        "coarena", "inferbase", "respan"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -5677,6 +5781,12 @@ class ZimZillaApp(App):
             # that was just stored instead of leaving the operator to meet the
             # 401 on their first turn. Off the UI thread — it is a network call.
             self._verify_moonmath_key(key)
+        if kind == "coarena":
+            # Coarena's Models route is public (it answers 200 even with a bad
+            # key), so it proves nothing. /api/v1/limits is the route that
+            # answers 401 without a credential — one read-only GET proves the
+            # key, and the same reply carries the day's allowance.
+            self._verify_coarena_key(key)
         if kind == "inferbase" and ib_mod.is_inferbase(self.cfg.base_url):
             # The route is direct and the client already holds the *old* token,
             # which it read from the profile at switch time. Without this the
@@ -5720,6 +5830,15 @@ class ZimZillaApp(App):
             # Same failure again: re-read the profile that was just rewritten,
             # and keep the free-model guarantee by letting apply_to choose.
             if rp_mod.apply_to(self.cfg) is not None:
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+                return
+        if kind == "coarena" and co_mod.is_coarena(self.cfg.base_url):
+            # Same failure, one gateway over: a hosted gateway's key is read
+            # into ``cfg`` when the switch happens, so writing it to the profile
+            # while the session is already on Coarena leaves the old credential
+            # in force. Re-apply from the profile just rewritten.
+            if co_mod.apply_to(self.cfg) is not None:
                 self.agent._client = None
                 self._sys_line("applied to this session — no restart", ok=True)
                 return
@@ -5933,6 +6052,12 @@ class ZimZillaApp(App):
             # on the free default; the fetch below still shows the whole free
             # list, so the choice is the operator's from there.
             self.cfg.model = mm_mod.default_free_model()
+        if kind == "coarena" and not model:
+            # Same reasoning as Zro one branch up: the previous provider's id is
+            # not served here and answers 404 (or, worse, 400 model_off) on the
+            # first turn. Land on the free default and let the fetch below show
+            # the whole list.
+            self.cfg.model = co_mod.default_free_model()
         self.agent._client = None      # rebuild against the new host
         mod.set_current(kind)
         self._refresh_after_source_change(label, f"key from {origin}")
@@ -5942,6 +6067,15 @@ class ZimZillaApp(App):
             # list is the point of this source — show it.
             self._sys_line("free models only — /respan-models to see the list")
             self._fetch_models(kind)
+        elif kind == "coarena":
+            # Every listed model is free per token, and the account is metered
+            # against a daily allowance — so the allowance is the number worth
+            # showing on a switch, not just the list. Both are fetched off the
+            # UI thread; the allowance probe is the same GET that proves the
+            # key, so it costs nothing extra.
+            self._sys_line("free models — /coarena-models to see the list")
+            self._fetch_models(kind)
+            self._verify_coarena_key(token)
         # A first switch with no model chosen lands on whatever the profile
         # named; with none, offer the free list rather than guessing a paid one.
         elif not model:
@@ -6206,7 +6340,7 @@ class ZimZillaApp(App):
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "unrestricted", "respan", "antseed", "aihubmix",
-                 "beatapi",
+                 "beatapi", "coarena",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
                  "inferx", "inferbase", "flex", "gemini"}
         if key not in known:
@@ -6308,6 +6442,13 @@ class ZimZillaApp(App):
             # key only matters for sending a turn.
             creds = mm_mod.load_credentials()
             return mm_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "coarena":
+            # Keyless too: /api/v1/models answers 200 with no credential at all
+            # (and with a bad one, measured), so the free list works before
+            # /coarena-api-setup has run. The key is sent when there is one so
+            # the listing matches this account.
+            creds = co_mod.load_credentials()
+            return co_mod.usable_free_models(creds[0] if creds else "")
         if kind == "nvidia":
             # Keyless as well: /v1/models is public. Sent when present so the
             # listing is made with the credential the turns will use. The
@@ -6389,6 +6530,7 @@ class ZimZillaApp(App):
                  "flex": "FLEX PLAYGROUND",
                  "gemini": "GOOGLE GEMINI",
                  "moonmath": "ZRO (MOONMATH.AI)",
+                 "coarena": "COARENA",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
                  "antseed": "ANTSEED"}.get(kind, kind.upper())
         t = Text()
@@ -10854,6 +10996,12 @@ class ZimZillaApp(App):
              "beatapi-api-setup"),
             ("/beatapi-models", "the live free catalog — what is free and usable",
              "beatapi-models"),
+            ("/zim-coarena", "switch upstream to Coarena (free Model API)",
+             "zim-coarena"),
+            ("/coarena-api-setup", "store your Coarena API key",
+             "coarena-api-setup"),
+            ("/coarena-models", "the live free catalog — what is free and usable",
+             "coarena-models"),
             ("/zim-moonmath", "switch upstream to Zro (MoonMath.ai)", "zim-moonmath"),
             ("/moonmath-api-setup", "store your Zro (MoonMath.ai) API key",
              "moonmath-api-setup"),

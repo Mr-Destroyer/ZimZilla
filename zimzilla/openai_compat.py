@@ -106,6 +106,13 @@ ANTHROPIC_HOSTS = (
     # host here keeps ``https://zro.moonmath.ai`` from ever being read as a Chat
     # Completions endpoint by a future heuristic.
     "zro.moonmath.ai",
+    # Coarena serves the Messages protocol natively at ``/api`` — measured: a
+    # real tool-using turn round-trips at ``/api/v1/messages``. Its base URL
+    # ends in ``/api``, not ``/v1``, so the path rule does not catch it and the
+    # final "otherwise Anthropic" rule would be right only by accident. Naming
+    # the host makes that deliberate, and keeps the OpenAI surface at
+    # ``/api/v1`` from ever being confused with the Messages one.
+    "coarena.ai",
 )
 
 #: Hosts that are Chat Completions by construction. Not exhaustive, and not

@@ -646,6 +646,33 @@ MOONMATH_MODELS: tuple[str, ...] = (
     "auto",
 )
 
+#: Coarena's declared fallback. Its real catalog is fetched from the public
+#: ``/api/v1/models`` route (see ``coarena.py``); this is what ``/model`` shows
+#: before that fetch. The catalog listed 18 models when this was written, and
+#: the docs name 22 — the four extra (the ``gpt-6-*`` line) answer ``400
+#: model_off``, so the declared list is the *callable* surface rather than the
+#: documented one. A switch re-reads the live catalog before it lands.
+COARENA_MODELS: tuple[str, ...] = (
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-2",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "deepseek-v4-1-flash-1017",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-3-8-flash",
+    "glm-5-3-flash",
+    "grok-4-7",
+    "hy4",
+    "kimi-k3-1-pro",
+    "kimi-k3",
+    "mimo-v2-6-pro",
+    "minimax-m3-1-flash",
+    "qwen3-8-2-4t-a95b",
+)
+
 MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "logfare": LOGFARE_MODELS,
     "tokenjuice": TOKENJUICE_MODELS,
@@ -653,6 +680,7 @@ MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "infronai": INFRONAI_MODELS,
     "nvidia": NVIDIA_MODELS,
     "moonmath": MOONMATH_MODELS,
+    "coarena": COARENA_MODELS,
     "wandb": WANDB_MODELS,
     "inferx": INFERX_MODELS,
     "inferbase": INFERBASE_MODELS,
@@ -719,6 +747,13 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         # surface of *this* provider — so it answers a cold cache.
         from . import moonmath as mm_mod
         cached = mm_mod.cached_ids()
+        return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
+    if key == "coarena":
+        # Fetched from the gateway's public catalog. The declared fallback is
+        # better than the default registry's list here — it is the documented
+        # surface of *this* provider — so it answers a cold cache.
+        from . import coarena as co_mod
+        cached = co_mod.cached_ids()
         return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
     if key == "inferx":
         # Checked before the generic DIRECT_ONLY branch, like NVIDIA's: this
@@ -887,6 +922,9 @@ def catalog_models(key: str) -> list | None:
     if key == "moonmath":
         from . import moonmath as mm_mod
         return mm_mod.cached_models()
+    if key == "coarena":
+        from . import coarena as co_mod
+        return co_mod.cached_models()
     return None
 
 
@@ -995,6 +1033,13 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # the free tier is a quota on the *account* rather than a rate on the
         # model. A cold cache answering None would fall through to the estimate
         # table and bill a free model at DEFAULT_PRICE.
+        return (0.0, 0.0)
+    if key == "coarena":
+        # The catalog prices every listed model at $0 in and $0 out, and the
+        # account is metered against a $5/day allowance instead — so (0, 0) is
+        # the true per-token answer warm or cold. A cold cache answering None
+        # would fall through to the estimate table, which has never heard of
+        # these ids, and bill a free model at DEFAULT_PRICE ($1/$3).
         return (0.0, 0.0)
     if key == "unrestricted":
         # NOT the NVIDIA case: this catalogue publishes real dollars per million
@@ -1373,7 +1418,8 @@ def switchable(exclude: str | None = None) -> list[str]:
     found = discover()
     out: list[str] = []
     for key in ("openrouter", "unorouter", "unrestricted", "respan",
-                "aihubmix", "beatapi", "tokenharbour", "moonmath", "infronai",
+                "aihubmix", "beatapi", "tokenharbour", "moonmath", "coarena",
+                "infronai",
                 "iteracompute", "antseed", "nvidia", "tokenjuice", "logfare",
                 "wandb", "inferx", "inferbase", "flex"):
         if key == exclude or key in UNDER_CONSTRUCTION:
@@ -1411,6 +1457,7 @@ def _gateway_module(key: str):
     """
     from . import aihubmix as ah_mod
     from . import beatapi as bp_mod
+    from . import coarena as co_mod
     from . import flex as flex_mod
     from . import gemini as gm_mod
     from . import inferbase as ib_mod
@@ -1425,6 +1472,7 @@ def _gateway_module(key: str):
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
         "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
+        "coarena": co_mod,
         "wandb": wb_mod, "inferx": ix_mod, "inferbase": ib_mod,
         "flex": flex_mod, "gemini": gm_mod, "unrestricted": unr_mod,
         "respan": rp_mod,
@@ -1491,8 +1539,9 @@ def _state_file() -> Path:
 #: buyer is started and stopped by the operator, so requiring it to be up at
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
-                          "aihubmix", "beatapi", "moonmath", "wandb", "inferx",
-                          "inferbase", "flex", "unrestricted", "respan"})
+                          "aihubmix", "beatapi", "moonmath", "coarena", "wandb",
+                          "inferx", "inferbase", "flex", "unrestricted",
+                          "respan"})
 
 
 def current_key() -> str | None:
@@ -1543,6 +1592,7 @@ def active_key(base_url: str) -> str | None:
     from . import aihubmix as ah_mod
     from . import antseed as as_mod
     from . import beatapi as bp_mod
+    from . import coarena as co_mod
     from . import flex as flex_mod
     from . import gemini as gm_mod
     from . import inferbase as ib_mod
@@ -1581,6 +1631,11 @@ def active_key(base_url: str) -> str | None:
     # path to match on.
     if mm_mod.is_moonmath(base_url):
         return "moonmath"
+    # Coarena is hosted and Anthropic-native, identified by host like the other
+    # gateways — its Messages base is ``https://coarena.ai/api``, so there is no
+    # port or path to match on.
+    if co_mod.is_coarena(base_url):
+        return "coarena"
     # Checked by port before the generic regex for the same reason AntSeed is:
     # it is a local proxy, and identifying it by its own predicate keeps the
     # port in one module rather than spelling it here too. It also means the

@@ -135,7 +135,7 @@ if [[ "$_skip_profile" != "1" ]]; then
   # dies fail-closed — "profile not found" — for a gateway that needs no profile
   # at all. That is a session that cannot start, for a reason that is not true.
   case "$_current_source" in
-    tokenharbour|openrouter|moonmath)
+    tokenharbour|openrouter|moonmath|coarena)
       if [[ -r "$ZIMZILLA_HOME/$_current_source/source" ]]; then
         LITELLM_ENV_FILE="${_env_override:-$ZIMZILLA_HOME/$_current_source/source}"
       fi

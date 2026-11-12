@@ -342,6 +342,10 @@ _CREDENTIAL_PROFILES = (
     ("aihubmix", "AIHubMix", "ANTHROPIC_AUTH_TOKEN"),
     ("beatapi", "BeatAPI", "ANTHROPIC_AUTH_TOKEN"),
     ("moonmath", "Zro", "ANTHROPIC_AUTH_TOKEN"),
+    # Hosted and Anthropic-native, like Zro one line up: the gateway serves
+    # /api/v1/messages itself, and the key is the operator's own, written by
+    # /coarena-api-setup.
+    ("coarena", "Coarena", "ANTHROPIC_AUTH_TOKEN"),
     # Direct-only, like NVIDIA and Token Juice: reached over Chat Completions
     # with no proxy, and the key is the operator's own. /inferx-api-setup is
     # the command that writes this file.

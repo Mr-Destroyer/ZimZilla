@@ -1016,6 +1016,7 @@ caring which. Seventeen sources are wired up:
 | **AIHubMix** | `aihubmix.com` | yours | hosted — nothing to start |
 | **BeatAPI** | `direct.beatapi.io` | yours | hosted — nothing to start |
 | **Zro (MoonMath.ai)** | `zro.moonmath.ai` | yours (`sk-…`) | hosted, native Messages — free daily allowance on the Flash models |
+| **Coarena** | `coarena.ai/api` | yours (`coa_…`) | hosted, native Messages — free Model API, $5/day allowance |
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 | **Respan** | `gateway.respan.ai` | yours (`RESPAN_API_KEY`) | hosted, native Messages — free-only model list |
 
@@ -1023,8 +1024,8 @@ Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
 `/zim-inferbase`, `/zim-gemini`, `/zim-flex`, `/zim-tokenharbour`,
 `/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-aihubmix`,
-`/zim-beatapi`, `/zim-moonmath` or `/zim-antseed`; the choice is remembered, so
-the next launch comes back to the one that was working.
+`/zim-beatapi`, `/zim-moonmath`, `/zim-coarena` or `/zim-antseed`; the choice is
+remembered, so the next launch comes back to the one that was working.
 
 Logfare, Token Juice, NVIDIA, wandb, InferX, Inferbase, Gemini and Flex are
 reached **directly** — their upstreams serve Chat Completions themselves, so
@@ -1286,6 +1287,66 @@ is not permitted to use that model, `404` = unknown model, `429` = rate limited.
 Both spellings of an id work on the wire — `glm-5.3` and `zro/glm-5.3` — and
 ZimZilla prices and sizes either one identically. The catalog publishes the bare
 id, so that is what `/model` offers.
+
+### Coarena, a free Model API on the native Messages protocol
+
+`/coarena-api-setup <coa_… key>` writes `~/.zimzilla/coarena/source` (mode 600)
+and applies it to the session you are in — no restart. `/zim-coarena` switches
+onto `https://coarena.ai/api`. Keys come from
+https://coarena.ai/account/api/keys.
+
+Coarena is Coasty Systems' computer-use model arena, and its **Model API is
+free**: a $5.00 daily allowance per account, 30 requests a minute per key, 2
+calls at once, and 18 frontier models behind one key — the Claude, Gemini,
+DeepSeek, Grok, Kimi, GLM, Qwen, MiniMax, MiMo, Hy4 and MiniMax lines. It is
+**hosted and native**: the upstream serves `POST /api/v1/messages` itself, so
+there is no proxy to start and nothing is translated. `/zim-source` lists it as
+`hosted`.
+
+The base URL is `https://coarena.ai/api` — **not** `/api/v1`. The Anthropic SDK
+appends `/v1/messages` to whatever it is handed, so `/api/v1` there produces
+`/api/v1/v1/messages` and a 404 on every turn while the catalog still works.
+The provider's own docs say the same thing: "Anthropic SDK Base URL
+`https://coarena.ai/api`: the SDK adds `/v1/messages` itself."
+
+The catalog is **public**, read from `GET /api/v1/models` with no credential, so
+`/coarena-models` and the `/model` picker answer before any key is set. It lists
+the models that are currently **on**, which is the only list worth offering: the
+docs name 22 and the catalog listed 18 on 2026-11-12, and the four missing ones
+(the `gpt-6-*` line) answer `400 model_off` — "turned off on the Coarena Model
+API right now". Every listed entry carries a 128K window, a 16K output ceiling,
+tool calling, vision and reasoning.
+
+**Free here means no per-token charge, and the allowance is the real ceiling.**
+The catalog prices every model at `{"prompt": "0", "completion": "0"}`, and the
+account is nevertheless metered in real dollars: `/api/v1/limits` reported
+`used_usd: 0.000083` after five small calls, against `usd_per_day: 5`. So
+`/cost` reads `free`, and `/coarena-models` is where the day's remaining budget
+is worth checking. A model that is listed is not necessarily on — the catalog is
+the authority, and it is fetched live rather than baked in.
+
+The credential probe is a real one: `GET /api/v1/limits` answers `401` without a
+key and `200` with one, so `/coarena-api-setup` proves a key with one
+authenticated, read-only request — no tokens spent — and the same reply carries
+the day's allowance, which is what the confirmation line prints. A `429` or
+`5xx` still counts as a working key; only `401`/`403` fails it.
+
+The provider's error **codes** are the specific half, and they are what
+`explain_error` reads: `model_off` and `invalid_api_key` are both a 400/401 and
+call for completely different actions, so the code is preferred over the status.
+`model_api_terms_required` names the page that accepts the terms once per
+account; `insufficient_quota` names the allowance and the route that asks for
+more.
+
+**The input cap is 128,000 tokens and it is hard** — past it every call is a
+`400` until the session is shorter. That is the window ZimZilla plans against
+for this source, so compaction triggers where it should rather than against a 1M
+default it would never reach.
+
+One thing worth knowing before you send anything: **Coarena stores every prompt
+and every reply**, whatever your client's own store setting says, and may use
+them in datasets it licenses. The setup panel says so. Do not send anything you
+would not publish.
 
 ### Two wire protocols, and skipping the proxy
 
@@ -1886,6 +1947,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-beatapi` | switch upstream to BeatAPI — hosted, free models, native Messages |
 | `/beatapi-api-setup <key>` | store your BeatAPI API key |
 | `/beatapi-models` | the live free catalog — what is free and usable |
+| `/zim-coarena` | switch upstream to Coarena — hosted, native Messages, free Model API ($5/day) |
+| `/coarena-api-setup <key>` | store your Coarena API key (`coa_…`) |
+| `/coarena-models` | the live free catalog — what is free and usable |
 | `/zim-moonmath` | switch upstream to Zro (MoonMath.ai) — hosted, native Messages, free daily models |
 | `/moonmath-api-setup <key>` | store your Zro API key (alias: `/zro-moonmath-api-setup`) |
 | `/moonmath-models` | the live free catalog — the Free plan's models |
@@ -1917,7 +1981,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-antseed` | switch upstream to AntSeed — the local buyer, free peers, no key |
 | `/antseed-models` | list AntSeed's free models, each with the peer to pin |
 | `/logfare-api-setup [key]` | use your own Logfare key; none ships in the repository |
-| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `inferbase`, `gemini`, `flex`, `antseed` |
+| `/models [source]` | free models of an upstream — `logfare`, `tokenjuice`, `tokenharbour`, `openrouter`, `unorouter`, `aihubmix`, `beatapi`, `coarena`, `moonmath`, `iteracompute`, `infronai`, `nvidia`, `wandb`, `inferx`, `inferbase`, `gemini`, `flex`, `antseed` |
 | `/zim-source` | show every upstream and its status |
 | `/reverse-engineer <file>` | map an artifact (`.apk`, `.zip`, `.exe`, `.sh`, binary), then ask what you want changed |
 | `/reverse-engineer <file> --map` | map it only — no model turn, nothing sent |
