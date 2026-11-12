@@ -1,12 +1,13 @@
 """The tool layer: JSON schemas, permission previews and execution.
 
 The model is offered bash, read_file, write_file, edit_file, glob, grep,
-list_dir, search_web, web_fetch, browse, view_image and watch_video in an
-ordinary session. Reads are auto-approved; writes and bash go through the
+list_dir, search_web, web_fetch, browse, view_image, show_image and
+watch_video in an ordinary session. Reads are auto-approved; writes and bash go through the
 permission gate in the UI. The network tools are not gated — they are bounded
 by the scope guard instead, so an out-of-scope host is refused no matter which
 mode is armed. ``browse`` and ``watch_video`` return image paths in their
 ``meta``, which the agent attaches to the tool result; see ``images.py``.
+``show_image`` instead puts a picture in the operator's viewer.
 
 Two more are advertised conditionally, and the two conditions are opposites:
 ``report_finding`` only inside a hunt (``Agent.can_report``), and
@@ -266,6 +267,45 @@ TOOL_SCHEMAS: list[dict] = [
                     "type": "integer",
                     "description": "For an animated GIF, how many frames to "
                                    "attach (default 1; max 6).",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        # Display, as opposed to analysis. `view_image` hands the picture to
+        # the *model*; this hands it to the *operator*, in a pane they can
+        # resize, zoom and pan. The model can open it mid-turn, and a second
+        # call updates the same pane rather than stacking windows.
+        "name": "show_image",
+        "description": (
+            "Show an image to the operator in the image pane. Use this when "
+            "they ask to SEE something — 'show me the screenshot', 'display "
+            "that thumbnail', 'open the image' — after browse/view_image has "
+            "produced a path. Accepts a local path or an http(s) URL. The pane "
+            "is resizable, and the operator can zoom (+/-), pan (arrows) and "
+            "close it (q). This is display only; use view_image when *you* "
+            "need to look at the picture and reason about it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Local image path, or an http(s) URL.",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional one-line caption under the image.",
+                },
+                "zoom": {
+                    "type": "number",
+                    "description": "Initial zoom: 1 = fit (default), >1 zooms "
+                                   "in, <1 zooms out.",
+                },
+                "width": {
+                    "type": "integer",
+                    "description": "Optional pane width in columns (20-100).",
                 },
             },
             "required": ["path"],
@@ -782,6 +822,9 @@ TOOL_ALIASES: dict[str, str] = {
     "open_image": "view_image",
     "look": "view_image",
     "look_at": "view_image",
+    "display_image": "show_image",
+    "show_picture": "show_image",
+    "show_image_pane": "show_image",
 }
 
 #: Argument names a model writes for a parameter this harness names differently.
@@ -810,6 +853,8 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
                "text": "max_text", "comments": "include_comments"},
     "view_image": {"file": "path", "image": "path", "image_path": "path",
                    "file_path": "path", "count": "frames"},
+    "show_image": {"file": "path", "image": "path", "image_path": "path",
+                   "file_path": "path", "url": "path", "image_url": "path"},
     "watch_video": {"video": "url", "uri": "url", "link": "url",
                     "href": "url", "count": "frames", "from": "start"},
 }
@@ -1492,6 +1537,60 @@ def _tool_view_image(args: dict, cfg) -> ToolResult:
     return ToolResult(
         f"attached {len(blocks)} image(s): {label}{extra}",
         meta={"images": [str(p) for p in paths[:len(blocks)]]},
+    )
+
+
+def _tool_show_image(args: dict, cfg) -> ToolResult:
+    """Put a picture in the operator's viewer. Display, not analysis."""
+    from . import browser as browser_mod
+    from . import images as images_mod
+
+    raw = _text(args.get("path") or args.get("url") or "").strip()
+    if not raw:
+        return ToolResult("an image path or URL is required", is_error=True)
+    if raw.lower().startswith(("http://", "https://")):
+        try:
+            clean = browser_mod.normalise_url(raw)
+        except browser_mod.BrowserError as e:
+            return ToolResult(str(e), is_error=True)
+        scope = _scope_of(cfg)
+        if scope is not None:
+            allowed, reason = scope.allows(_host_of(clean))
+            if not allowed:
+                return ToolResult(
+                    f"BLOCKED by scope guard — {_host_of(clean)}: {reason}",
+                    is_error=True, meta={"blocked": True})
+        outdir = _vision_outdir(cfg, _host_of(clean))
+        path = browser_mod.download_image(clean, outdir / "shown-image")
+        if path is None:
+            return ToolResult(f"could not download {clean}", is_error=True)
+    else:
+        path = _resolve_image(cfg, raw)
+
+    prepared = images_mod.prepare(path)
+    if prepared is None:
+        return ToolResult(f"not a readable image: {raw}", is_error=True)
+    try:
+        zoom = float(args.get("zoom") or 1.0)
+    except (TypeError, ValueError):
+        zoom = 1.0
+    zoom = max(0.25, min(zoom, 16.0))
+    width = args.get("width")
+    if width is not None:
+        try:
+            width = max(20, min(int(width), 100))
+        except (TypeError, ValueError):
+            width = None
+    caption = _text(args.get("caption") or "").strip()[:200]
+    return ToolResult(
+        f"showing {images_mod.describe(prepared)} in the image pane "
+        f"(zoom {zoom * 100:.0f}%)",
+        meta={"image_pane": {
+            "path": str(prepared.path),
+            "caption": caption,
+            "zoom": zoom,
+            "width": width,
+        }},
     )
 
 
@@ -2203,6 +2302,7 @@ _DISPATCH = {
     "web_fetch": _tool_web_fetch,
     "browse": _tool_browse,
     "view_image": _tool_view_image,
+    "show_image": _tool_show_image,
     "watch_video": _tool_watch_video,
     "generate_image": _tool_generate_image,
     "report_finding": _tool_report_finding,
@@ -2241,6 +2341,9 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
         return "$ " + (u if len(u) <= max_len else u[: max_len - 2] + "…")
     if name == "view_image":
         return str(args.get("path", ""))
+    if name == "show_image":
+        what = str(args.get("path") or args.get("url") or "")
+        return "image " + (what if len(what) <= max_len - 6 else what[:max_len - 7] + "…")
     if name == "watch_video":
         u = str(args.get("url", ""))
         return "▶ " + (u if len(u) <= max_len else u[: max_len - 2] + "…")

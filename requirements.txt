@@ -27,6 +27,12 @@ pyyaml>=6.0
 # release can take away without anything here noticing until import time.
 markdown-it-py>=2.2.0
 
+# The image pane's renderer (/show_image). Pillow does the decode, EXIF
+# rotation and the resize that turns one picture into coloured half blocks.
+# It is imported lazily, so a harness without it still starts and only the
+# viewer reports the missing package.
+Pillow>=10.0
+
 # The visual browser (/see, browse, watch_video). Playwright drives a real
 # Chromium so a page's JavaScript has run before it is read; the browser binary
 # itself is installed separately (`python -m playwright install chromium`), and

@@ -841,6 +841,7 @@ the file up too.
 | `web_fetch` | no | Pull down a URL. |
 | `browse` | no | Render a page in a real browser and **see** it: screenshots attached, plus text, media, links and comments. |
 | `view_image` | no | Look at a local image, screenshot or GIF (animated GIFs can be sampled into frames). |
+| `show_image` | no | Display an image to **you** in a resizable image pane the model can open and update. |
 | `watch_video` | no | Pull a video's metadata and thumbnail, and sample frames from the opening seconds. |
 | `generate_image` | no | Generate an image from a prompt and save it under `images/` (needs a Logfare key). |
 | `mcp_<server>_<tool>` | **yes** | Any tool from a connected MCP server. See [MCP](#mcp). |
@@ -1940,6 +1941,47 @@ what makes `/see` work out of the box here.
 
 ---
 
+## The image pane
+
+Ask for a picture and the model opens it beside the transcript:
+
+```
+show me the screenshot of that page
+display the thumbnail you just found
+show https://example.com/diagram.png
+```
+
+The model calls `show_image` with a local path or an http(s) URL. It does not
+describe the picture; it puts it on screen. The pane is a real viewer, not a
+one-line preview:
+
+| Control | Action |
+|---|---|
+| `+` / `-` (or mouse wheel) | zoom in / out |
+| arrow keys | pan the zoomed picture |
+| `0` | fit to the pane |
+| `[` / `]` | narrow / widen the pane |
+| drag the left edge | resize it |
+| `q` / `Esc` | close it |
+| click the picture | give it the keyboard; click the prompt to type again |
+
+The drawing is **coloured half blocks** — one terminal cell carries two
+vertical samples, foreground and background — so it works in any true-colour
+terminal without Kitty's or iTerm2's graphics protocol. Zoom past 100% crops
+into the picture rather than scaling it up into a blur; at 100% it is
+letterboxed. A photo, a screenshot, a downloaded thumbnail or a GIF's first
+frame all work; `Pillow` decodes and honours EXIF rotation.
+
+`show_image` is display-only and deliberately does **not** attach the image to
+the model's context. `view_image` is the other half: that is how the model
+looks at the picture and reasons about it. The two can be used together — look,
+then show the operator what you found.
+
+The pane lives in `~/.zimzilla`'s UI only; it writes nothing to the working
+tree. URL fetches go through the scope guard before the image is downloaded.
+
+---
+
 ## OSINT
 
 `/osint` runs open-source intelligence on a target you declare. It is a
@@ -2980,6 +3022,7 @@ zimzilla/                     the package
   sandbox.py                  the filesystem jail
   images.py                   image attachments — read, fit, hand to either protocol
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
+  ui/imageview.py             the image pane's half-block renderer
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
@@ -3041,6 +3084,7 @@ python tests/test_inferx.py        # /inferx-* — the key-gated catalog, the te
 python tests/test_inferbase.py     # /inferbase-* — the price band, the two routes, the wiring
 python tests/test_vision.py        # /see, browse, view_image — images, browser, screenshots
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
+python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

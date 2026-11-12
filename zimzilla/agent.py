@@ -312,6 +312,9 @@ searching the web, and seeing it. Work directly and decisively:
   the page and attaches screenshots to the conversation, so look at them
   before describing what is on the page. view_image looks at a picture again;
   watch_video samples a video's frames when the page only shows a player.
+- When the operator asks to SEE a picture — "show me the image", "display that
+  screenshot" — call show_image with its path or URL. That opens their
+  resizable image pane; view_image is for when *you* need to look at it.
 
 The working directory is {workdir}. All file paths are relative to it.
 {scope_note}"""

@@ -632,6 +632,11 @@ def _download(url: str, dest: Path, *, timeout: float = 12.0) -> Path | None:
     return dest
 
 
+def download_image(url: str, dest: Path, *, timeout: float = 12.0) -> Path | None:
+    """Fetch one image, bounded and never raising. Public wrapper for tools."""
+    return _download(url, dest, timeout=timeout)
+
+
 def _media_kind(url: str, mtype: str = "") -> str:
     low = (url or "").lower()
     if mtype == "image/gif" or low.split("?")[0].endswith(".gif"):

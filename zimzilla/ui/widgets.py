@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from rich.cells import cell_len, get_character_cell_size
 from rich.text import Text
 from textual import events
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.events import Click, MouseDown, MouseMove, MouseUp
 from textual.expand_tabs import expand_tabs_inline
@@ -14,6 +16,7 @@ from textual.geometry import Offset, clamp
 from textual.widgets import Input, Static
 
 from ..theme import Palette
+from .imageview import MAX_ZOOM, MIN_ZOOM, halfblocks, load, zoom_label
 from .rain import RainRichLog
 
 #: A pasted line break is drawn as this glyph. The field is one row tall, so a
@@ -586,6 +589,258 @@ class ChatPane(Vertical):
 
     def flash_cursor(self) -> None:
         self._cursor_on = not self._cursor_on
+
+
+class ImagePane(Static):
+    """A resizable terminal image viewer, driven by the model or the operator.
+
+    The picture is drawn as coloured half blocks (see ``ui/imageview.py``),
+    which works in any true-colour terminal rather than requiring Kitty's or
+    iTerm2's graphics protocol. It is hidden until ``show_image`` puts something
+    in it, and then behaves like a viewer: ``+``/``-`` zoom, arrows pan, ``[``
+    and ``]`` resize the pane, and dragging the left edge does the same.
+
+    **Focus is deliberate.** Clicking the picture focuses it so the keys reach
+    the viewer; clicking the prompt returns them to the message field. The
+    model can open and update the pane mid-turn without stealing the keyboard.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    ImagePane {
+        display: none;
+        width: 44;
+        min-width: 20;
+        max-width: 100;
+        height: 100%;
+        padding: 0 1;
+        border-left: heavy $secondary;
+        overflow: hidden;
+    }
+    ImagePane.visible { display: block; }
+    ImagePane.-resizing { border-left: heavy $accent; }
+    ImagePane:focus { border-left: heavy $accent; }
+    """
+
+    BINDINGS = [
+        Binding("plus", "zoom_in", "zoom in", show=False),
+        Binding("equals", "zoom_in", "zoom in", show=False),
+        Binding("kp_add", "zoom_in", "zoom in", show=False),
+        Binding("minus", "zoom_out", "zoom out", show=False),
+        Binding("kp_subtract", "zoom_out", "zoom out", show=False),
+        Binding("0", "fit", "fit", show=False),
+        Binding("left", "pan_left", "pan left", show=False),
+        Binding("right", "pan_right", "pan right", show=False),
+        Binding("up", "pan_up", "pan up", show=False),
+        Binding("down", "pan_down", "pan down", show=False),
+        Binding("left_square_bracket", "narrower", "narrower", show=False),
+        Binding("right_square_bracket", "wider", "wider", show=False),
+        Binding("q", "close", "close", show=False),
+        Binding("escape", "close", "close", show=False),
+    ]
+
+    MIN_WIDTH = 20
+    MAX_WIDTH = 100
+    DEFAULT_WIDTH = 44
+    #: Columns on the left edge that start a resize drag.
+    RESIZE_GUTTER = 2
+    #: Pixels one arrow press moves the picture.
+    PAN_STEP = 12
+
+    def __init__(self, palette: Palette, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.palette = palette
+        self.image = None
+        self.path = ""
+        self.caption = ""
+        self.zoom = 1.0
+        self.pan = [0.0, 0.0]
+        self._width = self.DEFAULT_WIDTH
+        self._dragging = False
+        self._drag_origin_x = 0
+        self._drag_origin_width = self.DEFAULT_WIDTH
+        self._error = ""
+
+    # ---- content ----------------------------------------------------------
+    def show(self, path: str, *, caption: str = "", zoom: float | None = None,
+             width: int | None = None) -> None:
+        """Load *path* and display it. Raises on an unreadable image."""
+        self.image = load(path)
+        self.path = str(path)
+        self.caption = caption or ""
+        if zoom is not None:
+            self.zoom = min(MAX_ZOOM, max(MIN_ZOOM, float(zoom)))
+        self.pan = [0.0, 0.0]
+        self._error = ""
+        self.add_class("visible")
+        if width:
+            self._apply_width(width)
+        else:
+            self._apply_width(self._width or self.DEFAULT_WIDTH)
+        self.render_pane()
+        try:
+            self.focus()
+        except Exception:  # noqa: BLE001 - a pane shown before mounting
+            pass
+
+    def hide(self) -> None:
+        """Hide the pane. The model can show it again with another call."""
+        self.remove_class("visible")
+        self.remove_class("-resizing")
+        self._dragging = False
+
+    def action_close(self) -> None:
+        self.hide()
+        try:
+            self.app.query_one("#input", Input).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- view controls ----------------------------------------------------
+    def _set_zoom(self, value: float) -> None:
+        self.zoom = min(MAX_ZOOM, max(MIN_ZOOM, float(value)))
+        self.render_pane()
+
+    def action_zoom_in(self) -> None:
+        self._set_zoom(self.zoom * 1.25)
+
+    def action_zoom_out(self) -> None:
+        self._set_zoom(self.zoom / 1.25)
+
+    def action_fit(self) -> None:
+        self.zoom = 1.0
+        self.pan = [0.0, 0.0]
+        self.render_pane()
+
+    def action_pan_left(self) -> None:
+        self.pan[0] -= self.PAN_STEP
+        self.render_pane()
+
+    def action_pan_right(self) -> None:
+        self.pan[0] += self.PAN_STEP
+        self.render_pane()
+
+    def action_pan_up(self) -> None:
+        self.pan[1] -= self.PAN_STEP
+        self.render_pane()
+
+    def action_pan_down(self) -> None:
+        self.pan[1] += self.PAN_STEP
+        self.render_pane()
+
+    def action_wider(self) -> None:
+        self._apply_width((self.size.width or self._width) + 4)
+
+    def action_narrower(self) -> None:
+        self._apply_width((self.size.width or self._width) - 4)
+
+    def _apply_width(self, value: int) -> None:
+        limit = self.MAX_WIDTH
+        try:
+            limit = min(limit, max(self.MIN_WIDTH, self.screen.size.width - 40))
+        except Exception:  # noqa: BLE001 - before the screen exists
+            pass
+        width = max(self.MIN_WIDTH, min(limit, int(value)))
+        self._width = width
+        self.styles.width = width
+        # During a drag, the layout's resize event paints; rendering here as
+        # well would decode and re-grid the picture twice per mouse move.
+        if not self._dragging:
+            self.render_pane()
+
+    # ---- rendering --------------------------------------------------------
+    def render_pane(self) -> None:
+        """Repaint header, picture and key hint at the current size."""
+        p = self.palette
+        size = self.size
+        # `size` is the widget including padding; content_size is what the
+        # cells actually paint into.
+        try:
+            content = self.content_size
+            cols = max(10, content.width)
+            rows = max(4, content.height)
+        except Exception:  # noqa: BLE001
+            cols, rows = max(10, size.width - 2), max(4, size.height)
+        header = Text()
+        name = Path(self.path).name if self.path else "no image"
+        header.append("IMAGE  ", style=f"bold {p.accent}")
+        header.append(name[:max(8, cols - 18)], style=f"bold {p.primary}")
+        header.append(f"  {zoom_label(self.zoom)}", style=p.dim)
+        header.truncate(max(1, cols))
+        header.append("\n")
+        body_rows = max(1, rows - 3)
+        if self.image is None:
+            body = Text("(no image yet — the model can call show_image)\n",
+                        style=p.dim)
+        elif self._error:
+            body = Text(self._error + "\n", style=p.amber)
+        else:
+            body = halfblocks(self.image, cols, body_rows, zoom=self.zoom,
+                              pan=(self.pan[0], self.pan[1]))
+        footer = Text()
+        footer.append("+/- zoom · arrows pan · [ ] width · q close",
+                      style=p.dim)
+        footer.truncate(max(1, cols))
+        header.append_text(body)
+        header.append("\n")
+        header.append_text(footer)
+        if self.caption:
+            header.append("\n")
+            header.append(self.caption[:cols], style=p.dim)
+        self.update(header)
+
+    def on_resize(self, _event) -> None:
+        if self.has_class("visible"):
+            self.render_pane()
+
+    def on_mount(self) -> None:
+        if self.has_class("visible"):
+            self.render_pane()
+
+    # ---- mouse ------------------------------------------------------------
+    def on_click(self, event: Click) -> None:
+        event.stop()
+        self.focus()
+
+    def on_mouse_scroll_up(self, event) -> None:
+        event.stop()
+        self.action_zoom_in()
+
+    def on_mouse_scroll_down(self, event) -> None:
+        event.stop()
+        self.action_zoom_out()
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        if event.offset.x > self.RESIZE_GUTTER:
+            return
+        event.stop()
+        self.screen.clear_selection()
+        self._dragging = True
+        self._drag_origin_x = event.screen_x
+        self._drag_origin_width = self.size.width or self._width
+        self.add_class("-resizing")
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        # The pane sits on the right of the transcript: dragging its left edge
+        # leftward grows it, the same gesture as the loop and telemetry rails.
+        delta = self._drag_origin_x - event.screen_x
+        self._apply_width(self._drag_origin_width + delta)
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        self._dragging = False
+        self.remove_class("-resizing")
+        self.release_mouse()
+        self.render_pane()
 
 
 class StatusBar(Static):

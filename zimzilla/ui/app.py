@@ -77,7 +77,8 @@ from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
 from .web import WaveWeb
-from .widgets import ChatPane, HeaderBar, PromptInput, StatusBar, ZimPane
+from .widgets import (ChatPane, HeaderBar, ImagePane, PromptInput, StatusBar,
+                      ZimPane)
 
 
 #: What `/zim-opencode` says while it works. Deliberately no counts: how many
@@ -1374,6 +1375,7 @@ class ZimZillaApp(App):
         with Horizontal(id="main"):
             yield LoopRail(self.palette)
             yield ChatPane(self.palette, rain=self.rain_on)
+            yield ImagePane(self.palette)
             yield ZimPane(self.palette)
             yield TelemetryRail(self.palette, total_context=self.cfg.context_window)
         with Vertical(id="bottom-dock"):
@@ -2188,6 +2190,12 @@ class ZimZillaApp(App):
                     R.tool_result_panel(ev["name"], args, ev["output"], p,
                                         ev["is_error"], ev.get("meta"))
                 )
+            # A tool can put a picture in the operator's viewer. This is a UI
+            # side effect of the tool result, not a model turn: show_image
+            # returns the path and the pane is opened here.
+            pane_info = (ev.get("meta") or {}).get("image_pane")
+            if pane_info:
+                self._show_image_pane(pane_info)
             if tele is not None:
                 tele.note_result(ev["name"], not ev["is_error"])
             if loop is not None:
@@ -2371,6 +2379,35 @@ class ZimZillaApp(App):
                               bar.output_tokens)
             if loop is not None:
                 loop.set_stage("idle")
+
+    # ---- image pane -------------------------------------------------------
+    def _image_pane(self) -> ImagePane | None:
+        try:
+            return self.query_one(ImagePane)
+        except Exception:  # noqa: BLE001 - before compose, or tearing down
+            return None
+
+    def _show_image_pane(self, info: dict) -> None:
+        """Open or update the viewer from a ``show_image`` tool result."""
+        pane = self._image_pane()
+        if pane is None:
+            return
+        path = str(info.get("path") or "")
+        if not path:
+            return
+        try:
+            pane.show(
+                path,
+                caption=str(info.get("caption") or ""),
+                zoom=info.get("zoom"),
+                width=info.get("width"),
+            )
+        except Exception as e:  # noqa: BLE001 - a broken image must not kill a turn
+            self._sys_line(f"image pane: {type(e).__name__}: {e}", warn=True)
+            return
+        self._sys_line(
+            f"image shown — {path}   (+/- zoom · arrows pan · [ ] width · q close)",
+            ok=True)
 
     # ---- rails helpers ----------------------------------------------------
     def _loop_rail(self) -> LoopRail | None:
@@ -6655,6 +6692,10 @@ class ZimZillaApp(App):
             self.query_one(ZimPane).apply_palette(p)
         except Exception:
             pass
+        pane = self._image_pane()
+        if pane is not None:
+            pane.palette = p
+            pane.render_pane()
 
         h = self.query_one(HeaderBar)
         h.palette = p
