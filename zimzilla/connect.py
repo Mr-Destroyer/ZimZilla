@@ -161,8 +161,9 @@ def create_bridge(spec: str, *, name: str | None = None,
     if command is None:
         if adapter == "kdenlive":
             command = list(ADAPTERS["kdenlive"]["command"])
-        elif Path(spec).exists() or shutil.which(spec):
-            command = [spec]
+        elif spec.lower() in ("neovim", "nvim") and shutil.which("nvim"):
+            # `neovim` is the project name; the binary is `nvim`.
+            command = ["nvim"]
         else:
             command = [spec]
     if adapter == "kdenlive":
@@ -175,10 +176,6 @@ def create_bridge(spec: str, *, name: str | None = None,
         "window_class": window_class,
         "command": list(command),
         "project": str(project or ""),
-        # The MCP pane starts a TUI app and listens here; the bridge's
-        # app_type/app_keys send to that process instead of guessing which OS
-        # window has focus.
-        "control_socket": str(bridge_dir(cfg_name) / "control.sock"),
     }
     server, cfg_path = _write_bridge(cfg_name, config)
     entry = mcp.ServerConfig(

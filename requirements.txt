@@ -38,10 +38,6 @@ Pillow>=10.0
 # rather than a 44-column block mosaic.
 textual-image>=0.14.3
 
-# The MCP pane's embedded terminal (Neovim and other TUIs). pyte emulates the
-# screen; the PTY is stdlib.
-pyte>=0.8.1
-
 # The optional voice: Edge neural TTS (no key, network) played through mpv or
 # ffplay; /voice off and --no-voice disable it.
 edge-tts>=7.0

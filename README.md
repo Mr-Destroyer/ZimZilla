@@ -958,50 +958,24 @@ the application's keyboard shortcuts, its file/API adapter, or the Kdenlive
 timeline tools. A button that only responds to a mouse is not reachable through
 this bridge, and it says so instead of pretending.
 
-### Live MCP app view
+### MCP access (no live panel)
 
-The first MCP tool call opens the **MCP pane** beside the transcript, and it
-opens **the application itself**, not just a log.
+There is no live MCP pane. It was removed because the GUI screenshot loop and
+the embedded PTY cost more than they gave: ZimZilla still **accesses** the
+connected application through the bridge's MCP tools, but the app stays in its
+own window.
 
-- **TUI apps** — Neovim, Vim, htop, lazygit, a shell: the pane runs the real
-  process on a PTY and renders its screen with `pyte`. It is interactive when
-  focused. This is Neovim’s actual buffer, cursor and status line, not a
-  re-drawn approximation.
-- **GUI apps** — Kdenlive and anything else that opens a window: the pane
-  captures the bridged window with `grim` roughly once a second. The MCP tools
-  drive the real window; the view is what is on screen.
-- **The activity tab** — press `a` (click the pane header first, so the editor
-  does not eat the key) to switch between the app and the activity stream:
-  server/tool, arguments, running/failed/done, result, elapsed time, and a
-  **unified diff** when the call changed a local file.
+```text
+/connect kdenlive ~/Videos/cut.kdenlive
+/connect neovim ~/project/main.py
+```
 
-For a TUI app, the bridge’s `app_type` and `app_keys` are routed to the
-embedded process through a local control socket in the bridge directory
-instead of being typed into whichever OS window happens to have focus. That is
-what makes “edit a file in Neovim” and “watch it happen in the pane” the same
-action. `app_focus` focuses the embedded terminal; `app_launch` reports that it
-is already running there. GUI apps keep using the real window and the normal
-desktop adapter.
-
-It is a normal pane: drag its left edge or press `[`/`]` to resize; click the
-header for the pane keys, the body for the embedded app; `c` clears the
-activity log; `q`/`Esc` closes it and stops the embedded process.
-
-The image pane and the MCP pane share the right-hand column. Showing an image
-closes the MCP pane; the next MCP call brings it back. Two 52-column panes plus
-the rails would leave no transcript on a normal terminal.
-
-The activity diff is best-effort by design. It detects a file named in the
-call’s arguments (`path`, `file`, `file_path`, `target`, `buffer`, …), reads it
-before and after, and only inside the working tree/state dir. An MCP server
-that edits a buffer without writing the file, or names no path, still shows its
-arguments and result — but there is no disk change to diff, and the pane does
-not invent one.
-
-Bridges generated before this view existed do not carry a control socket in
-`bridge.json`; the pane derives the same default path, but the bridge process
-must be running the current `zimzilla.bridge`. Re-run
-`/connect neovim --replace` (or update the install) after upgrading.
+The model can call `app_list_windows`, `app_focus`, `app_type`, `app_keys`,
+`app_screenshot`, `app_ocr`, and the Kdenlive timeline tools exactly as before.
+`app_screenshot` returns a PNG path; use `view_image` to look at it or
+`show_image` to put it in the image pane. Activity appears in the transcript as
+normal MCP tool cards, with the normal permission rules (`--ask-mcp` to restore
+the modal, plan mode still denying MCP).
 
 ### Generated files
 
@@ -3215,7 +3189,6 @@ zimzilla/                     the package
   images.py                   image attachments — read, fit, hand to either protocol
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
   ui/imageview.py             the image pane's half-block/pixel renderer
-  ui/terminalview.py          the MCP pane's PTY terminal (pyte)
   voice.py                    launch greeting and idle recap (Edge TTS / mpv)
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
@@ -3282,7 +3255,6 @@ python tests/test_vision.py        # /see, browse, view_image — images, browse
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
-python tests/test_mcp_pane.py      # MCP pane — app view, PTY input, activity diff
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
 ```
