@@ -737,11 +737,12 @@ class ToolError(Exception):
 def needs_permission(name: str) -> bool:
     """Whether a call must be confirmed before it runs.
 
-    MCP tools are gated, and they are the reason this is a function rather than
-    a set membership test: their names are not known until a server has been
-    connected to, so they cannot be listed in ``GATED_TOOLS``. A tool the
-    operator has not seen before does not run unattended — an MCP server is
-    code they chose to run, and its tools are as powerful as it makes them.
+    MCP tools return True here because their effect is not known to the
+    harness: the call is previewed and the tool is serialised like a write.
+    The *decision* is the agent's: MCP is auto-approved by default (the server
+    is code the operator chose to connect), unless ``--ask-mcp`` restores the
+    per-call gate. Their names are not known until a server connects, which is
+    why this is a function rather than a ``GATED_TOOLS`` membership test.
     """
     if name in GATED_TOOLS:
         return True

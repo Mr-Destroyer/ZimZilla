@@ -896,6 +896,22 @@ class Agent:
 
         return MODES.get(self.cfg.mode, MODES[DEFAULT_MODE])
 
+    def _tool_is_auto(self, name: str) -> bool:
+        """Whether *name* runs without the permission modal.
+
+        MCP is auto-approved by default: the server is code the operator
+        connected, and the pane drives editors keystroke by keystroke. The
+        mode's deny branch runs before this, so plan mode still refuses MCP
+        outright. ``--ask-mcp`` / ``ZIMZILLA_MCP_AUTO=0`` restores the gate.
+        """
+        from . import mcp as mcp_mod
+
+        return (
+            name in self._mode_policy().get("auto", set())
+            or self.scope.armed
+            or (self.cfg.mcp_auto and mcp_mod.is_mcp_tool(name))
+        )
+
     def tool_schemas(self) -> list[dict]:
         """The tool set advertised to the model for the current mode."""
         deny = self._mode_policy().get("deny", set())
@@ -1709,10 +1725,7 @@ class Agent:
                         # kept because it states the arming guarantee in the one
                         # place that enforces it — if a mode is ever added that
                         # leaves a tool merely gated, arming still holds.
-                        auto = (
-                            call.name in policy.get("auto", set())
-                            or self.scope.armed
-                        )
+                        auto = self._tool_is_auto(call.name)
                         gate = not auto and (
                             call.name not in self._always_allowed
                             and self.permission_handler is not None

@@ -361,6 +361,12 @@ class Config:
     # is the difference between watching the model work and watching a blank
     # line. `/think` toggles it; `--no-think` turns it off at launch.
     show_thinking: bool = True
+    #: MCP tools are auto-approved by default. An MCP server is code the
+    #: operator chose to connect, and a pane that asks before every keystroke
+    #: is unusable for driving an editor. Set ``ZIMZILLA_MCP_AUTO=0`` (or launch
+    #: with ``--ask-mcp``) to restore the per-call confirmation. Plan mode still
+    #: denies MCP outright — its effects cannot be called read-only.
+    mcp_auto: bool = True
     mode: str = DEFAULT_MODE
     # Optional path to a doctrine file; only consulted in zim mode. Resolved at
     # launch by config.find_agents_file, and re-resolved on /mode zim so a
@@ -418,6 +424,8 @@ class Config:
             # ordinary value for an environment variable and reading it as
             # true would make the opt-out impossible to express.
             openai_stream=os.environ.get("ZIMZILLA_OPENAI_STREAM", "1").strip()
+            not in ("0", "false", "no", "off"),
+            mcp_auto=os.environ.get("ZIMZILLA_MCP_AUTO", "1").strip()
             not in ("0", "false", "no", "off"),
             # The environment names a level for this session; the remembered
             # one is only consulted when it does not, so a launch flag or an

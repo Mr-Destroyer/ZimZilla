@@ -881,10 +881,12 @@ startup, off the UI thread, so a slow one never holds up the prompt.
 Tools are namespaced `mcp_<server>_<tool>`, so two servers may both offer
 `search` without colliding with each other or with the harness's own tools.
 
-**They are gated.** Every MCP call asks first, in every mode — an MCP server is
-code you chose to run, and its tools are as powerful as it makes them. Plan
-mode denies them outright: their effect is decided by the server, so they
-cannot be called read-only.
+**They are auto-approved by default.** An MCP server is code *you* chose to
+connect, and a panel that asks before every keystroke is unusable for driving
+an editor. MCP tools therefore run unattended in the ordinary modes. Launch
+with `--ask-mcp` (or export `ZIMZILLA_MCP_AUTO=0`) to restore per-call
+confirmation. Plan mode still denies them outright: their effect is decided by
+the server, so they cannot be called read-only.
 
 A server that will not start is reported by name and does not stop the others —
 one broken entry in `mcp.json` costs you that server, not the session.
@@ -1010,9 +1012,9 @@ must be running the current `zimzilla.bridge`. Re-run
 ```
 
 The directory is mode 700 and `bridge.json`/`mcp.json` are mode 600. The
-bridge has no credentials of its own. MCP tools remain gated by the normal MCP
-permission rule, so a generated bridge does not turn the harness into an
-unattended desktop driver.
+bridge has no credentials of its own. Its tools follow the normal MCP rule:
+auto-approved by default, `--ask-mcp` to require confirmation, and denied
+outright in plan mode.
 
 ## Upstreams
 

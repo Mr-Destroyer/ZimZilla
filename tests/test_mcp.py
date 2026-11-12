@@ -231,6 +231,25 @@ def test_the_tool_layer_forwards() -> None:
         reg.close()
 
 
+def test_mcp_auto_approval() -> None:
+    """MCP runs unattended by default; --ask-mcp restores the gate."""
+    from zimzilla.agent import Agent
+
+    auto = Agent(Config(mode="auto", mcp_auto=True))
+    check("auto: an MCP tool is unattended by default",
+          auto._tool_is_auto("mcp_test_echo") is True)
+    check("auto: an ordinary gated tool still uses its mode",
+          auto._tool_is_auto("read_file") is False)
+    check("auto: bash is auto only in auto mode",
+          auto._tool_is_auto("bash") is True)
+    ask = Agent(Config(mode="auto", mcp_auto=False))
+    check("auto: --ask-mcp restores the MCP gate",
+          ask._tool_is_auto("mcp_test_echo") is False)
+    plan = Agent(Config(mode="plan", mcp_auto=True))
+    check("auto: plan mode still denies MCP before the gate",
+          plan._denied("mcp_test_echo") is not None)
+
+
 def test_plan_mode_denies_mcp() -> None:
     """An MCP tool's effect is the server's, so it cannot be called read-only."""
     check("plan: the mode denies the mcp family",
@@ -347,6 +366,7 @@ def main() -> int:
     test_a_server_that_writes_junk_is_named()
     test_names_are_namespaced()
     test_the_tool_layer_forwards()
+    test_mcp_auto_approval()
     test_plan_mode_denies_mcp()
     test_one_broken_server_does_not_stop_the_others()
     test_config_round_trips()
