@@ -53,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ask-mcp", action="store_true",
                         help="ask before every MCP tool call (default: auto-allow; "
                              "MCP is the operator's own connected code)")
+    parser.add_argument("--no-voice", action="store_true",
+                        help="do not speak the launch greeting or turn recaps")
     parser.add_argument("--theme", default=None, choices=THEME_NAMES,
                         help="colour theme (system = match the terminal's own colours)")
     parser.add_argument("--rain", action="store_true",
@@ -252,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         # the feature off, which is its entire job.
         auto_compact=False if args.no_auto_compact else None,
         mcp_auto=False if args.ask_mcp else None,
+        voice=False if args.no_voice else None,
         # `0` is a real value here (percentage-only), so it is passed through
         # rather than folded into the None-means-default rule.
         compact_tokens=args.compact_at,

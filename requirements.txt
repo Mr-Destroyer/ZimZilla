@@ -42,6 +42,10 @@ textual-image>=0.14.3
 # screen; the PTY is stdlib.
 pyte>=0.8.1
 
+# The optional voice: Edge neural TTS (no key, network) played through mpv or
+# ffplay; /voice off and --no-voice disable it.
+edge-tts>=7.0
+
 # The visual browser (/see, browse, watch_video). Playwright drives a real
 # Chromium so a page's JavaScript has run before it is read; the browser binary
 # itself is installed separately (`python -m playwright install chromium`), and

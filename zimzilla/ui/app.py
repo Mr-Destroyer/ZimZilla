@@ -65,6 +65,7 @@ from .. import team as team_mod
 from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
 from .. import unrestricted as unr_mod
+from .. import voice as voice_mod
 from .. import unorouter as uno_mod
 from .. import wandb as wb_mod
 from ..agent import Agent, Deliverable
@@ -874,6 +875,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/help", "this reference"),
         ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored | blackhat"),
         ("/clear", "wipe the transcript and conversation history"),
+        ("/voice [on|off]", "spoken launch greeting and end-of-turn recap"),
         ("/scope", "show allow.yaml / out-of-scope.yaml status"),
         ("/exit", "leave the harness (Ctrl+D also works)"),
     ]),
@@ -1304,6 +1306,12 @@ class ZimZillaApp(App):
             can_peer=self._in_pane,
             peer_inbox=self._drain_peer_inbox if self._in_pane else None,
         )
+        # The voice is a small local recap, not a model call. It is created
+        # before the first turn so the launch greeting can use it.
+        self._voice = voice_mod.Voice(enabled=self.cfg.voice,
+                                      state_dir=self.cfg.state_dir)
+        self._voice_facts: dict = {"tools": [], "files": []}
+        self._voice_error = ""
         # While a modal (permission gate) is up, the prompt must be disabled so
         # approval keystrokes like "y" don't leak into it.
         self._modal_depth = 0
@@ -1506,6 +1514,7 @@ class ZimZillaApp(App):
             self.agent.scope.armed,
         )
         self._splash()
+        self._voice_welcome()
         # A session relaunched by `/panes` arrives with its conversation already
         # in `agent.messages` and an empty transcript pane — `/load` restores the
         # history but nothing repaints it. Replaying it here is what makes
@@ -2003,6 +2012,8 @@ class ZimZillaApp(App):
         self._cancelled = False
         self._stream_buf = ""
         self._reason_buf = ""
+        self._voice_facts = {"tools": [], "files": []}
+        self._voice_error = ""
         self._set_rain(False)  # keep the transcript readable during a turn
 
         loop = self._loop_rail()
@@ -2058,6 +2069,7 @@ class ZimZillaApp(App):
                 loop.set_counters(self.agent.turn_count, bar.iterations)
             self._sync_rails()
             self._set_rain(self.rain_on)
+            self._voice_recap(cancelled=self._cancelled)
             if self._cancelled:
                 self.agent.cancel_turn()
                 self._sys_line("turn interrupted", warn=True)
@@ -2191,6 +2203,7 @@ class ZimZillaApp(App):
                 loop.set_stage("calling")
             if ev.get("gated"):
                 bar.set_activity(f"awaiting permission: {ev['name']}", busy=True)
+            self._voice_note_call(ev)
             if str(ev.get("name", "")).startswith("mcp_"):
                 self._mcp_call(ev)
 
@@ -2209,6 +2222,7 @@ class ZimZillaApp(App):
             # A tool can put a picture in the operator's viewer. This is a UI
             # side effect of the tool result, not a model turn: show_image
             # returns the path and the pane is opened here.
+            self._voice_note_result(ev)
             if str(ev.get("name", "")).startswith("mcp_"):
                 self._mcp_result(ev)
             pane_info = (ev.get("meta") or {}).get("image_pane")
@@ -2231,6 +2245,7 @@ class ZimZillaApp(App):
             self._flush_stream(chat, p)
             chat.card_finish()
             chat.write_block(R.error_block(ev["message"], p))
+            self._voice_error = str(ev.get("message") or "")
 
         elif etype == "continuing":
             # The soft round cap was passed because the turn is still getting
@@ -2520,6 +2535,87 @@ class ZimZillaApp(App):
                          is_error=bool(ev.get("is_error")),
                          diff=diff, elapsed=elapsed)
 
+    # ---- voice ------------------------------------------------------------
+    def _voice_welcome(self) -> None:
+        """The launch greeting, visual and spoken."""
+        self._sys_line("◈ hello sir — ZimZilla online. What are we building?",
+                       ok=True)
+        self._voice.say("Hello sir. ZimZilla is online. What are we building?")
+
+    def _voice_note_call(self, ev: dict) -> None:
+        name = str(ev.get("name") or "")
+        if not name:
+            return
+        self._voice_facts.setdefault("tools", []).append(name)
+        args = ev.get("args") or {}
+        for key in ("path", "file", "file_path", "filepath", "filename",
+                    "target", "buffer"):
+            value = args.get(key) if isinstance(args, dict) else None
+            if isinstance(value, str) and value.strip():
+                self._voice_facts.setdefault("files", []).append(value.strip())
+                break
+
+    def _voice_note_result(self, ev: dict) -> None:
+        if not ev.get("is_error"):
+            return
+        # A tool error is not necessarily a failed turn — the next call often
+        # fixes it. Kept for the case where the turn ends without an answer.
+        self._voice_error = str(ev.get("output") or "")
+
+    def _last_assistant_text(self) -> str:
+        for message in reversed(self.agent.messages or []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = [str(b.get("text") or "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text"]
+                text = " ".join(p for p in parts if p).strip()
+                if text:
+                    return text
+        return ""
+
+    def _voice_recap(self, *, cancelled: bool = False) -> None:
+        final = self._last_assistant_text()
+        # A tool failure that the turn recovered from is not worth announcing;
+        # only an answerless turn is.
+        error = "" if final else self._voice_error
+        text = voice_mod.turn_summary(
+            self._voice_facts, final, cancelled=cancelled, error=error)
+        self._voice.say(text)
+
+    def _cmd_voice(self, args) -> None:
+        """/voice [on|off] — spoken greeting and turn recaps."""
+        arg = str(args[0]).strip().lower() if args else ""
+        if arg in ("on", "off"):
+            self.cfg.voice = arg == "on"
+            self._voice.set_enabled(self.cfg.voice)
+            if self.cfg.voice:
+                self._sys_line("voice on — I will recap when I go idle", ok=True)
+                self._voice.say("Voice enabled, sir.")
+            else:
+                self._sys_line("voice off", ok=True)
+            return
+        if arg:
+            self._sys_line("usage: /voice [on|off]", warn=True)
+            return
+        state = "on" if self.cfg.voice else "off"
+        t = Text()
+        t.append("  voice: ", style=f"bold {self.palette.accent}")
+        t.append(state, style=f"bold {self.palette.primary}")
+        t.append("   backend: ", style=self.palette.dim)
+        if self._voice.available():
+            t.append("ready", style=self.palette.primary)
+        else:
+            t.append("no TTS backend / audio player", style=self.palette.amber)
+        if getattr(self._voice, "last_error", ""):
+            t.append(f"   last: {self._voice.last_error[:120]}",
+                     style=self.palette.amber)
+        t.append("\n")
+        self.query_one(ChatPane).write_block(t)
+
     # ---- image pane -------------------------------------------------------
     def _image_pane(self) -> ImagePane | None:
         try:
@@ -2781,6 +2877,8 @@ class ZimZillaApp(App):
         "mcp",
         # /connect writes a bridge and starts an MCP child; it starts no turn.
         "connect",
+        # A voice toggle is display/audio only.
+        "voice",
         # Same reasoning as /rain: a display toggle reads and writes only
         # harness state, starts no turn, and is most wanted while a turn is
         # running — which is exactly when the reasoning is on screen.
@@ -2826,6 +2924,7 @@ class ZimZillaApp(App):
             "limits": lambda a: self._cmd_limits(),
             "mcp": lambda a: self._cmd_mcp(a),
             "connect": lambda a: self._cmd_connect(a),
+            "voice": lambda a: self._cmd_voice(a),
             "team": lambda a: self._cmd_team(a),
             "see": lambda a: self._cmd_see(a),
             "osint": lambda a: self._cmd_osint(a),
@@ -10857,6 +10956,7 @@ class ZimZillaApp(App):
             ("/scope", "scope guard status", "scope"),
             ("/rain", "toggle the matrix rain", "rain"),
             ("/think", "show the model's reasoning", "think"),
+            ("/voice", "spoken launch greeting and turn recaps", "voice"),
             ("/effort", "raise or lower how hard the model thinks", "effort"),
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
@@ -11070,6 +11170,10 @@ class ZimZillaApp(App):
     def action_quit(self) -> None:
         try:
             phish_mod.stop()
+        except Exception:
+            pass
+        try:
+            self._voice.shutdown()
         except Exception:
             pass
         self.exit()

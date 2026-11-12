@@ -1862,6 +1862,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/theme green\|amber\|cyan\|system` | switch palette — `system` adopts the terminal's own colours |
 | `/rain` | toggle the matrix rain |
 | `/think` | show the model's own reasoning — where the endpoint forwards it |
+| `/voice [on\|off]` | spoken launch greeting and end-of-turn recap |
 | `/effort [low\|medium\|high\|off]` | how hard the model thinks — `reasoning_effort`, or a thinking budget, per protocol |
 | `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
 | `/zim-opencode [--model id] [--refresh] [-- args]` | open **opencode** in this terminal behind a fresh rotating IP — free models, no account, nothing global |
@@ -2107,6 +2108,37 @@ then show the operator what you found.
 
 The pane lives in `~/.zimzilla`'s UI only; it writes nothing to the working
 tree. URL fetches go through the scope guard before the image is downloaded.
+
+---
+
+## Voice
+
+ZimZilla says hello when it starts and tells you what it did when a turn goes
+idle:
+
+```text
+◈ hello sir — ZimZilla online. What are we building?
+Sir, I did the work. I worked on 2 files. ran 3 tools. Tests pass.
+```
+
+It is not another model call. The recap is built from the turn's real facts —
+the tools called, the files touched, any error, and the sentence the answer
+ended on — so it cannot invent work and it costs no tokens. The launch greeting
+is a fixed line.
+
+- Backend: Edge neural TTS (`edge-tts`, no key, network) played through `mpv`
+  or `ffplay`; `spd-say`/`espeak-ng` are fallbacks if installed.
+- It never blocks the UI: synthesis and playback run in a daemon thread, and a
+  newer utterance stops the old one.
+- No TTS backend, no audio server, a non-TTY stdout, or no network means
+  silence — never a failed turn. `/voice` shows the backend and the last error.
+- `/voice off` shuts it up for the session; `--no-voice` and
+  `ZIMZILLA_VOICE=0` start with it off. `/voice on` brings it back.
+- Secrets are redacted and code fences/links are stripped before speaking;
+  speech is capped at 320 characters.
+
+The voice is local display only. Nothing about it leaves the machine except the
+TTS request to Edge unless you switch to the offline fallback.
 
 ---
 
@@ -3152,6 +3184,7 @@ zimzilla/                     the package
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
   ui/imageview.py             the image pane's half-block/pixel renderer
   ui/terminalview.py          the MCP pane's PTY terminal (pyte)
+  voice.py                    launch greeting and idle recap (Edge TTS / mpv)
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
@@ -3218,6 +3251,7 @@ python tests/test_respan.py        # /zim-respan — free-only catalogue, profil
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_mcp_pane.py      # MCP pane — app view, PTY input, activity diff
+python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

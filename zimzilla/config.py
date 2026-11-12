@@ -361,6 +361,10 @@ class Config:
     # is the difference between watching the model work and watching a blank
     # line. `/think` toggles it; `--no-think` turns it off at launch.
     show_thinking: bool = True
+    #: Speak a welcome at launch and a recap when a turn goes idle. On by
+    #: default; a machine without a TTS backend or audio server simply stays
+    #: quiet. `/voice off`, --no-voice and ZIMZILLA_VOICE=0 disable it.
+    voice: bool = True
     #: MCP tools are auto-approved by default. An MCP server is code the
     #: operator chose to connect, and a pane that asks before every keystroke
     #: is unusable for driving an editor. Set ``ZIMZILLA_MCP_AUTO=0`` (or launch
@@ -426,6 +430,8 @@ class Config:
             openai_stream=os.environ.get("ZIMZILLA_OPENAI_STREAM", "1").strip()
             not in ("0", "false", "no", "off"),
             mcp_auto=os.environ.get("ZIMZILLA_MCP_AUTO", "1").strip()
+            not in ("0", "false", "no", "off"),
+            voice=os.environ.get("ZIMZILLA_VOICE", "1").strip()
             not in ("0", "false", "no", "off"),
             # The environment names a level for this session; the remembered
             # one is only consulted when it does not, so a launch flag or an
