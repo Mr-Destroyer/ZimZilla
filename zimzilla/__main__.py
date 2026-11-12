@@ -18,6 +18,7 @@ from . import openrouter as or_mod
 from . import sources as sources_mod
 from . import session as session_mod
 from . import tokenharbour as th_mod
+from . import respan as rp_mod
 from . import unrestricted as unr_mod
 from . import unorouter as uno_mod
 from . import update as update_mod
@@ -284,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     _remembered = sources_mod.current_key()
     for _key, _mod in (("tokenharbour", th_mod), ("openrouter", or_mod),
                        ("unorouter", uno_mod), ("unrestricted", unr_mod),
+                       ("respan", rp_mod),
                        ("antseed", as_mod),
                        ("aihubmix", ah_mod), ("beatapi", bp_mod),
                        ("moonmath", mm_mod)):

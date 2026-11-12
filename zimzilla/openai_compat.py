@@ -86,6 +86,11 @@ ANTHROPIC_HOSTS = (
     "openrouter.ai",
     "tokenharbor.ai",
     "unorouter.com",
+    # Respan's gateway serves Messages natively at its bare host; the OpenAI
+    # surface lives at /v1/chat/completions on the same host. Naming it here
+    # keeps a bare https://gateway.respan.ai from being read as Chat
+    # Completions by the /v1 heuristic (there is no /v1 in the base).
+    "respan.ai",
     # unrestricted.sh serves the Messages protocol natively at its bare host —
     # measured: POST /v1/messages answers an Anthropic-shaped 401 with no key,
     # and a real tool-using turn round-trips. The base URL carries no path, so

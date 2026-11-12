@@ -54,6 +54,7 @@ from .. import openrouter as or_mod
 from .. import osint_tree as osint_tree_mod
 from .. import phish as phish_mod
 from .. import payload as payload_mod
+from .. import respan as rp_mod
 from .. import reverse as reverse_mod
 from .. import session as session_mod
 from .. import shodan as shodan_mod
@@ -890,6 +891,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-openrouter", "switch upstream to OpenRouter (hosted)"),
         ("/zim-unorouter", "switch upstream to UnoRouter (hosted, free models)"),
         ("/zim-unrestricted", "switch upstream to unrestricted.sh (hosted, uncensored, probes for a model that answers)"),
+        ("/zim-respan", "switch upstream to Respan (hosted, free models only)"),
         ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
         ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
         ("/zim-moonmath", "switch upstream to Zro (hosted, free daily models)"),
@@ -916,6 +918,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/unorouter-models", "the live free catalog — what is free and usable"),
         ("/unrestricted-api-setup [key]", "store your unrestricted.sh API key (unr_sk_)"),
         ("/unrestricted-models", "the live catalog — free models, priced in dollars"),
+        ("/respan-api-setup [key]", "store your Respan API key — free models only"),
+        ("/respan-models", "the live catalog — models priced 0 in and 0 out"),
         ("/aihubmix-api-setup [key]", "store your AIHubMix API key (optional)"),
         ("/aihubmix-models", "the live free catalog — what is free and usable"),
         ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
@@ -2538,6 +2542,9 @@ class ZimZillaApp(App):
         # And unrestricted.sh's three, for the same reasons: a mode-600 write, a
         # catalogue read, and a client rebuild. None of them starts a turn.
         "unrestricted-api-setup", "unrestricted-models", "zim-unrestricted",
+        # Respan's three: the same mode-600 write, catalogue read and client
+        # rebuild, none of which starts a turn.
+        "respan-api-setup", "respan-models", "zim-respan",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
         "moonmath-api-setup", "moonmath-models", "zim-moonmath",
@@ -2686,6 +2693,9 @@ class ZimZillaApp(App):
             "unrestricted-api-setup": lambda a: self._cmd_gateway_key(
                 "unrestricted", a),
             "unrestricted-models": lambda a: self._cmd_models(["unrestricted"]),
+            "zim-respan": lambda a: self._cmd_zim_gateway("respan"),
+            "respan-api-setup": lambda a: self._cmd_gateway_key("respan", a),
+            "respan-models": lambda a: self._cmd_models(["respan"]),
             "zim-aihubmix": lambda a: self._cmd_zim_gateway("aihubmix"),
             "aihubmix-api-setup": lambda a: self._cmd_gateway_key("aihubmix", a),
             "aihubmix-models": lambda a: self._cmd_models(["aihubmix"]),
@@ -2979,6 +2989,11 @@ class ZimZillaApp(App):
         # estimate, which has never heard of these ids.
         unr_catalog = (unr_mod.cached_models()
                        if active == "unrestricted" else None)
+        # Respan's free-only catalogue. Its entries carry a window and a
+        # published price, but only the zero-priced chat models are ever
+        # offered — the module filters them.
+        resp_catalog = (rp_mod.cached_free_models()
+                        if active == "respan" else None)
         # AIHubMix's is fetched too. Read once here for the same reason as the
         # others: the fetch is the slow part and this is a render.
         ah_catalog = (ah_mod.cached_models()
@@ -3029,7 +3044,7 @@ class ZimZillaApp(App):
                 hosted = {"tokenharbour": "TokenHarbour", "openrouter": "OpenRouter",
                           "unorouter": "UnoRouter", "aihubmix": "AIHubMix",
                           "beatapi": "BeatAPI", "antseed": "AntSeed",
-                          "moonmath": "Zro (MoonMath.ai)"}
+                          "respan": "Respan", "moonmath": "Zro (MoonMath.ai)"}
                 label = src.label if src else hosted.get(active, active)
                 t.append("  source: ", style=p.dim)
                 t.append(label, style=p.dim)
@@ -3041,7 +3056,7 @@ class ZimZillaApp(App):
             order = self._model_display_order(
                 models,
                 th_catalog or as_catalog or uno_catalog or unr_catalog
-                or ah_catalog
+                or resp_catalog or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
                 or mm_catalog or ix_catalog or ib_catalog)
             for m in order:
@@ -3060,7 +3075,8 @@ class ZimZillaApp(App):
                 note = self._model_note(m, th_catalog, lf_catalog, as_catalog,
                                         uno_catalog, bp_catalog, ic_catalog,
                                         inf_catalog, nv_catalog, mm_catalog,
-                                        ix_catalog, ib_catalog, unr_catalog)
+                                        ix_catalog, ib_catalog, unr_catalog,
+                                        resp_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -3090,14 +3106,14 @@ class ZimZillaApp(App):
                     " — /unorouter-models shows the free\nones; free models are "
                     "listed first, and a paid one is priced by estimate\n",
                     style=p.dim)
-            elif active == "unrestricted":
+            elif active == "respan":
                 t.append(
-                    f"  catalog {_catalog_clause(unr_mod.catalog_age(), unr_mod.CACHE_TTL)}"
-                    " — /unrestricted-models shows the free\nones; prices are "
-                    "the gateway's own dollars per Mtok, not an\n"
-                    "  estimate. A zero price is not a permission: a model the "
-                    "balance does\n  not cover answers 400 \"for paid "
-                    "accounts\", and the price column\n  itself moves\n",
+                    f"  catalog {_catalog_clause(rp_mod.catalog_age(), rp_mod.CACHE_TTL)}"
+                    " — only models priced 0 in and 0 out are offered, so\n"
+                    "  /model cannot land on a paid id. The catalogue is public; "
+                    "a key is\n  needed to send, and a fresh account still "
+                    "answers $0 models with\n  401 activation_required until "
+                    "credits or a BYOK key are added\n",
                     style=p.dim)
             elif active == "aihubmix":
                 t.append(
@@ -3197,8 +3213,8 @@ class ZimZillaApp(App):
         # wrong answer was the common case rather than the corner.
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi", "unrestricted",
-                      "moonmath", "iteracompute", "infronai", "nvidia",
-                      "inferx", "inferbase") and (
+                      "respan", "moonmath", "iteracompute", "infronai",
+                      "nvidia", "inferx", "inferbase") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -3242,6 +3258,14 @@ class ZimZillaApp(App):
                     fetched, _ = unr_mod.fetch_models(creds[0] if creds else "")
                 else:
                     fetched = list(unr_catalog)
+            elif active == "respan":
+                # The catalogue is public, so this works before a key exists.
+                # Only free chat models are fetched: a paid id must be refused
+                # here, because `/model` is not allowed to offer one.
+                if resp_catalog is None:
+                    fetched, _ = rp_mod.free_models()
+                else:
+                    fetched = list(resp_catalog)
             elif active == "aihubmix":
                 # Keyless like OpenRouter's and UnoRouter's: /api/v1/models
                 # answers with no credential. Fetched rather than read from the
@@ -3338,6 +3362,8 @@ class ZimZillaApp(App):
                     uno_catalog = fetched
                 elif active == "unrestricted":
                     unr_catalog = fetched
+                elif active == "respan":
+                    resp_catalog = fetched
                 elif active == "aihubmix":
                     ah_catalog = fetched
                 elif active == "beatapi":
@@ -3413,7 +3439,7 @@ class ZimZillaApp(App):
                     ic_catalog=None, inf_catalog=None,
                     nv_catalog=None, mm_catalog=None,
                     ix_catalog=None, ib_catalog=None,
-                    unr_catalog=None) -> str:
+                    unr_catalog=None, resp_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -3456,6 +3482,8 @@ class ZimZillaApp(App):
             live = ix_mod.price_for(name, ix_catalog)
         if live is None:
             live = ib_mod.price_for(name, ib_catalog)
+        if live is None:
+            live = rp_mod.price_for(name, resp_catalog)
         if live is None:
             # unrestricted.sh publishes real dollars per million tokens, so this
             # is an exact rate rather than an estimate — and it is checked
@@ -4106,6 +4134,7 @@ class ZimZillaApp(App):
                 ("unorouter", uno_mod, "UnoRouter", "/unorouter-api-setup"),
                 ("unrestricted", unr_mod, "unrestricted.sh",
                  "/unrestricted-api-setup"),
+                ("respan", rp_mod, "Respan", "/respan-api-setup"),
                 ("aihubmix", ah_mod, "AIHubMix", "/aihubmix-api-setup"),
                 ("beatapi", bp_mod, "BeatAPI", "/beatapi-api-setup"),
                 ("iteracompute", ic_mod, "IteraCompute",
@@ -4184,7 +4213,7 @@ class ZimZillaApp(App):
             t.append("  switch with  /zim-logfare,  /zim-tokenharbour,\n"
                      "                 /zim-openrouter,\n"
                      "                 /zim-unorouter,  /zim-unrestricted,\n"
-                     "                 /zim-aihubmix,\n"
+                     "                 /zim-respan,  /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
                      "                 /zim-moonmath,  /zim-wandb,\n"
@@ -5086,6 +5115,11 @@ class ZimZillaApp(App):
         # lets /unrestricted-models work before a key exists.
         if kind == "unrestricted":
             return unr_mod, "unrestricted.sh"
+        # Hosted and Anthropic-native, like UnoRouter and unrestricted.sh: the
+        # gateway serves /v1/messages itself. Its catalogue is public and
+        # priced, which is what lets /respan-models work before a key exists.
+        if kind == "respan":
+            return rp_mod, "Respan"
         if kind == "aihubmix":
             return ah_mod, "AIHubMix"
         if kind == "beatapi":
@@ -5412,9 +5446,21 @@ class ZimZillaApp(App):
                     "and the balance decides which models\n               "
                     "answer: a zero-priced model can still refuse with \"for "
                     "paid\n               accounts\"\n", style=p.dim)
+            if kind == "respan":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://platform.respan.ai/platform/gateway/api-keys\n",
+                         style=p.primary)
+                t.append("  note:        ", style=p.dim)
+                t.append(
+                    "only models priced $0 in AND $0 out are offered — /model "
+                    "cannot land\n               on a paid id. The catalogue is "
+                    "public, so /respan-models works\n               without a "
+                    "key. A fresh account may still answer $0 models with\n"
+                    "               401 activation_required until credits or a "
+                    "BYOK key are added\n", style=p.dim)
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
                         "iteracompute", "infronai", "nvidia", "moonmath",
-                        "inferbase"):
+                        "inferbase", "respan"):
                 # Worth saying plainly: this catalog is public, so the free list
                 # and a model choice work before any key exists. The key is only
                 # needed to actually send a message.
@@ -5518,6 +5564,13 @@ class ZimZillaApp(App):
             # while the session is already on this host leaves the old
             # credential in force. Re-apply from the profile just rewritten.
             if unr_mod.apply_to(self.cfg) is not None:
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+                return
+        if kind == "respan" and rp_mod.is_respan(self.cfg.base_url):
+            # Same failure again: re-read the profile that was just rewritten,
+            # and keep the free-model guarantee by letting apply_to choose.
+            if rp_mod.apply_to(self.cfg) is not None:
                 self.agent._client = None
                 self._sys_line("applied to this session — no restart", ok=True)
                 return
@@ -5735,9 +5788,14 @@ class ZimZillaApp(App):
         mod.set_current(kind)
         self._refresh_after_source_change(label, f"key from {origin}")
 
+        if kind == "respan":
+            # The model is always a free one (apply_to enforces it), and the
+            # list is the point of this source — show it.
+            self._sys_line("free models only — /respan-models to see the list")
+            self._fetch_models(kind)
         # A first switch with no model chosen lands on whatever the profile
         # named; with none, offer the free list rather than guessing a paid one.
-        if not model:
+        elif not model:
             self._sys_line("fetching the free model list…")
             self._fetch_models(kind)
 
@@ -5998,7 +6056,8 @@ class ZimZillaApp(App):
                "zro": "moonmath"}.get(key, key)
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
-                 "unorouter", "unrestricted", "antseed", "aihubmix", "beatapi",
+                 "unorouter", "unrestricted", "respan", "antseed", "aihubmix",
+                 "beatapi",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
                  "inferx", "inferbase", "flex", "gemini"}
         if key not in known:
@@ -6064,6 +6123,11 @@ class ZimZillaApp(App):
             # this account.
             creds = unr_mod.load_credentials()
             return unr_mod.usable_free_models(creds[0] if creds else "")
+        if kind == "respan":
+            # The public catalogue is keyless and carries the prices, so the
+            # free list exists before /respan-api-setup has run. Only entries
+            # priced 0 in and 0 out are returned.
+            return rp_mod.usable_free_models()
         if kind == "aihubmix":
             # Keyless as well: /api/v1/models answers 200 with no Authorization
             # header at all (857 models when this was written). The key is sent
@@ -6165,7 +6229,7 @@ class ZimZillaApp(App):
             self._sys_line(f"{kind}: {err}", warn=True)
             return
         label = {"openrouter": "OPENROUTER", "unorouter": "UNOROUTER",
-                 "unrestricted": "UNRESTRICTED.SH",
+                 "unrestricted": "UNRESTRICTED.SH", "respan": "RESPAN",
                  "aihubmix": "AIHUBMIX", "beatapi": "BEATAPI",
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
@@ -6197,6 +6261,15 @@ class ZimZillaApp(App):
                     "either: a model the\n  balance does not cover answers 400 "
                     "\"for paid accounts\", which is why\n  /zim-unrestricted "
                     "probes before it lands)\n",
+                    style=p.dim)
+            if kind == "respan":
+                t.append(
+                    "  (only models the public catalogue prices at $0 in AND $0 "
+                    "out are\n  listed. An empty list means no free chat model "
+                    "is in the catalogue\n  right now — not that the source is "
+                    "broken. The account may still need\n  activation: a fresh "
+                    "key answers $0 models with 401 activation_required\n"
+                    "  until credits or a BYOK key are added)\n",
                     style=p.dim)
             if kind == "aihubmix":
                 # A different exclusion, and saying the wrong one would send the
@@ -6354,6 +6427,18 @@ class ZimZillaApp(App):
                 "list went from one entry\n  to none. An empty list here means "
                 "nothing is priced at zero right now —\n  not that the source "
                 "is broken\n", style=p.dim)
+        if kind == "respan":
+            t.append(
+                "  free = priced 0 in AND 0 out in the public Respan catalogue · "
+                "the\n  gateway takes the bare id, so provider-prefixed aliases "
+                "are folded onto\n  it rather than listed twice. Only free chat "
+                "models are offered; a paid\n  one cannot be selected here\n",
+                style=p.dim)
+            t.append(
+                "  a $0 price is not an activated account: measured 2026-11-12, a "
+                "fresh key\n  answered every free model with 401 "
+                "activation_required until credits or\n  a BYOK key were added\n",
+                style=p.dim)
         if kind == "aihubmix":
             # The two things a reader of this list would otherwise get wrong.
             # Both were measured, and both contradict what the catalog looks
@@ -10426,6 +10511,8 @@ class ZimZillaApp(App):
              "tokenjuice-api-setup"),
             ("/zim-openrouter", "switch upstream to OpenRouter", "zim-openrouter"),
             ("/zim-unorouter", "switch upstream to UnoRouter", "zim-unorouter"),
+            ("/zim-respan", "switch upstream to Respan — free models only",
+             "zim-respan"),
             ("/zim-aihubmix", "switch upstream to AIHubMix", "zim-aihubmix"),
             ("/zim-beatapi", "switch upstream to BeatAPI", "zim-beatapi"),
             ("/zim-iteracompute", "switch upstream to IteraCompute", "zim-iteracompute"),
@@ -10443,6 +10530,8 @@ class ZimZillaApp(App):
              "unorouter-api-setup"),
             ("/unorouter-models", "the live free catalog — what is free and usable",
              "unorouter-models"),
+            ("/respan-api-setup", "store your Respan API key", "respan-api-setup"),
+            ("/respan-models", "the free Respan catalogue", "respan-models"),
             ("/aihubmix-api-setup", "store your AIHubMix API key",
              "aihubmix-api-setup"),
             ("/aihubmix-models", "the live free catalog — what is free and usable",

@@ -916,13 +916,14 @@ caring which. Seventeen sources are wired up:
 | **BeatAPI** | `direct.beatapi.io` | yours | hosted — nothing to start |
 | **Zro (MoonMath.ai)** | `zro.moonmath.ai` | yours (`sk-…`) | hosted, native Messages — free daily allowance on the Flash models |
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
+| **Respan** | `gateway.respan.ai` | yours (`RESPAN_API_KEY`) | hosted, native Messages — free-only model list |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
 `/zim-inferbase`, `/zim-gemini`, `/zim-flex`, `/zim-tokenharbour`,
-`/zim-openrouter`, `/zim-unorouter`, `/zim-aihubmix`, `/zim-beatapi`,
-`/zim-moonmath` or `/zim-antseed`; the choice is remembered, so the next launch
-comes back to the one that was working.
+`/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-aihubmix`,
+`/zim-beatapi`, `/zim-moonmath` or `/zim-antseed`; the choice is remembered, so
+the next launch comes back to the one that was working.
 
 Logfare, Token Juice, NVIDIA, wandb, InferX, Inferbase, Gemini and Flex are
 reached **directly** — their upstreams serve Chat Completions themselves, so
@@ -938,6 +939,50 @@ committed to a public repo is a budget anyone can spend. `/logfare-api-setup
 <key>` stores it and shows the last four characters of whichever key is in
 force, so it is obvious which credential a turn will use. Because the route is
 direct, the new key is live immediately: there is no proxy holding its own copy.
+
+### Respan, free models only
+
+Respan is a hosted AI gateway that serves the Anthropic Messages protocol
+natively at `https://gateway.respan.ai` — so, like UnoRouter and Zro, nothing is
+translated and no proxy is started. Its catalogue is public and priced, and
+ZimZilla uses it for one job: **only models priced $0 in and $0 out are ever
+offered.**
+
+```
+/respan-api-setup <key>     # store your RESPAN_API_KEY
+/zim-respan                 # switch; lands on a free model
+/respan-models              # the live free list
+/model                      # free models only
+```
+
+The catalogue is `https://api.respan.ai/api/v1/models` and needs no key, so
+`/respan-models` works before setup. Free means `pricing.input_cost == 0` **and**
+`pricing.output_cost == 0`; a missing price is not free. Provider-prefixed
+aliases (`zai/glm-4.7-flash`) and OpenRouter spellings are folded onto the bare
+gateway id, which is what goes on the wire. Measured on 2026-11-12, that left
+eight free chat models:
+
+`glm-4.7-flash` (200k), `gemma-4-31b-it` (262k), `gemma-4-26b-a4b-it` (262k),
+`glm-4.6v-flash` (128k), `glm-4.5-flash` (200k), `apodex-1.1-mini` (262k),
+`leanstral-1-5` (262k) and `allam-2-7b` (4k).
+
+Speech and zero-context entries are filtered out. A paid id is refused by
+`/model`, so this source cannot quietly become a paid route. The default is
+`glm-4.7-flash`.
+
+**A $0 price is not an activated account.** Measured on a fresh key the same
+day: every free model answered `401 activation_required` — *“Model
+'glm-4.7-flash' needs Respan credits. Add credits at …/billing.”* The gateway
+holds a credit check before it serves a model on Respan's own keys, even one
+the catalogue prices at zero. `/respan-api-setup` distinguishes that from a
+rejected credential: the key is accepted, and the message says what to add.
+Adding credits or a BYOK provider key at
+`https://platform.respan.ai/platform/settings/workspace/billing` activates the
+route; the free models stay $0 when it does.
+
+`RESPAN_API_KEY` is read from the environment first, so an exported profile
+needs no setup command. The key is stored in `~/.zimzilla/respan/source`
+(mode 600), never echoed.
 
 Token Juice is a direct route and nothing else: `/zim-source` lists it with
 `direct` where the others show a port, because there is no proxy to report on.
@@ -1729,6 +1774,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-unorouter` | switch upstream to UnoRouter — hosted, free models, native Messages |
 | `/unorouter-api-setup <key>` | store your UnoRouter API key |
 | `/unorouter-models` | the live free catalog — free, text-output and tools-capable, most upstream channels first |
+| `/zim-respan` | switch upstream to Respan — hosted, native Messages, **free models only** |
+| `/respan-api-setup <key>` | store your Respan API key (`RESPAN_API_KEY`) |
+| `/respan-models` | the live catalog — only models priced $0 in and $0 out |
 | `/zim-aihubmix` | switch upstream to AIHubMix — hosted, free models, native Messages |
 | `/aihubmix-api-setup <key>` | store your AIHubMix API key |
 | `/aihubmix-models` | the live free catalog — what is free and usable |
@@ -2942,6 +2990,7 @@ zimzilla/                     the package
   ad.py                       /ad — the AD doctrine: gate, tool probe, interlock
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
   payload.py                  /payload — the extension table, the argv, the build, the handler
+  respan.py                   /zim-respan — free-only catalogue, native Messages
   opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
   update.py                   launch-time check for new commits
   theme.py                    green / amber / cyan / system palettes, and the
@@ -2991,6 +3040,7 @@ python tests/test_payload.py       # /payload — the table, the argv, the traps
 python tests/test_inferx.py        # /inferx-* — the key-gated catalog, the tenant allowance, the wiring
 python tests/test_inferbase.py     # /inferbase-* — the price band, the two routes, the wiring
 python tests/test_vision.py        # /see, browse, view_image — images, browser, screenshots
+python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

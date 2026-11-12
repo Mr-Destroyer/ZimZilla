@@ -795,6 +795,13 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import unrestricted as unr_mod
         cached = unr_mod.cached_ids()
         return tuple(cached) if cached else None
+    if key == "respan":
+        # Only free chat models are offered, by request. A cold cache answers
+        # the declared free fallback rather than this harness's default
+        # registry, which is full of paid ids from other providers.
+        from . import respan as rp_mod
+        cached = rp_mod.cached_ids()
+        return tuple(cached) if cached else rp_mod.FREE_FALLBACK
     if key == "antseed":
         from . import antseed as as_mod
         cached = as_mod.cached_ids()
@@ -838,6 +845,12 @@ def catalog_models(key: str) -> list | None:
     if key == "unrestricted":
         from . import unrestricted as unr_mod
         return unr_mod.cached_models()
+    if key == "respan":
+        # The full parsed catalogue, so the window and the published price can
+        # be read per model. `/model` still offers only the free subset — see
+        # ``models_for`` — but the window lookup needs the whole list.
+        from . import respan as rp_mod
+        return rp_mod.cached_models()
     if key == "antseed":
         from . import antseed as as_mod
         return as_mod.cached_models()
@@ -964,6 +977,13 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # it warm or cold; a pinned model gets its published rate as soon as
         # the catalog is read.
         return (0.0, 0.0)
+    if key == "respan":
+        # Only free models are offered, so a cold cache must not fall through
+        # to the estimate table and bill the default at DEFAULT_PRICE. A warm
+        # cache still resolves through the generic loop below, which reads the
+        # catalogue's own $0.00 price.
+        if not catalog_models(key):
+            return (0.0, 0.0)
     if key == "flex":
         # The playground is unauthenticated, so there is no account to bill and
         # no key to meter. (0, 0) is the true answer warm or cold — and unlike
@@ -1352,8 +1372,8 @@ def switchable(exclude: str | None = None) -> list[str]:
     """
     found = discover()
     out: list[str] = []
-    for key in ("openrouter", "unorouter", "unrestricted", "aihubmix",
-                "beatapi", "tokenharbour", "moonmath", "infronai",
+    for key in ("openrouter", "unorouter", "unrestricted", "respan",
+                "aihubmix", "beatapi", "tokenharbour", "moonmath", "infronai",
                 "iteracompute", "antseed", "nvidia", "tokenjuice", "logfare",
                 "wandb", "inferx", "inferbase", "flex"):
         if key == exclude or key in UNDER_CONSTRUCTION:
@@ -1400,12 +1420,14 @@ def _gateway_module(key: str):
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
     from . import unrestricted as unr_mod
+    from . import respan as rp_mod
     from . import wandb as wb_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
         "beatapi": bp_mod, "tokenharbour": th_mod, "moonmath": mm_mod,
         "wandb": wb_mod, "inferx": ix_mod, "inferbase": ib_mod,
         "flex": flex_mod, "gemini": gm_mod, "unrestricted": unr_mod,
+        "respan": rp_mod,
     }.get(key)
 
 
@@ -1470,7 +1492,7 @@ def _state_file() -> Path:
 #: selection time would lose the choice every time the proxy was down.
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
                           "aihubmix", "beatapi", "moonmath", "wandb", "inferx",
-                          "inferbase", "flex", "unrestricted"})
+                          "inferbase", "flex", "unrestricted", "respan"})
 
 
 def current_key() -> str | None:
@@ -1533,6 +1555,7 @@ def active_key(base_url: str) -> str | None:
     from . import tokenharbour as th_mod
     from . import unorouter as uno_mod
     from . import unrestricted as unr_mod
+    from . import respan as rp_mod
     from . import wandb as wb_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
@@ -1545,6 +1568,10 @@ def active_key(base_url: str) -> str | None:
     # or path to match on.
     if unr_mod.is_unrestricted(base_url):
         return "unrestricted"
+    # Hosted and Anthropic-native, identified by host: the Messages base is
+    # the bare gateway host, with no port or path to match on.
+    if rp_mod.is_respan(base_url):
+        return "respan"
     if ah_mod.is_aihubmix(base_url):
         return "aihubmix"
     if bp_mod.is_beatapi(base_url):

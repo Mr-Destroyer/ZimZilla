@@ -326,6 +326,9 @@ _CREDENTIAL_PROFILES = (
     # Hosted and Anthropic-native, like UnoRouter one line up: the key is the
     # operator's own, written by /unrestricted-api-setup.
     ("unrestricted", "unrestricted", "ANTHROPIC_AUTH_TOKEN"),
+    # Hosted and Anthropic-native too: the gateway serves /v1/messages itself,
+    # and the key is the operator's own (RESPAN_API_KEY / the profile).
+    ("respan", "Respan", "ANTHROPIC_AUTH_TOKEN"),
     ("aihubmix", "AIHubMix", "ANTHROPIC_AUTH_TOKEN"),
     ("beatapi", "BeatAPI", "ANTHROPIC_AUTH_TOKEN"),
     ("moonmath", "Zro", "ANTHROPIC_AUTH_TOKEN"),
@@ -2063,6 +2066,18 @@ class Agent:
     def _friendly_error(e: Exception, base_url: str | None = None,
                        protocol: str = "auto") -> str:
         import anthropic
+
+        # Respan's 401 is two different states, and the generic "check your
+        # key" sends a valid-but-unactivated account to re-check a key that is
+        # fine. Its own module knows the wording; use it.
+        if base_url and "respan.ai" in base_url.lower():
+            try:
+                from . import respan as respan_mod
+                status = int(getattr(e, "status_code", 0) or 0)
+                if status in (401, 402, 403, 429) or "activation_required" in str(e):
+                    return "Respan: " + respan_mod.explain_error(status, str(e))
+            except Exception:  # noqa: BLE001 - a hint must not mask the error
+                pass
 
         if isinstance(e, anthropic.AuthenticationError):
             if base_url and "tokenjuice.ai" in base_url:
