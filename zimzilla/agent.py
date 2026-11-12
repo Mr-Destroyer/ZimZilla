@@ -315,6 +315,13 @@ searching the web, and seeing it. Work directly and decisively:
 - When the operator asks to SEE a picture — "show me the image", "display that
   screenshot" — call show_image with its path or URL. That opens their
   resizable image pane; view_image is for when *you* need to look at it.
+- When the operator asks you to CREATE an image, default to draw_image: write
+  SVG or HTML/CSS and render it locally. You do not need an image API or a
+  vision-capable model. If you do not know what the subject looks like, use
+  search_web/browse to find references and view_image to study them first;
+  then draw what you actually saw. Embed rasters as data: URIs. Use
+  generate_image only when the operator explicitly asks for an AI/diffusion
+  render or a photoreal image — it needs a Logfare key and is not the default.
 
 The working directory is {workdir}. All file paths are relative to it.
 {scope_note}"""

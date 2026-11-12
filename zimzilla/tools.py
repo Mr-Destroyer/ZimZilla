@@ -273,6 +273,50 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        # Local image creation, for every model. The model writes the drawing
+        # as SVG/HTML; Chromium lays it out; the screenshot is the image. No
+        # image API, no key, no model that supports image output.
+        "name": "draw_image",
+        "description": (
+            "CREATE an image by writing it yourself as SVG or HTML/CSS. This "
+            "does not use an image-generation API — the markup is rendered in "
+            "a real browser and saved as a PNG. Use it for diagrams, icons, "
+            "posters, UI mockups, charts, maps, vector illustration, comic "
+            "panels, pixel art and text art. If you do not know what the "
+            "subject looks like, first use search_web/browse to find reference "
+            "images and view_image to study them, then draw. Embed any raster "
+            "you need as a data: URI; the renderer blocks network fetches. "
+            "Not a photoreal/3D renderer — use a diffusion/video model for "
+            "that."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "spec": {"type": "string",
+                         "description": "The SVG or HTML source of the image."},
+                "format": {"type": "string", "enum": ["svg", "html"],
+                           "description": "Markup language (default svg)."},
+                "width": {"type": "integer",
+                          "description": "Image width in pixels (default 1024).",
+                          "default": 1024},
+                "height": {"type": "integer",
+                           "description": "Image height in pixels (default 1024).",
+                           "default": 1024},
+                "dest": {"type": "string",
+                         "description": "Output path under the working "
+                                        "directory (default images/<slug>.png)."},
+                "transparent": {"type": "boolean",
+                                "description": "Keep a transparent background "
+                                               "(default false)."},
+                "wait_ms": {"type": "integer",
+                            "description": "Wait after load for JS/canvas "
+                                           "(default 150).",
+                            "default": 150},
+            },
+            "required": ["spec"],
+        },
+    },
+    {
         # Display, as opposed to analysis. `view_image` hands the picture to
         # the *model*; this hands it to the *operator*, in a pane they can
         # resize, zoom and pan. The model can open it mid-turn, and a second
@@ -362,14 +406,14 @@ TOOL_SCHEMAS: list[dict] = [
         # in plan mode (see ``config.MODES``).
         "name": "generate_image",
         "description": (
-            "Generate an image from a text prompt and save it in the working "
-            "directory (under images/ unless dest says otherwise). Returns the "
-            "saved path. Use it when the operator asks for a picture, icon, "
-            "diagram, mockup or illustration. The prompt should describe the "
-            "image in full — subject, style, lighting and composition — "
-            "because the image model does not see this conversation. Images "
-            "cost money per call, so generate once and iterate only on a "
-            "real request."
+            "Generate a photoreal/AI image from a text prompt and save it in the "
+            "working directory (under images/ unless dest says otherwise). This "
+            "is the optional paid diffusion route and needs a Logfare key. For "
+            "diagrams, icons, posters, UI, charts and vector art use draw_image "
+            "instead — it works on every model without an image API. Use this "
+            "only when the operator explicitly asks for an AI/photoreal render. "
+            "Describe subject, style, lighting and composition fully; the image "
+            "model does not see this conversation, and each call costs money."
         ),
         "input_schema": {
             "type": "object",
@@ -823,6 +867,11 @@ TOOL_ALIASES: dict[str, str] = {
     "open_image": "view_image",
     "look": "view_image",
     "look_at": "view_image",
+    "draw": "draw_image",
+    "paint": "draw_image",
+    "render_image": "draw_image",
+    "make_image": "draw_image",
+    "svg_image": "draw_image",
     "display_image": "show_image",
     "show_picture": "show_image",
     "show_image_pane": "show_image",
@@ -856,6 +905,9 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
                    "file_path": "path", "count": "frames"},
     "show_image": {"file": "path", "image": "path", "image_path": "path",
                    "file_path": "path", "url": "path", "image_url": "path"},
+    "draw_image": {"svg": "spec", "html": "spec", "source": "spec",
+                   "code": "spec", "path": "dest", "size_width": "width",
+                   "size_height": "height", "wait": "wait_ms"},
     "watch_video": {"video": "url", "uri": "url", "link": "url",
                     "href": "url", "count": "frames", "from": "start"},
 }
@@ -1539,6 +1591,74 @@ def _tool_view_image(args: dict, cfg) -> ToolResult:
         f"attached {len(blocks)} image(s): {label}{extra}",
         meta={"images": [str(p) for p in paths[:len(blocks)]]},
     )
+
+
+def _tool_draw_image(args: dict, cfg) -> ToolResult:
+    """Render model-authored SVG/HTML to a PNG. Local; no image API."""
+    from . import browser as browser_mod
+    from . import images as images_mod
+
+    markup = _text(args.get("spec") or args.get("svg") or args.get("html") or "")
+    if not markup.strip():
+        return ToolResult("draw_image needs an SVG or HTML 'spec'", is_error=True)
+    if len(markup) > 300_000:
+        return ToolResult("drawing spec is too large (limit 300 KB)", is_error=True)
+    fmt = str(args.get("format") or "").lower()
+    if not fmt:
+        fmt = "html" if args.get("html") else "svg"
+    if fmt not in ("svg", "html"):
+        return ToolResult("format must be svg or html", is_error=True)
+    try:
+        width = max(16, min(int(args.get("width") or 1024), 4096))
+        height = max(16, min(int(args.get("height") or 1024), 4096))
+    except (TypeError, ValueError):
+        return ToolResult("width/height must be integers", is_error=True)
+    if width * height > 16_000_000:
+        return ToolResult("image is too large (max 16 megapixels)", is_error=True)
+    try:
+        wait_ms = max(0, min(int(args.get("wait_ms") or 150), 5000))
+    except (TypeError, ValueError):
+        wait_ms = 150
+    raw_dest = _text(args.get("dest") or "").strip()
+    if not raw_dest:
+        stem = _slug_from(_text(args.get("prompt") or fmt + "-drawing"))
+        raw_dest = f"images/{stem}.png"
+    if not raw_dest.lower().endswith(".png"):
+        raw_dest += ".png"
+    try:
+        dest = resolve_in_jail(cfg.workdir, raw_dest, cfg.unsafe)
+    except SandboxError as e:
+        return ToolResult(str(e), is_error=True)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        source = dest.with_suffix(".svg" if fmt == "svg" else ".html")
+        source.write_text(markup, encoding="utf-8")
+    except OSError as e:
+        return ToolResult(f"could not write the drawing: {e}", is_error=True)
+    try:
+        browser_mod.render_markup(
+            markup, dest, width=width, height=height, wait_ms=wait_ms,
+            transparent=bool(args.get("transparent")),
+        )
+    except browser_mod.BrowserError as e:
+        return ToolResult(f"drawing failed: {e}", is_error=True)
+    except Exception as e:  # noqa: BLE001 - the turn must survive a bad spec
+        return ToolResult(f"drawing failed: {type(e).__name__}: {e}",
+                          is_error=True)
+    prepared = images_mod.prepare(dest)
+    return ToolResult(
+        f"drew {width}x{height} {fmt.upper()} -> {dest} "
+        f"(source {source}). Use view_image to inspect it or show_image to "
+        f"display it to the operator.",
+        meta={"image": str(dest), "source": str(source),
+              "width": width, "height": height, "format": fmt,
+              "drawing": True},
+    )
+
+
+def _slug_from(text: str, limit: int = 48) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", text or "").strip("-._").lower()
+    return (slug[:limit] or "drawing")
 
 
 def _tool_show_image(args: dict, cfg) -> ToolResult:
@@ -2303,6 +2423,7 @@ _DISPATCH = {
     "web_fetch": _tool_web_fetch,
     "browse": _tool_browse,
     "view_image": _tool_view_image,
+    "draw_image": _tool_draw_image,
     "show_image": _tool_show_image,
     "watch_video": _tool_watch_video,
     "generate_image": _tool_generate_image,
@@ -2342,6 +2463,9 @@ def summarise_call(name: str, args: dict, cfg, max_len: int = 70) -> str:
         return "$ " + (u if len(u) <= max_len else u[: max_len - 2] + "…")
     if name == "view_image":
         return str(args.get("path", ""))
+    if name == "draw_image":
+        dest = str(args.get("dest") or "a drawing")
+        return "draw " + (dest if len(dest) <= max_len - 5 else dest[:max_len - 6] + "…")
     if name == "show_image":
         what = str(args.get("path") or args.get("url") or "")
         return "image " + (what if len(what) <= max_len - 6 else what[:max_len - 7] + "…")

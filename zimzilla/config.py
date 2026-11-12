@@ -122,7 +122,8 @@ MODES: dict[str, dict] = {
         # "mcp" is a prefix, not a tool name: MCP tools are discovered at
         # runtime, so the whole family is denied by prefix. Their effect is
         # whatever the server does, which cannot be called read-only.
-        "deny": {"bash", "write_file", "edit_file", "generate_image", "mcp"},
+        "deny": {"bash", "write_file", "edit_file", "generate_image",
+                 "draw_image", "mcp"},
     },
     "zim": {
         "label": "ZIM",

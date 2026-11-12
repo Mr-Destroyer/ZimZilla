@@ -889,6 +889,69 @@ def capture(
     return cap
 
 
+def render_markup(markup: str, out: str | Path, *, width: int = 1024,
+                  height: int = 1024, wait_ms: int = 150,
+                  transparent: bool = False, timeout: float = 45_000) -> Path:
+    """Render SVG/HTML markup to a PNG with Chromium.
+
+    This is the local image path: the model writes a drawing as markup, the
+    browser lays it out with real fonts and gradients, and the screenshot is
+    the artifact. Network requests from the page are aborted — a drawing must
+    not quietly become a fetch — while data:/blob: resources are allowed for
+    embedded images and fonts.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:  # noqa: BLE001
+        raise BrowserError(
+            "drawing needs Playwright — run `pip install playwright`") from e
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    width = max(16, min(int(width), 4096))
+    height = max(16, min(int(height), 4096))
+    with sync_playwright() as p:
+        browser = _launch_browser(p)
+        try:
+            context = browser.new_context(
+                viewport={"width": width, "height": height},
+                device_scale_factor=1,
+                color_scheme="light",
+            )
+            page = context.new_page()
+
+            def _allow(route):
+                url = route.request.url
+                if url.startswith(("data:", "blob:", "about:")):
+                    route.continue_()
+                else:
+                    route.abort()
+
+            page.route("**/*", _allow)
+            page.set_content(markup, wait_until="load", timeout=int(timeout))
+            # The browser's default body margin would inset a drawing by 8px
+            # and clip a full-bleed SVG; the viewport is the canvas.
+            try:
+                page.add_style_tag(
+                    content="html,body{margin:0;padding:0;overflow:hidden;}")
+            except Exception:  # noqa: BLE001
+                pass
+            # A drawing often has no network at all, so load is immediate; the
+            # wait is for webfonts and canvas/JS composition that run on a
+            # timer. Keep the UI responsive by keeping it short.
+            if wait_ms:
+                page.wait_for_timeout(int(wait_ms))
+            page.screenshot(
+                path=str(out), full_page=False, animations="disabled",
+                caret="hide", omit_background=bool(transparent),
+            )
+        finally:
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
 def _dismiss_overlays(page) -> None:
     """Click the consent button that hides the page behind a wall.
 

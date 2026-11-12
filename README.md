@@ -841,6 +841,7 @@ the file up too.
 | `web_fetch` | no | Pull down a URL. |
 | `browse` | no | Render a page in a real browser and **see** it: screenshots attached, plus text, media, links and comments. |
 | `view_image` | no | Look at a local image, screenshot or GIF (animated GIFs can be sampled into frames). |
+| `draw_image` | no | Create an image locally from model-written SVG/HTML — no image API, no key. |
 | `show_image` | no | Display an image to **you** in a resizable image pane the model can open and update. |
 | `watch_video` | no | Pull a video's metadata and thumbnail, and sample frames from the opening seconds. |
 | `generate_image` | no | Generate an image from a prompt and save it under `images/` (needs a Logfare key). |
@@ -2068,6 +2069,37 @@ what makes `/see` work out of the box here.
 
 ---
 
+## Drawing images without an image model
+
+Every model can make an image, including a text-only one. `draw_image` takes
+**SVG or HTML/CSS authored by the model**, renders it in Chromium, and saves a
+PNG:
+
+```text
+draw_image(spec="<svg …>…</svg>", format="svg", width=1024, height=1024)
+draw_image(spec="<html>…</html>", format="html", width=1600, height=900)
+```
+
+That covers the kinds of images code can make well: diagrams, icons, posters,
+UI mockups, charts, maps, vector illustration, comic panels, pixel art, text
+art, patterns and gradients. The source (`.svg`/`.html`) is saved beside the
+PNG so the drawing is reproducible and editable.
+
+**Research first.** A model that does not know what something looks like is
+told to `search_web`/`browse` for references and `view_image` them before
+drawing. That is the loop: look at real images, then write the shape.
+
+**No image API.** This does not call Flux, Logfare or any image endpoint, and
+it works on a route whose model cannot output images. Network fetches from the
+rendered page are blocked; embed any raster as a `data:` URI.
+
+**What it is not.** SVG/HTML is not a photoreal or 3D renderer. Portraits,
+complex anime frames and photographic scenes still need a diffusion/video
+pipeline; `draw_image` is for the vector/UI/diagram/comic half of the work.
+Plan mode denies it because it writes a file.
+
+---
+
 ## The image pane
 
 Ask for a picture and the model opens it beside the transcript:
@@ -3252,6 +3284,7 @@ python tests/test_image_pane.py    # show_image — half-block renderer, pane co
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_mcp_pane.py      # MCP pane — app view, PTY input, activity diff
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
+python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so
