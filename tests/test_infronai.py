@@ -726,8 +726,9 @@ def test_tui_surfaces() -> None:
           "self._warm_infronai_catalog()" in app_src)
     check("tui: the module is imported by the app",
           "from .. import infronai as inf_mod" in app_src)
-    check("tui: /models completion offers it",
-          '"iteracompute", "infronai"' in comp_src)
+    # Membership, not adjacency — see the same note in test_nvidia.py.
+    check("tui: /models completion offers it", '"infronai"' in comp_src,
+          "the /models source list must offer infronai")
 
     check("launcher: it starts the :4003 proxy",
           'LITELLM_PORT="${_port_override:-4003}"' in launcher)

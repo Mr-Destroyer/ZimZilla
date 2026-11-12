@@ -577,8 +577,9 @@ def test_tui_surfaces() -> None:
     check("tui: /models accepts it", '"iteracompute"' in app_src)
     check("tui: the module is imported by the app",
           "from .. import iteracompute as ic_mod" in app_src)
-    check("tui: /models completion offers it",
-          '"beatapi", "iteracompute"' in comp_src)
+    # Membership, not adjacency — see the same note in test_nvidia.py.
+    check("tui: /models completion offers it", '"iteracompute"' in comp_src,
+          "the /models source list must offer iteracompute")
 
     check("launcher: it starts the :4002 proxy",
           'LITELLM_PORT="${_port_override:-4002}"' in launcher)

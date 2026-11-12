@@ -632,8 +632,11 @@ def test_tui_surfaces() -> None:
           "self._warm_nvidia_catalog()" in app_src)
     check("tui: the module is imported by the app",
           "from .. import nvidia as nv_mod" in app_src)
-    check("tui: /models completion offers it",
-          '"iteracompute", "infronai", "nvidia"' in comp_src)
+    # Membership, not adjacency: this pinned the exact neighbouring entries
+    # and went red the moment another source was inserted between them, which
+    # is a false alarm about a list that still offered nvidia the whole time.
+    check("tui: /models completion offers it", '"nvidia"' in comp_src,
+          "the /models source list must offer nvidia")
     check("tui: a 401 hint names the NVIDIA command, not Token Juice",
           "/nvidia-api-setup" in app_src)
 

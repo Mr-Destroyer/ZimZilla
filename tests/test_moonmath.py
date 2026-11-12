@@ -763,11 +763,15 @@ def test_launcher_restores_the_route() -> None:
     """
     launcher = (ROOT / "packaging" / "zimzilla").read_text(encoding="utf-8")
 
-    check("launcher: the hosted branch includes it",
-          "tokenharbour|openrouter|moonmath)" in launcher)
     start = launcher.index("case \"$_current_source\" in")
     end = launcher.index("esac", start)
     branch = launcher[start:end]
+    # Membership, not the exact alternative list: this pinned
+    # "tokenharbour|openrouter|moonmath)" and went red the moment the next
+    # hosted gateway was appended after it, which is a false alarm about a
+    # branch that still handled moonmath the whole time.
+    check("launcher: the hosted branch includes it",
+          "moonmath" in branch.split(")", 1)[0], branch.strip()[:200])
     check("launcher: it sources the operator's profile",
           '"$ZIMZILLA_HOME/$_current_source/source"' in branch, branch.strip()[:200])
     check("launcher: it turns the proxy off", "ZIMZILLA_NO_PROXY=1" in branch,
