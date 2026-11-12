@@ -2044,12 +2044,14 @@ one-line preview:
 | `q` / `Esc` | close it |
 | click the picture | give it the keyboard; click the prompt to type again |
 
-The drawing is **coloured half blocks** — one terminal cell carries two
-vertical samples, foreground and background — so it works in any true-colour
-terminal without Kitty's or iTerm2's graphics protocol. Zoom past 100% crops
-into the picture rather than scaling it up into a blur; at 100% it is
-letterboxed. A photo, a screenshot, a downloaded thumbnail or a GIF's first
-frame all work; `Pillow` decodes and honours EXIF rotation.
+The pane uses the terminal's **graphics protocol** when it has one — Kitty's
+TGP or Sixel — so the picture is drawn at real pixel resolution, not as a
+character mosaic. A terminal without either falls back to coloured half blocks
+(one cell, two vertical samples), which still works everywhere but is visibly
+coarser. Zoom past 100% crops into the source rather than scaling a thumbnail
+up into a blur; at 100% it is letterboxed. A photo, a screenshot, a downloaded
+thumbnail or a GIF's first frame all work; `Pillow` decodes and honours EXIF
+rotation, `textual-image` handles the terminal side.
 
 `show_image` is display-only and deliberately does **not** attach the image to
 the model's context. `view_image` is the other half: that is how the model

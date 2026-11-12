@@ -16,8 +16,17 @@ from textual.geometry import Offset, clamp
 from textual.widgets import Input, Static
 
 from ..theme import Palette
-from .imageview import MAX_ZOOM, MIN_ZOOM, halfblocks, load, zoom_label
+from .imageview import (MAX_ZOOM, MIN_ZOOM, halfblocks, load, zoom_label,
+                        zoomed)
 from .rain import RainRichLog
+
+# Imported at module import, before Textual takes the terminal: textual-image
+# probes the terminal for a graphics protocol and reads the reply, which cannot
+# be done once Textual's input reader owns stdin.
+try:
+    from textual_image.widget import Image as _TerminalImage
+except Exception:  # noqa: BLE001 - optional; the half-block fallback remains
+    _TerminalImage = None
 
 #: A pasted line break is drawn as this glyph. The field is one row tall, so a
 #: real ``\n`` in the strip would push the rows below it down the screen; the
@@ -591,18 +600,17 @@ class ChatPane(Vertical):
         self._cursor_on = not self._cursor_on
 
 
-class ImagePane(Static):
-    """A resizable terminal image viewer, driven by the model or the operator.
+class ImagePane(Vertical):
+    """A resizable image viewer, driven by the model or the operator.
 
-    The picture is drawn as coloured half blocks (see ``ui/imageview.py``),
-    which works in any true-colour terminal rather than requiring Kitty's or
-    iTerm2's graphics protocol. It is hidden until ``show_image`` puts something
-    in it, and then behaves like a viewer: ``+``/``-`` zoom, arrows pan, ``[``
-    and ``]`` resize the pane, and dragging the left edge does the same.
+    When the terminal supports a graphics protocol (Kitty's TGP, Sixel), the
+    picture is handed to it at real pixel resolution — that is what makes the
+    pane watchable. A terminal without one falls back to coloured half blocks,
+    which is legible but deliberately lower resolution. The renderer choice is
+    textual-image's; this widget owns the chrome, zoom, pan and resize.
 
-    **Focus is deliberate.** Clicking the picture focuses it so the keys reach
-    the viewer; clicking the prompt returns them to the message field. The
-    model can open and update the pane mid-turn without stealing the keyboard.
+    Focus is deliberate: click the picture to give the viewer the keyboard,
+    click the prompt to type again.
     """
 
     can_focus = True
@@ -610,17 +618,27 @@ class ImagePane(Static):
     DEFAULT_CSS = """
     ImagePane {
         display: none;
-        width: 44;
-        min-width: 20;
-        max-width: 100;
+        width: 52;
+        min-width: 24;
+        max-width: 140;
         height: 100%;
-        padding: 0 1;
         border-left: heavy $secondary;
-        overflow: hidden;
+        background: $background;
     }
     ImagePane.visible { display: block; }
     ImagePane.-resizing { border-left: heavy $accent; }
     ImagePane:focus { border-left: heavy $accent; }
+    ImagePane #image-header, ImagePane #image-footer {
+        height: 1;
+        width: 100%;
+        padding: 0 1;
+        background: $background;
+    }
+    ImagePane #image-body {
+        height: 1fr;
+        width: 100%;
+        background: $background;
+    }
     """
 
     BINDINGS = [
@@ -640,13 +658,11 @@ class ImagePane(Static):
         Binding("escape", "close", "close", show=False),
     ]
 
-    MIN_WIDTH = 20
-    MAX_WIDTH = 100
-    DEFAULT_WIDTH = 44
+    MIN_WIDTH = 24
+    MAX_WIDTH = 140
+    DEFAULT_WIDTH = 52
     #: Columns on the left edge that start a resize drag.
     RESIZE_GUTTER = 2
-    #: Pixels one arrow press moves the picture.
-    PAN_STEP = 12
 
     def __init__(self, palette: Palette, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -660,7 +676,22 @@ class ImagePane(Static):
         self._dragging = False
         self._drag_origin_x = 0
         self._drag_origin_width = self.DEFAULT_WIDTH
-        self._error = ""
+        self._body = None
+        self._header = None
+        self._footer = None
+
+    # ---- composition ------------------------------------------------------
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Static
+        self._header = Static(id="image-header")
+        self._footer = Static(id="image-footer")
+        yield self._header
+        if _TerminalImage is not None:
+            self._body = _TerminalImage(id="image-body")
+        else:
+            self._body = Static(id="image-body")
+        yield self._body
+        yield self._footer
 
     # ---- content ----------------------------------------------------------
     def show(self, path: str, *, caption: str = "", zoom: float | None = None,
@@ -672,23 +703,29 @@ class ImagePane(Static):
         if zoom is not None:
             self.zoom = min(MAX_ZOOM, max(MIN_ZOOM, float(zoom)))
         self.pan = [0.0, 0.0]
-        self._error = ""
         self.add_class("visible")
         if width:
             self._apply_width(width)
         else:
             self._apply_width(self._width or self.DEFAULT_WIDTH)
-        self.render_pane()
+        self._refresh_view()
         try:
             self.focus()
         except Exception:  # noqa: BLE001 - a pane shown before mounting
             pass
 
     def hide(self) -> None:
-        """Hide the pane. The model can show it again with another call."""
+        """Hide the pane and release any graphics-protocol image."""
         self.remove_class("visible")
         self.remove_class("-resizing")
         self._dragging = False
+        # TGP images are a terminal resource, not just widget content: clear it
+        # on hide so a closed viewer cannot leave a ghost on screen.
+        if self._body is not None and hasattr(self._body, "image"):
+            try:
+                self._body.image = None
+            except Exception:  # noqa: BLE001
+                pass
 
     def action_close(self) -> None:
         self.hide()
@@ -700,7 +737,7 @@ class ImagePane(Static):
     # ---- view controls ----------------------------------------------------
     def _set_zoom(self, value: float) -> None:
         self.zoom = min(MAX_ZOOM, max(MIN_ZOOM, float(value)))
-        self.render_pane()
+        self._refresh_view()
 
     def action_zoom_in(self) -> None:
         self._set_zoom(self.zoom * 1.25)
@@ -711,23 +748,27 @@ class ImagePane(Static):
     def action_fit(self) -> None:
         self.zoom = 1.0
         self.pan = [0.0, 0.0]
-        self.render_pane()
+        self._refresh_view()
+
+    def _pan(self, dx: float, dy: float) -> None:
+        if self.image is None:
+            return
+        step = max(8, int(min(self.image.size) * 0.04))
+        self.pan[0] += dx * step
+        self.pan[1] += dy * step
+        self._refresh_view()
 
     def action_pan_left(self) -> None:
-        self.pan[0] -= self.PAN_STEP
-        self.render_pane()
+        self._pan(-1, 0)
 
     def action_pan_right(self) -> None:
-        self.pan[0] += self.PAN_STEP
-        self.render_pane()
+        self._pan(1, 0)
 
     def action_pan_up(self) -> None:
-        self.pan[1] -= self.PAN_STEP
-        self.render_pane()
+        self._pan(0, -1)
 
     def action_pan_down(self) -> None:
-        self.pan[1] += self.PAN_STEP
-        self.render_pane()
+        self._pan(0, 1)
 
     def action_wider(self) -> None:
         self._apply_width((self.size.width or self._width) + 4)
@@ -744,59 +785,76 @@ class ImagePane(Static):
         width = max(self.MIN_WIDTH, min(limit, int(value)))
         self._width = width
         self.styles.width = width
-        # During a drag, the layout's resize event paints; rendering here as
-        # well would decode and re-grid the picture twice per mouse move.
         if not self._dragging:
-            self.render_pane()
+            self._paint_chrome()
 
     # ---- rendering --------------------------------------------------------
-    def render_pane(self) -> None:
-        """Repaint header, picture and key hint at the current size."""
-        p = self.palette
-        size = self.size
-        # `size` is the widget including padding; content_size is what the
-        # cells actually paint into.
-        try:
-            content = self.content_size
-            cols = max(10, content.width)
-            rows = max(4, content.height)
-        except Exception:  # noqa: BLE001
-            cols, rows = max(10, size.width - 2), max(4, size.height)
-        header = Text()
-        name = Path(self.path).name if self.path else "no image"
-        header.append("IMAGE  ", style=f"bold {p.accent}")
-        header.append(name[:max(8, cols - 18)], style=f"bold {p.primary}")
-        header.append(f"  {zoom_label(self.zoom)}", style=p.dim)
-        header.truncate(max(1, cols))
-        header.append("\n")
-        body_rows = max(1, rows - 3)
+    def _refresh_view(self) -> None:
+        """Hand the current crop to the terminal renderer."""
+        if self._body is None:
+            return
         if self.image is None:
-            body = Text("(no image yet — the model can call show_image)\n",
-                        style=p.dim)
-        elif self._error:
-            body = Text(self._error + "\n", style=p.amber)
+            if hasattr(self._body, "image"):
+                self._body.image = None
+            else:
+                self._body.update(Text("(no image yet — the model can call show_image)",
+                                       style=self.palette.dim))
+            self._paint_chrome()
+            return
+        if hasattr(self._body, "image"):
+            # Pixel-capable renderer: crop the source at the current zoom/pan
+            # and let the protocol scale it into the widget. This is the whole
+            # point — no downscale to one character per pixel.
+            try:
+                self._body.image = zoomed(
+                    self.image, self.zoom, (self.pan[0], self.pan[1]))
+            except Exception:  # noqa: BLE001 - a broken image must not kill the UI
+                self._body.image = None
         else:
-            body = halfblocks(self.image, cols, body_rows, zoom=self.zoom,
-                              pan=(self.pan[0], self.pan[1]))
-        footer = Text()
-        footer.append("+/- zoom · arrows pan · [ ] width · q close",
-                      style=p.dim)
-        footer.truncate(max(1, cols))
-        header.append_text(body)
-        header.append("\n")
-        header.append_text(footer)
-        if self.caption:
-            header.append("\n")
-            header.append(self.caption[:cols], style=p.dim)
-        self.update(header)
+            # No terminal-image package or no graphics protocol: use the
+            # colored half-block fallback at the body's actual size.
+            size = self._body.size
+            cols = max(10, size.width)
+            rows = max(1, size.height)
+            self._body.update(halfblocks(
+                self.image, cols, rows, zoom=self.zoom,
+                pan=(self.pan[0], self.pan[1])))
+        self._paint_chrome()
+
+    def _paint_chrome(self) -> None:
+        p = self.palette
+        cols = max(10, (self.size.width or self._width) - 2)
+        if self._header is not None:
+            header = Text()
+            name = Path(self.path).name if self.path else "no image"
+            header.append("IMAGE  ", style=f"bold {p.accent}")
+            header.append(name, style=f"bold {p.primary}")
+            header.append(f"  {zoom_label(self.zoom)}", style=p.dim)
+            if self.caption:
+                header.append("  ·  " + self.caption, style=p.dim)
+            header.truncate(cols)
+            self._header.update(header)
+        if self._footer is not None:
+            footer = Text(
+                "+/- zoom · arrows pan · [ ] width · q close", style=p.dim)
+            footer.truncate(cols)
+            self._footer.update(footer)
+
+    def render_pane(self) -> None:
+        """Compatibility name used by the app's palette refresh."""
+        self._paint_chrome()
+        if self.has_class("visible"):
+            self._refresh_view()
 
     def on_resize(self, _event) -> None:
         if self.has_class("visible"):
-            self.render_pane()
+            self._paint_chrome()
+            if self._body is not None and not hasattr(self._body, "image"):
+                self._refresh_view()
 
     def on_mount(self) -> None:
         if self.has_class("visible"):
-            self.render_pane()
+            self._refresh_view()
 
     # ---- mouse ------------------------------------------------------------
     def on_click(self, event: Click) -> None:
@@ -840,7 +898,9 @@ class ImagePane(Static):
         self._dragging = False
         self.remove_class("-resizing")
         self.release_mouse()
-        self.render_pane()
+        self._paint_chrome()
+        if self._body is not None and not hasattr(self._body, "image"):
+            self._refresh_view()
 
 
 class StatusBar(Static):

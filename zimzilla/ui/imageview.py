@@ -118,5 +118,26 @@ def halfblocks(image, width: int, height: int, *, zoom: float = 1.0,
     return out
 
 
+def zoomed(image, zoom: float = 1.0,
+           pan: tuple[float, float] = (0.0, 0.0)):
+    """The source crop to hand to a pixel-capable terminal renderer.
+
+    Unlike :func:`halfblocks`, this does not decide a cell grid: the terminal
+    graphics protocol scales the returned image to the widget. Pan is in source
+    pixels; at 1.0 the whole picture is returned and the viewer letterboxes it.
+    """
+    zoom = min(MAX_ZOOM, max(MIN_ZOOM, float(zoom or 1.0)))
+    if zoom <= 1.0001:
+        return image
+    iw, ih = image.size
+    crop_w = max(1, int(iw / zoom))
+    crop_h = max(1, int(ih / zoom))
+    cx = iw / 2 + float(pan[0])
+    cy = ih / 2 + float(pan[1])
+    left = int(max(0, min(iw - crop_w, cx - crop_w / 2)))
+    top = int(max(0, min(ih - crop_h, cy - crop_h / 2)))
+    return image.crop((left, top, left + crop_w, top + crop_h))
+
+
 def zoom_label(zoom: float) -> str:
     return f"{zoom * 100:.0f}%"

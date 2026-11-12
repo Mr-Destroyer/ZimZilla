@@ -126,10 +126,15 @@ async def test_pane(tmp: Path) -> None:
         await pilot.pause()
         check("pane: show makes it visible", pane.has_class("visible"))
         check("pane: it loaded the image", pane.image is not None)
-        check("pane: it renders blocks", "▀" in pane.render().plain)
+        check("pane: it hands the picture to the terminal renderer",
+              getattr(pane._body, "image", None) is not None)
         start_zoom = pane.zoom
         pane.action_zoom_in()
         check("pane: zoom in raises the zoom", pane.zoom > start_zoom, str(pane.zoom))
+        rendered = getattr(pane._body, "image", None)
+        check("pane: zoom crops the source",
+              rendered is not None and rendered.size != pane.image.size,
+              str(getattr(rendered, "size", None)))
         pane.action_zoom_out()
         check("pane: zoom out lowers it", pane.zoom < start_zoom * 1.25)
         pane.action_fit()
@@ -218,9 +223,9 @@ def test_wiring() -> None:
     check("wiring: the widget has zoom keys", "action_zoom_in" in widgets)
     check("wiring: the widget can resize", "action_wider" in widgets)
     check("wiring: dragging the edge resizes", "RESIZE_GUTTER" in widgets)
-    check("deps: Pillow is declared",
-          "Pillow" in (ROOT / "requirements.txt").read_text()
-          or "pillow" in (ROOT / "requirements.txt").read_text().lower())
+    reqs = (ROOT / "requirements.txt").read_text().lower()
+    check("deps: Pillow is declared", "pillow" in reqs)
+    check("deps: the pixel renderer is declared", "textual-image" in reqs)
 
 
 def main() -> int:

@@ -33,6 +33,11 @@ markdown-it-py>=2.2.0
 # viewer reports the missing package.
 Pillow>=10.0
 
+# The image pane's pixel renderer: Kitty's Terminal Graphics Protocol, Sixel,
+# or a coloured half-cell fallback. This is what makes /show_image watchable
+# rather than a 44-column block mosaic.
+textual-image>=0.14.3
+
 # The visual browser (/see, browse, watch_video). Playwright drives a real
 # Chromium so a page's JavaScript has run before it is read; the browser binary
 # itself is installed separately (`python -m playwright install chromium`), and
