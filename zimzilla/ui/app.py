@@ -2469,6 +2469,26 @@ class ZimZillaApp(App):
                 self._mcp_snapshots[call_id] = (path, before, time.monotonic())
             except OSError:
                 pass
+        # Start the application itself in the pane when it is a TUI and the
+        # bridge has a launch command. The control socket is how app_type/
+        # app_keys reach that embedded process instead of whichever OS window
+        # happens to have focus.
+        try:
+            name = str(ev.get("name") or "")
+            found = mcp_mod.registry().find(name)
+            server = found[0].cfg.name if found is not None else ""
+            bridge_cfg = connect_mod.generated().get(server, {})
+            if bridge_cfg:
+                command = bridge_cfg.get("command") or []
+                project = str(bridge_cfg.get("project") or "")
+                control = str(bridge_cfg.get("control_socket")
+                              or (connect_mod.bridge_dir(server) / "control.sock"))
+                pane.ensure_app(
+                    server, list(command), cwd=str(self.cfg.workdir),
+                    project=project, control_socket=control,
+                    window_class=str(bridge_cfg.get("window_class") or ""))
+        except Exception:  # noqa: BLE001 - the activity view is enough
+            pass
         pane.note_call(call_id or str(ev.get("name") or ""),
                        str(ev.get("name") or "mcp"), ev.get("args") or {},
                        gated=bool(ev.get("gated")))
@@ -2530,7 +2550,7 @@ class ZimZillaApp(App):
         # broken image does not take the editor activity away.
         mcp = self._mcp_pane()
         if mcp is not None:
-            mcp.remove_class("visible")
+            mcp.hide()
         self._sys_line(
             f"image shown — {path}   (+/- zoom · arrows pan · [ ] width · q close)",
             ok=True)

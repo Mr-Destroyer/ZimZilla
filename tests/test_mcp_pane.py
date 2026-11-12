@@ -32,6 +32,7 @@ _HOME = Path(tempfile.mkdtemp(prefix="zim-mcp-pane-home-"))
 os.environ["ZIMZILLA_HOME"] = str(_HOME)
 atexit.register(shutil.rmtree, _HOME, ignore_errors=True)
 
+from zimzilla import bridge as bridge_mod  # noqa: E402
 from zimzilla.config import Config  # noqa: E402
 from zimzilla.ui.widgets import McpPane  # noqa: E402
 
@@ -128,6 +129,54 @@ async def test_pane(tmp: Path) -> None:
         check("pane: ordinary tools do not open it", not pane.has_class("visible"))
 
 
+async def test_terminal(tmp: Path) -> None:
+    """A TUI bridge opens the actual editor, and control reaches it."""
+    if shutil.which("nvim") is None:
+        check("terminal: nvim installed (skipped)", True, "not installed")
+        return
+    from zimzilla.ui.app import ZimZillaApp
+
+    target = tmp / "buffer.txt"
+    target.write_text("start\n", encoding="utf-8")
+    control = tmp / "control.sock"
+    cfg = _cfg(tmp)
+    app = ZimZillaApp(cfg)
+    async with app.run_test(size=(150, 45)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        pane = app.query_one(McpPane)
+        ok = pane.ensure_app("neovim", ["nvim", "--clean", str(target)],
+                             cwd=str(tmp), control_socket=str(control))
+        check("terminal: the TUI app starts", ok, str(ok))
+        check("terminal: it takes the app view", pane.has_class("appmode"))
+        check("terminal: a control socket is listening", control.exists())
+        await pilot.pause(1.5)
+        screen = pane._terminal._screen
+        check("terminal: it has a rendered screen", screen is not None)
+        check("terminal: it painted the buffer name",
+              "buffer.txt" in "".join(screen.display) if screen else False,
+              "".join(screen.display)[:160] if screen else "")
+
+        # This is the model-facing path: bridge app_keys/app_type -> socket ->
+        # the PTY behind the pane.
+        old = bridge_mod._CONTROL_SOCKET
+        bridge_mod._CONTROL_SOCKET = str(control)
+        try:
+            bridge_mod.press_keys("i")
+            bridge_mod.type_text("HELLO")
+            bridge_mod.press_keys("Escape")
+            bridge_mod.type_text(":wq\r")
+            await pilot.pause(1.5)
+        finally:
+            bridge_mod._CONTROL_SOCKET = old
+        check("terminal: bridge input reached the editor",
+              "HELLO" in target.read_text(), repr(target.read_text()))
+        pane.hide()
+        await pilot.pause(0.5)
+        check("terminal: closing stops the process",
+              pane._terminal._proc is None)
+
+
 def test_wiring() -> None:
     app = (ROOT / "zimzilla" / "ui" / "app.py").read_text(encoding="utf-8")
     widgets = (ROOT / "zimzilla" / "ui" / "widgets.py").read_text(encoding="utf-8")
@@ -145,6 +194,7 @@ def test_wiring() -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="zim-mcp-pane-") as td:
         asyncio.run(test_pane(Path(td)))
+        asyncio.run(test_terminal(Path(td)))
         test_wiring()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed")

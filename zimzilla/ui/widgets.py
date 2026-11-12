@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import socket
+import subprocess
+import threading
 import time
 from pathlib import Path
 
 from rich.cells import cell_len, get_character_cell_size
 from rich.text import Text
-from textual import events
+from textual import events, work
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.events import Click, MouseDown, MouseMove, MouseUp
@@ -20,6 +23,7 @@ from ..theme import Palette
 from .imageview import (MAX_ZOOM, MIN_ZOOM, halfblocks, load, zoom_label,
                         zoomed)
 from .rain import RainRichLog
+from .terminalview import TerminalView, is_tui
 
 # Imported at module import, before Textual takes the terminal: textual-image
 # probes the terminal for a graphics protocol and reads the reply, which cannot
@@ -946,9 +950,16 @@ class McpPane(Vertical):
         scrollbar-size-vertical: 1;
         scrollbar-color: $secondary;
     }
+    McpPane #mcp-terminal { display: none; }
+    McpPane.appmode #mcp-terminal { display: block; }
+    McpPane.appmode #mcp-log { display: none; }
+    McpPane #mcp-screen { display: none; height: 1fr; width: 100%; }
+    McpPane.screenmode #mcp-screen { display: block; }
+    McpPane.screenmode #mcp-log { display: none; }
     """
 
     BINDINGS = [
+        Binding("a", "toggle_view", "app/log", show=False),
         Binding("c", "clear_log", "clear", show=False),
         Binding("q", "close", "close", show=False),
         Binding("escape", "close", "close", show=False),
@@ -974,6 +985,17 @@ class McpPane(Vertical):
         self._header = None
         self._footer = None
         self._log = None
+        self._terminal = None
+        self._app_name = ""
+        self._app_command: list[str] = []
+        self._control_path = ""
+        self._control_server = None
+        self._control_stop = None
+        self._control_thread = None
+        self._screen = None
+        self._screen_stop = None
+        self._screen_thread = None
+        self._window_class = ""
 
     def compose(self) -> ComposeResult:
         from textual.widgets import Static
@@ -983,9 +1005,282 @@ class McpPane(Vertical):
         self._log = RichLog(id="mcp-log", max_lines=1500, wrap=True)
         # The pane owns q/c; a focusable log would take them first.
         self._log.can_focus = False
+        self._terminal = TerminalView(id="mcp-terminal")
+        if _TerminalImage is not None:
+            self._screen = _TerminalImage(id="mcp-screen")
+        else:
+            self._screen = Static(id="mcp-screen")
         yield self._header
+        yield self._terminal
+        yield self._screen
         yield self._log
         yield self._footer
+
+    # ---- embedded application --------------------------------------------
+    def ensure_app(self, name: str, command: list[str], *, cwd: str = "",
+                   project: str = "", control_socket: str = "",
+                   window_class: str = "") -> bool:
+        """Start the TUI app in the pane if *command* is one we can embed.
+
+        Returns False for a GUI app (Kdenlive) or a server with no launch
+        command; the activity view remains available there.
+        """
+        if not command:
+            return False
+        self._window_class = window_class or name
+        import shutil
+        if not is_tui(command):
+            # A GUI app cannot live in a PTY; show its window instead of a
+            # blank terminal. The activity log stays one keypress away.
+            if self._screen is not None and shutil.which("grim"):
+                self._start_screenshots()
+                return True
+            return False
+        resolved = list(command)
+        if shutil.which(resolved[0]) is None:
+            if resolved[0] == "neovim" and shutil.which("nvim"):
+                resolved[0] = "nvim"
+            else:
+                self.note_info(f"{name}: command not found — {resolved[0]}",
+                               warn=True)
+                return False
+        if self._terminal is None:
+            return False
+        if self._app_name == name and self._terminal._proc is not None:
+            return True
+        # A project file is meaningful for nvim; for a generic TUI it is not
+        # passed as an argument.
+        args = list(resolved)
+        if project and Path(project).is_file() and Path(resolved[0]).name in (
+                "nvim", "neovim", "vim"):
+            args.append(project)
+        self._app_name = name
+        self._app_command = resolved
+        # Open the control socket first: app_type can run immediately after the
+        # tool_call event that started this pane, and input is queued by the
+        # terminal until the PTY exists.
+        self._control_path = control_socket
+        if control_socket:
+            self._start_control(control_socket)
+        try:
+            self._terminal.start(args, cwd=cwd)
+        except Exception as e:  # noqa: BLE001
+            self._stop_control()
+            self.note_info(f"{name}: could not start {resolved[0]}: {e}",
+                           warn=True)
+            return False
+        self.add_class("appmode")
+        self._paint_chrome()
+        return True
+
+    def _start_control(self, path: str) -> None:
+        self._stop_control()
+        try:
+            if len(path) > 100:
+                return
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path)
+            server.listen(4)
+            server.settimeout(0.5)
+            stop = threading.Event()
+            self._control_server = server
+            self._control_stop = stop
+
+            def serve() -> None:
+                while not stop.is_set():
+                    try:
+                        conn, _ = server.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    try:
+                        conn.settimeout(2)
+                        raw = conn.recv(65536)
+                    except OSError:
+                        raw = b""
+                    finally:
+                        try:
+                            conn.close()
+                        except OSError:
+                            pass
+                    if not raw:
+                        continue
+                    try:
+                        msg = json.loads(raw.decode("utf-8", "replace"))
+                    except ValueError:
+                        continue
+                    try:
+                        self.app.call_from_thread(self._apply_control, msg)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            self._control_thread = threading.Thread(target=serve, daemon=True)
+            self._control_thread.start()
+        except OSError as e:
+            self.note_info(f"{self._app_name}: control socket unavailable: {e}",
+                           warn=True)
+
+    def _apply_control(self, msg: dict) -> None:
+        if self._terminal is None or not isinstance(msg, dict):
+            return
+        action = msg.get("action")
+        if action == "text":
+            self._terminal.send_text(str(msg.get("text") or ""))
+        elif action == "keys":
+            self._terminal.send_keys(str(msg.get("keys") or ""))
+        elif action == "focus":
+            self._terminal.focus()
+
+    def _stop_control(self) -> None:
+        if self._control_stop is not None:
+            self._control_stop.set()
+        if self._control_server is not None:
+            try:
+                self._control_server.close()
+            except OSError:
+                pass
+        if self._control_path:
+            try:
+                Path(self._control_path).unlink()
+            except OSError:
+                pass
+        self._control_server = None
+        self._control_stop = None
+        self._control_thread = None
+        self._control_path = ""
+
+    def _start_screenshots(self) -> None:
+        if self._screen_stop is not None:
+            return
+        self._screen_stop = threading.Event()
+        self.add_class("screenmode")
+        self._paint_chrome()
+        self._screenshot_loop()
+
+    def _stop_screenshots(self) -> None:
+        if self._screen_stop is not None:
+            self._screen_stop.set()
+        self._screen_stop = None
+        self._screen_thread = None
+        if self._screen is not None and hasattr(self._screen, "image"):
+            try:
+                self._screen.image = None
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _window_region(self) -> str:
+        """The KWin/Hyprland geometry of the bridged window, or empty."""
+        import shutil
+        hyprctl = shutil.which("hyprctl")
+        if not hyprctl:
+            return ""
+        try:
+            proc = subprocess.run([hyprctl, "clients", "-j"],
+                                  capture_output=True, text=True, timeout=5)
+            clients = json.loads(proc.stdout or "[]")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return ""
+        needle = (self._window_class or "").lower()
+        for client in clients if isinstance(clients, list) else []:
+            if not isinstance(client, dict):
+                continue
+            hay = f"{client.get('class', '')} {client.get('title', '')}".lower()
+            if needle and needle not in hay:
+                continue
+            at = client.get("at") or [0, 0]
+            size = client.get("size") or [0, 0]
+            try:
+                x, y = int(at[0]), int(at[1])
+                w, h = int(size[0]), int(size[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if w > 0 and h > 0:
+                return f"{x},{y} {w}x{h}"
+        return ""
+
+    @work(exclusive=True, thread=True, group="mcp-screen")
+    def _screenshot_loop(self) -> None:
+        import shutil
+        grim = shutil.which("grim")
+        image = shutil.which("import")
+        if grim is None and image is None:
+            return
+        path = Path(self.app.cfg.state_dir) / "mcp" / "live.png"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        while self._screen_stop is not None and not self._screen_stop.is_set():
+            region = self._window_region()
+            # Never fall back to a full-screen capture: the panel is meant to
+            # show the bridged app, not whatever else is on the desktop. Keep
+            # waiting until its window exists.
+            if not region:
+                if self._screen_stop is not None:
+                    self._screen_stop.wait(1.2)
+                continue
+            cmd = [grim] if grim else [image, "-window", "root"]
+            if grim and region:
+                cmd += ["-g", region]
+            cmd.append(str(path))
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if path.is_file():
+                try:
+                    self.app.call_from_thread(self._set_screen, path)
+                except Exception:  # noqa: BLE001
+                    break
+            if self._screen_stop is not None:
+                self._screen_stop.wait(1.2)
+
+    def _set_screen(self, path: Path) -> None:
+        if self._screen is None:
+            return
+        if hasattr(self._screen, "image"):
+            try:
+                self._screen.image = path
+                return
+            except Exception:  # noqa: BLE001
+                return
+        self._screen.update(Text(f"live: {path}", style=self.palette.dim))
+
+    def hide(self) -> None:
+        """Hide the pane and stop the embedded process/control socket."""
+        self.remove_class("visible")
+        self.remove_class("appmode")
+        self.remove_class("screenmode")
+        self.remove_class("-resizing")
+        self._dragging = False
+        self._stop_control()
+        self._stop_screenshots()
+        if self._terminal is not None:
+            self._terminal.stop()
+        self._app_name = ""
+
+    def action_toggle_view(self) -> None:
+        live = ((self._terminal is not None and self._terminal._proc is not None)
+                or self._screen_stop is not None)
+        if not live:
+            return
+        if self.has_class("appmode"):
+            self.remove_class("appmode")
+            if self._screen_stop is not None:
+                self.add_class("screenmode")
+        elif self.has_class("screenmode"):
+            self.remove_class("screenmode")
+        elif self._terminal is not None and self._terminal._proc is not None:
+            self.add_class("appmode")
+        elif self._screen_stop is not None:
+            self.add_class("screenmode")
+        self._paint_chrome()
 
     # ---- events -----------------------------------------------------------
     def note_call(self, call_id: str, name: str, args: dict,
@@ -1080,6 +1375,11 @@ class McpPane(Vertical):
         if self._header is not None:
             t = Text()
             t.append("MCP LIVE  ", style=f"bold {p.accent}")
+            live_view = self.has_class("appmode") or self.has_class("screenmode")
+            app_style = f"bold {p.accent}" if live_view else p.dim
+            log_style = p.dim if live_view else f"bold {p.accent}"
+            t.append("[APP]", style=app_style)
+            t.append(" [LOG]  ", style=log_style)
             t.append(f"{self._calls} call(s)", style=p.primary)
             if self._active:
                 t.append(f"  ·  {len(self._active)} running", style=p.amber)
@@ -1088,7 +1388,7 @@ class McpPane(Vertical):
             t.truncate(cols)
             self._header.update(t)
         if self._footer is not None:
-            t = Text("c clear · [ ] width · q close", style=p.dim)
+            t = Text("a app/log · c clear · [ ] width · q close", style=p.dim)
             t.truncate(cols)
             self._footer.update(t)
 
@@ -1101,9 +1401,7 @@ class McpPane(Vertical):
         self._paint_chrome()
 
     def action_close(self) -> None:
-        self.remove_class("visible")
-        self.remove_class("-resizing")
-        self._dragging = False
+        self.hide()
         try:
             self.app.query_one("#input", Input).focus()
         except Exception:  # noqa: BLE001
@@ -1137,7 +1435,19 @@ class McpPane(Vertical):
     # ---- mouse ------------------------------------------------------------
     def on_click(self, event: Click) -> None:
         event.stop()
-        self.focus()
+        if self.has_class("screenmode"):
+            self.focus()
+            return
+        if self.has_class("appmode") and self._terminal is not None:
+            # The body is the editor and takes keys; the header/footer are the
+            # pane's own chrome. Clicking them gives the pane `a`/`q` instead
+            # of typing those letters into the editor.
+            if event.offset.y <= 0 or event.offset.y >= self.size.height - 1:
+                self.focus()
+            else:
+                self._terminal.focus()
+        else:
+            self.focus()
 
     def on_mouse_down(self, event: MouseDown) -> None:
         if event.button != 1:

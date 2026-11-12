@@ -38,6 +38,10 @@ Pillow>=10.0
 # rather than a 44-column block mosaic.
 textual-image>=0.14.3
 
+# The MCP pane's embedded terminal (Neovim and other TUIs). pyte emulates the
+# screen; the PTY is stdlib.
+pyte>=0.8.1
+
 # The visual browser (/see, browse, watch_video). Playwright drives a real
 # Chromium so a page's JavaScript has run before it is read; the browser binary
 # itself is installed separately (`python -m playwright install chromium`), and

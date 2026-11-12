@@ -955,33 +955,50 @@ the application's keyboard shortcuts, its file/API adapter, or the Kdenlive
 timeline tools. A button that only responds to a mouse is not reachable through
 this bridge, and it says so instead of pretending.
 
-### Live MCP activity
+### Live MCP app view
 
-The first MCP tool call opens the **MCP activity pane** beside the transcript.
-It is not a log written afterwards; it is the call as it happens:
+The first MCP tool call opens the **MCP pane** beside the transcript, and it
+opens **the application itself**, not just a log.
 
-- the server and tool name, with a running/failed/done state
-- the arguments the model sent — path, command, old/new strings, buffer action
-- the result text and elapsed time
-- a **unified diff** when the call changed a file inside the working tree or
-  the harness state directory: the file is snapshotted before execution and
-  compared after, so a Neovim buffer write shows the actual `-`/`+` lines
+- **TUI apps** — Neovim, Vim, htop, lazygit, a shell: the pane runs the real
+  process on a PTY and renders its screen with `pyte`. It is interactive when
+  focused. This is Neovim’s actual buffer, cursor and status line, not a
+  re-drawn approximation.
+- **GUI apps** — Kdenlive and anything else that opens a window: the pane
+  captures the bridged window with `grim` roughly once a second. The MCP tools
+  drive the real window; the view is what is on screen.
+- **The activity tab** — press `a` (click the pane header first, so the editor
+  does not eat the key) to switch between the app and the activity stream:
+  server/tool, arguments, running/failed/done, result, elapsed time, and a
+  **unified diff** when the call changed a local file.
 
-It is a normal pane: drag its left edge or press `[`/`]` to resize, click it
-and use `c` to clear or `q`/`Esc` to close. It opens without taking focus, so
-the model can keep working; clicking the prompt returns the keyboard.
+For a TUI app, the bridge’s `app_type` and `app_keys` are routed to the
+embedded process through a local control socket in the bridge directory
+instead of being typed into whichever OS window happens to have focus. That is
+what makes “edit a file in Neovim” and “watch it happen in the pane” the same
+action. `app_focus` focuses the embedded terminal; `app_launch` reports that it
+is already running there. GUI apps keep using the real window and the normal
+desktop adapter.
+
+It is a normal pane: drag its left edge or press `[`/`]` to resize; click the
+header for the pane keys, the body for the embedded app; `c` clears the
+activity log; `q`/`Esc` closes it and stops the embedded process.
 
 The image pane and the MCP pane share the right-hand column. Showing an image
-closes the activity pane; the next MCP call brings it back. That is deliberate:
-two 52-column panes beside the rails would leave no transcript on a normal
-terminal.
+closes the MCP pane; the next MCP call brings it back. Two 52-column panes plus
+the rails would leave no transcript on a normal terminal.
 
-The diff is best-effort by design. It detects a file named in the call's
-arguments (`path`, `file`, `file_path`, `target`, `buffer`, …), reads it before
-and after, and only inside the working tree/state dir. An MCP server that edits
-a buffer without writing the file, or names no path, still shows its arguments
-and result — but there is no disk change to diff, and the pane does not invent
-one.
+The activity diff is best-effort by design. It detects a file named in the
+call’s arguments (`path`, `file`, `file_path`, `target`, `buffer`, …), reads it
+before and after, and only inside the working tree/state dir. An MCP server
+that edits a buffer without writing the file, or names no path, still shows its
+arguments and result — but there is no disk change to diff, and the pane does
+not invent one.
+
+Bridges generated before this view existed do not carry a control socket in
+`bridge.json`; the pane derives the same default path, but the bridge process
+must be running the current `zimzilla.bridge`. Re-run
+`/connect neovim --replace` (or update the install) after upgrading.
 
 ### Generated files
 
@@ -3131,7 +3148,8 @@ zimzilla/                     the package
   sandbox.py                  the filesystem jail
   images.py                   image attachments — read, fit, hand to either protocol
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
-  ui/imageview.py             the image pane's half-block renderer
+  ui/imageview.py             the image pane's half-block/pixel renderer
+  ui/terminalview.py          the MCP pane's PTY terminal (pyte)
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
@@ -3197,7 +3215,7 @@ python tests/test_vision.py        # /see, browse, view_image — images, browse
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
-python tests/test_mcp_pane.py      # MCP activity — live calls, results, on-disk diff
+python tests/test_mcp_pane.py      # MCP pane — app view, PTY input, activity diff
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

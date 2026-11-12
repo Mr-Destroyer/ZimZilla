@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,10 @@ PROTOCOL_VERSION = "2025-06-18"
 #: How long a render may take. A real project can be long; a bridge call that
 #: silently waits forever is worse than one that reports the timeout.
 RENDER_TIMEOUT = 3600
+
+#: Where the MCP pane listens for app_type/app_keys when it is hosting the
+#: app in an embedded terminal. Set in ``main`` from bridge.json.
+_CONTROL_SOCKET = ""
 
 #: ``ffprobe`` is used for duration only. When it is absent, the caller must
 #: supply an out frame; guessing a duration is how a clip becomes a still.
@@ -594,6 +599,8 @@ def focus_window(spec: str, window_class: str = "") -> str:
         safe = match.replace('"', "")
         code = (f'hl.dispatch(hl.dsp.focus({{window="{safe}"}}))')
         try:
+            if _send_control({"action": "focus"}):
+                return "focused the embedded app"
             proc = _run([hyprctl, "eval", code])
             if proc.returncode == 0 and "error:" not in (proc.stdout or "").lower():
                 return f"focused {match}"
@@ -644,10 +651,28 @@ def screenshot(path: str = "", *, region: str = "",
     raise BridgeError("no screenshot backend (need grim on Wayland or ImageMagick import)")
 
 
+def _send_control(message: dict, *, timeout: float = 2.0) -> bool:
+    """Send an input command to the MCP pane's embedded terminal, if any."""
+    path = _CONTROL_SOCKET
+    if not path or not Path(path).exists():
+        return False
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(path)
+        sock.sendall(json.dumps(message).encode("utf-8"))
+        sock.close()
+        return True
+    except OSError:
+        return False
+
+
 def type_text(text: str) -> str:
     """Type into the focused window with wtype (Wayland) or xdotool (X11)."""
     if not text:
         raise BridgeError("nothing to type")
+    if _send_control({"action": "text", "text": text}):
+        return f"typed {len(text)} character(s) into the embedded app"
     wtype = _which("wtype")
     if wtype:
         try:
@@ -684,6 +709,8 @@ def press_keys(keys: str) -> str:
     Several chords can be space-separated (``ctrl+s Return``). Both wtype and
     xdotool are supported; wtype takes presses and releases explicitly.
     """
+    if _send_control({"action": "keys", "keys": keys}):
+        return f"sent {keys!r} to the embedded app"
     wtype = _which("wtype")
     xdotool = _which("xdotool")
     if not wtype and not xdotool:
@@ -741,6 +768,8 @@ def ocr(path: str = "", *, default_dir: Path | None = None) -> str:
 
 
 def launch_app(command: list[str]) -> str:
+    if _send_control({"action": "focus"}):
+        return "the app is already running in the MCP pane"
     if not command:
         raise BridgeError("bridge has no launch command")
     if not isinstance(command, list) or not all(isinstance(c, str) for c in command):
@@ -1013,8 +1042,12 @@ def main(adapter: str = "desktop", config_path: str | Path | None = None) -> int
     """Run the stdio MCP server. Blocking; exits on stdin EOF."""
     cfg = _load_config(config_path)
     cfg["adapter"] = adapter or cfg.get("adapter") or "desktop"
+    global _CONTROL_SOCKET
     if config_path:
         cfg["_dir"] = str(Path(config_path).resolve().parent)
+        _CONTROL_SOCKET = str(cfg.get("control_socket")
+                              or (Path(config_path).resolve().parent
+                                  / "control.sock"))
     tools = _tool_table(cfg)
     for line in sys.stdin:
         line = line.strip()
