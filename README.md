@@ -955,6 +955,34 @@ the application's keyboard shortcuts, its file/API adapter, or the Kdenlive
 timeline tools. A button that only responds to a mouse is not reachable through
 this bridge, and it says so instead of pretending.
 
+### Live MCP activity
+
+The first MCP tool call opens the **MCP activity pane** beside the transcript.
+It is not a log written afterwards; it is the call as it happens:
+
+- the server and tool name, with a running/failed/done state
+- the arguments the model sent — path, command, old/new strings, buffer action
+- the result text and elapsed time
+- a **unified diff** when the call changed a file inside the working tree or
+  the harness state directory: the file is snapshotted before execution and
+  compared after, so a Neovim buffer write shows the actual `-`/`+` lines
+
+It is a normal pane: drag its left edge or press `[`/`]` to resize, click it
+and use `c` to clear or `q`/`Esc` to close. It opens without taking focus, so
+the model can keep working; clicking the prompt returns the keyboard.
+
+The image pane and the MCP pane share the right-hand column. Showing an image
+closes the activity pane; the next MCP call brings it back. That is deliberate:
+two 52-column panes beside the rails would leave no transcript on a normal
+terminal.
+
+The diff is best-effort by design. It detects a file named in the call's
+arguments (`path`, `file`, `file_path`, `target`, `buffer`, …), reads it before
+and after, and only inside the working tree/state dir. An MCP server that edits
+a buffer without writing the file, or names no path, still shows its arguments
+and result — but there is no disk change to diff, and the pane does not invent
+one.
+
 ### Generated files
 
 ```
@@ -3169,6 +3197,7 @@ python tests/test_vision.py        # /see, browse, view_image — images, browse
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
+python tests/test_mcp_pane.py      # MCP activity — live calls, results, on-disk diff
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so

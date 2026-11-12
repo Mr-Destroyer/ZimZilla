@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import difflib
 import shutil
 import textwrap
 import threading
@@ -78,8 +79,8 @@ from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
 from .web import WaveWeb
-from .widgets import (ChatPane, HeaderBar, ImagePane, PromptInput, StatusBar,
-                      ZimPane)
+from .widgets import (ChatPane, HeaderBar, ImagePane, McpPane, PromptInput,
+                      StatusBar, ZimPane)
 
 
 #: What `/zim-opencode` says while it works. Deliberately no counts: how many
@@ -1331,6 +1332,9 @@ class ZimZillaApp(App):
         # The prompt size of the most recent API call. That — not the session
         # cumulative input total — is how full the context window actually is:
         # the cumulative figure counts every turn's prompt and grows forever.
+        #: call id -> (path, pre-call text, monotonic start), for the live MCP
+        #: panel's on-disk diff. Cleared when its result arrives.
+        self._mcp_snapshots: dict[str, tuple[Path, str, float]] = {}
         self._last_call_input = 0
         # The fast repaint timer for the compaction animation, or None when no
         # compaction is running. One timer for the whole app: started by the
@@ -1385,6 +1389,7 @@ class ZimZillaApp(App):
             yield LoopRail(self.palette)
             yield ChatPane(self.palette, rain=self.rain_on)
             yield ImagePane(self.palette)
+            yield McpPane(self.palette)
             yield ZimPane(self.palette)
             yield TelemetryRail(self.palette, total_context=self.cfg.context_window)
         with Vertical(id="bottom-dock"):
@@ -2186,6 +2191,8 @@ class ZimZillaApp(App):
                 loop.set_stage("calling")
             if ev.get("gated"):
                 bar.set_activity(f"awaiting permission: {ev['name']}", busy=True)
+            if str(ev.get("name", "")).startswith("mcp_"):
+                self._mcp_call(ev)
 
         elif etype == "tool_result":
             args = ev.get("args") or {}
@@ -2202,6 +2209,8 @@ class ZimZillaApp(App):
             # A tool can put a picture in the operator's viewer. This is a UI
             # side effect of the tool result, not a model turn: show_image
             # returns the path and the pane is opened here.
+            if str(ev.get("name", "")).startswith("mcp_"):
+                self._mcp_result(ev)
             pane_info = (ev.get("meta") or {}).get("image_pane")
             if pane_info:
                 self._show_image_pane(pane_info)
@@ -2389,6 +2398,108 @@ class ZimZillaApp(App):
             if loop is not None:
                 loop.set_stage("idle")
 
+    # ---- MCP activity pane ------------------------------------------------
+    def _mcp_pane(self) -> McpPane | None:
+        try:
+            return self.query_one(McpPane)
+        except Exception:  # noqa: BLE001 - before compose, or tearing down
+            return None
+
+    def _mcp_file(self, args: dict, *, allow_missing: bool = False) -> Path | None:
+        """A local file named by an MCP call, if it is safe to read.
+
+        The panel exists to show edits, so it reads the target before and
+        after. It stays inside the working tree or the harness's state dir:
+        showing a diff of an unrelated private file would be a new disclosure,
+        not a view of the work the operator asked for.
+        """
+        raw = None
+        for key in ("path", "file", "file_path", "filepath", "filename",
+                    "target", "buffer"):
+            value = (args or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                raw = value.strip()
+                break
+            if isinstance(value, dict):
+                nested = value.get("path") or value.get("file")
+                if isinstance(nested, str) and nested.strip():
+                    raw = nested.strip()
+                    break
+        if not raw:
+            return None
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(self.cfg.workdir) / candidate
+        try:
+            resolved = candidate.resolve()
+            workdir = Path(self.cfg.workdir).resolve()
+            state = Path(self.cfg.state_dir).resolve()
+        except (OSError, ValueError):
+            return None
+        if not (resolved == workdir or workdir in resolved.parents
+                or resolved == state or state in resolved.parents):
+            return None
+        if resolved.is_file():
+            try:
+                if resolved.stat().st_size > 2_000_000:
+                    return None
+            except OSError:
+                return None
+            return resolved
+        if allow_missing and not resolved.exists():
+            return resolved
+        return None
+
+    def _mcp_call(self, ev: dict) -> None:
+        pane = self._mcp_pane()
+        if pane is None:
+            return
+        # One auxiliary pane at a time: the editor activity is what the
+        # operator is watching now, and two 52-column panes would leave no
+        # transcript on a normal terminal.
+        image = self._image_pane()
+        if image is not None and image.has_class("visible"):
+            image.hide()
+        call_id = str(ev.get("id") or "")
+        path = self._mcp_file(ev.get("args") or {}, allow_missing=True)
+        if path is not None and call_id:
+            try:
+                before = (path.read_text(encoding="utf-8", errors="replace")
+                          if path.is_file() else "")
+                self._mcp_snapshots[call_id] = (path, before, time.monotonic())
+            except OSError:
+                pass
+        pane.note_call(call_id or str(ev.get("name") or ""),
+                       str(ev.get("name") or "mcp"), ev.get("args") or {},
+                       gated=bool(ev.get("gated")))
+
+    def _mcp_result(self, ev: dict) -> None:
+        pane = self._mcp_pane()
+        if pane is None:
+            return
+        call_id = str(ev.get("id") or "")
+        snap = self._mcp_snapshots.pop(call_id, None)
+        diff = ""
+        elapsed = None
+        if snap is not None:
+            path, before, started = snap
+            elapsed = time.monotonic() - started
+            try:
+                after = (path.read_text(encoding="utf-8", errors="replace")
+                         if path.is_file() else "")
+                if after != before:
+                    diff = "\n".join(difflib.unified_diff(
+                        before.splitlines(), after.splitlines(),
+                        fromfile=f"before {path.name}",
+                        tofile=f"after {path.name}", lineterm=""))
+            except OSError:
+                pass
+        pane.note_result(call_id or str(ev.get("name") or ""),
+                         str(ev.get("name") or "mcp"),
+                         str(ev.get("output") or ""),
+                         is_error=bool(ev.get("is_error")),
+                         diff=diff, elapsed=elapsed)
+
     # ---- image pane -------------------------------------------------------
     def _image_pane(self) -> ImagePane | None:
         try:
@@ -2414,6 +2525,12 @@ class ZimZillaApp(App):
         except Exception as e:  # noqa: BLE001 - a broken image must not kill a turn
             self._sys_line(f"image pane: {type(e).__name__}: {e}", warn=True)
             return
+        # The two live panes share the right column; the picture is what the
+        # operator asked for now. Hidden only after a successful show, so a
+        # broken image does not take the editor activity away.
+        mcp = self._mcp_pane()
+        if mcp is not None:
+            mcp.remove_class("visible")
         self._sys_line(
             f"image shown — {path}   (+/- zoom · arrows pan · [ ] width · q close)",
             ok=True)
@@ -6708,6 +6825,10 @@ class ZimZillaApp(App):
         if pane is not None:
             pane.palette = p
             pane.render_pane()
+        mcp_pane = self._mcp_pane()
+        if mcp_pane is not None:
+            mcp_pane.palette = p
+            mcp_pane.render_pane()
 
         h = self.query_one(HeaderBar)
         h.palette = p

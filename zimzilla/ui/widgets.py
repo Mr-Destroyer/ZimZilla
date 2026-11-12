@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from textual.containers import Vertical
 from textual.events import Click, MouseDown, MouseMove, MouseUp
 from textual.expand_tabs import expand_tabs_inline
 from textual.geometry import Offset, clamp
-from textual.widgets import Input, Static
+from textual.widgets import Input, RichLog, Static
 
 from ..theme import Palette
 from .imageview import (MAX_ZOOM, MIN_ZOOM, halfblocks, load, zoom_label,
@@ -903,7 +904,273 @@ class ImagePane(Vertical):
             self._refresh_view()
 
 
+class McpPane(Vertical):
+    """Live MCP activity: what a connected server is being asked to do.
+
+    `/connect` gives the model tools that act on another application. Without a
+    view, that work happens behind the transcript: a Neovim tool call is one
+    line, and the buffer change is invisible. This pane opens on the first MCP
+    call and shows the stream as it happens — tool, arguments, running state,
+    result, and a unified diff when the call changed a local file.
+
+    It is read-only. Clicking it focuses the pane for scrolling and ``q``;
+    otherwise the prompt keeps the keyboard. The model is never interrupted by
+    the panel opening.
+    """
+
+    can_focus = True
+
+    DEFAULT_CSS = """
+    McpPane {
+        display: none;
+        width: 52;
+        min-width: 26;
+        max-width: 140;
+        height: 100%;
+        border-left: heavy $secondary;
+        background: $background;
+    }
+    McpPane.visible { display: block; }
+    McpPane.-resizing { border-left: heavy $accent; }
+    McpPane:focus { border-left: heavy $accent; }
+    McpPane #mcp-header, McpPane #mcp-footer {
+        height: 1;
+        width: 100%;
+        padding: 0 1;
+        background: $background;
+    }
+    McpPane #mcp-log {
+        height: 1fr;
+        width: 100%;
+        background: $background;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $secondary;
+    }
+    """
+
+    BINDINGS = [
+        Binding("c", "clear_log", "clear", show=False),
+        Binding("q", "close", "close", show=False),
+        Binding("escape", "close", "close", show=False),
+        Binding("left_square_bracket", "narrower", "narrower", show=False),
+        Binding("right_square_bracket", "wider", "wider", show=False),
+    ]
+
+    MIN_WIDTH = 26
+    MAX_WIDTH = 140
+    DEFAULT_WIDTH = 52
+    RESIZE_GUTTER = 2
+
+    def __init__(self, palette: Palette, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.palette = palette
+        self._width = self.DEFAULT_WIDTH
+        self._dragging = False
+        self._drag_origin_x = 0
+        self._drag_origin_width = self.DEFAULT_WIDTH
+        self._active: dict[str, dict] = {}
+        self._calls = 0
+        self._errors = 0
+        self._header = None
+        self._footer = None
+        self._log = None
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import Static
+        self._header = Static(id="mcp-header")
+        self._footer = Static(id="mcp-footer")
+        # RichLog can focus itself and then steal q/c; the pane owns those keys.
+        self._log = RichLog(id="mcp-log", max_lines=1500, wrap=True)
+        # The pane owns q/c; a focusable log would take them first.
+        self._log.can_focus = False
+        yield self._header
+        yield self._log
+        yield self._footer
+
+    # ---- events -----------------------------------------------------------
+    def note_call(self, call_id: str, name: str, args: dict,
+                  gated: bool = False) -> None:
+        """Record a call the instant the model makes it."""
+        self._calls += 1
+        self._active[call_id] = {"name": name, "args": args or {}}
+        self.add_class("visible")
+        p = self.palette
+        t = Text()
+        t.append("▶ ", style=f"bold {p.accent}")
+        t.append(name, style=f"bold {p.primary}")
+        t.append("  running", style=p.dim)
+        if gated:
+            t.append("  · awaiting permission", style=p.amber)
+        t.append("\n")
+        for key, value in (args or {}).items():
+            text = value if isinstance(value, str) else json.dumps(
+                value, ensure_ascii=False)
+            text = str(text).replace("\n", "\\n")
+            if len(text) > 220:
+                text = text[:219] + "…"
+            t.append(f"  {key}: ", style=p.dim)
+            t.append(text, style=p.primary)
+            t.append("\n")
+        self._write(t)
+        self._paint_chrome()
+
+    def note_result(self, call_id: str, name: str, output: str,
+                    is_error: bool = False, diff: str = "",
+                    elapsed: float | None = None) -> None:
+        """Record the result, and any diff the call made on disk."""
+        self._active.pop(call_id, None)
+        if is_error:
+            self._errors += 1
+        p = self.palette
+        t = Text()
+        if is_error:
+            t.append("✘ ", style=f"bold {p.red}")
+            t.append("failed", style=f"bold {p.red}")
+        else:
+            t.append("✔ ", style=f"bold {p.accent}")
+            t.append("done", style=f"bold {p.accent}")
+        if elapsed is not None:
+            t.append(f"  {elapsed * 1000:.0f}ms", style=p.dim)
+        t.append("\n")
+        if diff:
+            for line in diff.splitlines()[:100]:
+                if line.startswith(("+++", "---", "@@")):
+                    style = p.dim
+                elif line.startswith("+"):
+                    style = p.accent
+                elif line.startswith("-"):
+                    style = p.red
+                else:
+                    style = p.dim
+                t.append(line[:400] + "\n", style=style)
+        text = (output or "").strip()
+        if text:
+            for line in text.splitlines()[:24]:
+                t.append(f"  {line[:400]}\n", style=p.dim)
+            if len(text.splitlines()) > 24:
+                t.append("  … output truncated\n", style=p.dim)
+        if not diff and not text:
+            t.append("  (no output)\n", style=p.dim)
+        self._write(t)
+        self._paint_chrome()
+
+    def note_info(self, text: str, warn: bool = False) -> None:
+        self.add_class("visible")
+        p = self.palette
+        t = Text()
+        t.append("· ", style=f"bold {p.amber if warn else p.dim}")
+        t.append(text, style=p.amber if warn else p.dim)
+        t.append("\n")
+        self._write(t)
+        self._paint_chrome()
+
+    def _write(self, renderable: Text) -> None:
+        if self._log is None:
+            return
+        self._log.write(renderable)
+        try:
+            self._log.scroll_end(animate=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- chrome -----------------------------------------------------------
+    def _paint_chrome(self) -> None:
+        p = self.palette
+        cols = max(12, (self.size.width or self._width) - 2)
+        if self._header is not None:
+            t = Text()
+            t.append("MCP LIVE  ", style=f"bold {p.accent}")
+            t.append(f"{self._calls} call(s)", style=p.primary)
+            if self._active:
+                t.append(f"  ·  {len(self._active)} running", style=p.amber)
+            if self._errors:
+                t.append(f"  ·  {self._errors} failed", style=p.red)
+            t.truncate(cols)
+            self._header.update(t)
+        if self._footer is not None:
+            t = Text("c clear · [ ] width · q close", style=p.dim)
+            t.truncate(cols)
+            self._footer.update(t)
+
+    def action_clear_log(self) -> None:
+        if self._log is not None:
+            self._log.clear()
+        self._active.clear()
+        self._calls = 0
+        self._errors = 0
+        self._paint_chrome()
+
+    def action_close(self) -> None:
+        self.remove_class("visible")
+        self.remove_class("-resizing")
+        self._dragging = False
+        try:
+            self.app.query_one("#input", Input).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def action_wider(self) -> None:
+        self._apply_width((self.size.width or self._width) + 4)
+
+    def action_narrower(self) -> None:
+        self._apply_width((self.size.width or self._width) - 4)
+
+    def _apply_width(self, value: int) -> None:
+        limit = self.MAX_WIDTH
+        try:
+            limit = min(limit, max(self.MIN_WIDTH, self.screen.size.width - 40))
+        except Exception:  # noqa: BLE001
+            pass
+        width = max(self.MIN_WIDTH, min(limit, int(value)))
+        self._width = width
+        self.styles.width = width
+        if not self._dragging:
+            self._paint_chrome()
+
+    def render_pane(self) -> None:
+        self._paint_chrome()
+
+    def on_resize(self, _event) -> None:
+        if self.has_class("visible"):
+            self._paint_chrome()
+
+    # ---- mouse ------------------------------------------------------------
+    def on_click(self, event: Click) -> None:
+        event.stop()
+        self.focus()
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        if event.offset.x > self.RESIZE_GUTTER:
+            return
+        event.stop()
+        self.screen.clear_selection()
+        self._dragging = True
+        self._drag_origin_x = event.screen_x
+        self._drag_origin_width = self.size.width or self._width
+        self.add_class("-resizing")
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        delta = self._drag_origin_x - event.screen_x
+        self._apply_width(self._drag_origin_width + delta)
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if not self._dragging:
+            return
+        event.stop()
+        self._dragging = False
+        self.remove_class("-resizing")
+        self.release_mouse()
+        self._paint_chrome()
+
+
 class StatusBar(Static):
+
     """Bottom bar: tokens, cost, turns, iteration, elapsed, activity."""
 
     DEFAULT_CSS = """
