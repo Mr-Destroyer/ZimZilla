@@ -809,6 +809,13 @@ class Agent:
         #: later request in this session. Empty for most models; populated the
         #: first time one answers 400 "`temperature` is deprecated".
         self._dropped_params: set[str] = set()
+        #: Set once an endpoint has refused the budget shape of a thinking
+        #: block and named the adaptive one instead. Sonnet 5, Opus 4.7+ and
+        #: Opus 5/5.5 removed `budget_tokens`; the model id usually says so
+        #: (`effort.needs_adaptive`), but an id this harness has never seen
+        #: does not, and the 400 is the authority. Once set, every later
+        #: request uses `{"type": "adaptive"}` + `output_config.effort`.
+        self._adaptive_thinking: bool = False
         #: Set once the endpoint has refused an image. A text-only route should
         #: degrade to reading the text the tool also returned, not fail the
         #: turn — so the first image rejection strips every image from the
@@ -1939,8 +1946,16 @@ class Agent:
                 # session. Without this the retry below would re-send it and
                 # fail identically — measured on claude-haiku-5-5, which rejects
                 # `temperature` outright.
-                for _p in self._dropped_params:
-                    extra.pop(_p, None)
+                #
+                # This runs AFTER the `/effort` merge below, not before. It used
+                # to run first, which made the drop a no-op for exactly the
+                # fields `/effort` adds: `thinking` was popped from a dict that
+                # did not contain it yet, then re-added, so the retry was
+                # byte-identical to the request that had just failed and the
+                # operator was told the model "does not accept `thinking`, even
+                # after dropping it and retrying once". Measured on Coarena's
+                # claude-sonnet-5-5.
+                #
                 # `/effort`: a level translated into whichever knob this
                 # protocol actually has. Empty when the level is off or the
                 # ceiling leaves no room for a legal thinking budget, so a
@@ -1948,7 +1963,11 @@ class Agent:
                 # before the command existed.
                 if self.cfg.reasoning_effort:
                     extra.update(effort_mod.body(
-                        self.cfg.reasoning_effort, self.protocol, ceiling))
+                        self.cfg.reasoning_effort, self.protocol, ceiling,
+                        model=self.cfg.model,
+                        adaptive=self._adaptive_thinking))
+                for _p in self._dropped_params:
+                    extra.pop(_p, None)
                 if extra:
                     kwargs["extra_body"] = extra
 
@@ -1990,6 +2009,16 @@ class Agent:
                     self._images_dropped = True
                     self.messages, dropped = images_mod.strip_images(self.messages)
                     yield ({"type": "images_dropped", "count": dropped}, None)
+                    continue
+                # A model that removed `budget_tokens` says so by name. Switching
+                # the shape keeps the operator's effort setting; dropping
+                # `thinking` would "work" and silently turn /effort into a
+                # no-op, which is the worse of the two outcomes. Checked before
+                # the generic drop below, which would otherwise match the same
+                # 400 on the word "thinking" and throw the setting away.
+                if not self._adaptive_thinking and self._wants_adaptive_thinking(e):
+                    self._adaptive_thinking = True
+                    yield ({"type": "thinking_adaptive"}, None)
                     continue
                 # A parameter the model refuses is dropped and retried once,
                 # rather than surfaced as a failure. This is not a bad request
@@ -2453,6 +2482,30 @@ class Agent:
         if self._last_input_tokens <= 0:
             return False
         return self._last_input_tokens >= self.compact_threshold(window)
+
+    @staticmethod
+    def _wants_adaptive_thinking(e: Exception) -> bool:
+        """Whether *e* is a model saying "use ``thinking.type=adaptive``".
+
+        Sonnet 5, Opus 4.7+ and Opus 5/5.5 removed ``budget_tokens`` and answer
+        the old shape with a 400 that names the replacement:
+
+            400  "thinking.type.enabled" is not supported for this model. Use
+                 "thinking.type.adaptive" and "output_config.effort" to control
+                 thinking behavior.
+
+        Matched on the wording rather than a model list, for the same reason
+        :meth:`_unsupported_sampling_param` is: the next model to change its
+        thinking shape should not need a ZimZilla release. The two phrases are
+        the ones the API actually uses, and both must be present — a bare
+        "adaptive" could appear in an unrelated message.
+        """
+        import anthropic
+        if not isinstance(e, anthropic.BadRequestError):
+            return False
+        msg = str(e).lower()
+        return "adaptive" in msg and (
+            "thinking" in msg or "output_config" in msg)
 
     @staticmethod
     def _unsupported_sampling_param(e: Exception) -> str:

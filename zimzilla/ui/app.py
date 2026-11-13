@@ -2138,6 +2138,18 @@ class ZimZillaApp(App):
             )
             bar.set_activity(f"retry {ev['attempt']}/{ev['max']}", busy=True)
 
+        elif etype == "thinking_adaptive":
+            # The endpoint refused the budget shape and named the adaptive one.
+            # Worth a line: the effort setting is still in force, but it is now
+            # carried by `output_config.effort` rather than a token budget, and
+            # an operator who set /effort high should know which knob is live.
+            self._flush_stream(chat, p)
+            self._sys_line(
+                "this model uses adaptive thinking — switched from a token "
+                "budget to output_config.effort, retrying",
+                warn=True,
+            )
+
         elif etype == "param_dropped":
             # The model refused a sampling knob the harness sent; it is dropped
             # and the request retried. Worth one dim line — otherwise the
@@ -4180,7 +4192,9 @@ class ZimZillaApp(App):
             t.append("  on the wire  ", style=p.dim)
             t.append(
                 effort_mod.describe(current, self.agent.protocol,
-                                    self.agent.output_ceiling()) + "\n\n",
+                                    self.agent.output_ceiling(),
+                                    model=self.cfg.model,
+                                    adaptive=self.agent._adaptive_thinking) + "\n\n",
                 style=p.primary)
             for name in effort_mod.LEVEL_ORDER:
                 spec = effort_mod.LEVELS[name]
@@ -4211,7 +4225,9 @@ class ZimZillaApp(App):
         self._sys_line(
             f"effort {level} — "
             + effort_mod.describe(level, self.agent.protocol,
-                                  self.agent.output_ceiling()),
+                                  self.agent.output_ceiling(),
+                                  model=self.cfg.model,
+                                  adaptive=self.agent._adaptive_thinking),
             ok=True)
         self._sys_line(
             "a model without this knob drops it and says so on the first "

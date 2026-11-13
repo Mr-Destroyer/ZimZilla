@@ -15,6 +15,19 @@ request time:
   :func:`body` takes the call's ceiling and clamps — a budget the server will
   reject is worse than a smaller one it accepts.
 
+  **That shape is not universal.** Sonnet 5, Opus 4.7+ and Opus 5/5.5 removed
+  ``budget_tokens`` outright; on those the block is ``{"type": "adaptive"}``
+  and the level rides in ``output_config.effort``. Sending the older shape is
+  a 400 that names the replacement:
+
+      "thinking.type.enabled" is not supported for this model. Use
+      "thinking.type.adaptive" and "output_config.effort" ...
+
+  So :func:`body` picks the shape from the model id (:func:`needs_adaptive`),
+  and the agent can force it after a refusal (:func:`wants_adaptive`) — the
+  first request has no error to read, and by the time one arrives the turn has
+  already failed once.
+
 **Not every model has either knob**, and that is a fact about the endpoint
 rather than a mistake the operator can fix by rewording anything. So the level
 is sent optimistically and the agent's existing drop-and-retry path handles the
@@ -101,6 +114,95 @@ OFF_WORDS = frozenset({"off", "none", "default", "auto", "reset", "unset"})
 
 
 # ---------------------------------------------------------------------------
+# which thinking shape a model takes
+# ---------------------------------------------------------------------------
+
+#: Model families that removed ``thinking.budget_tokens``. On these the block
+#: is ``{"type": "adaptive"}`` and the level is carried by
+#: ``output_config.effort`` instead. Matched on the id because there is no
+#: capability flag on the wire to ask for, and the alternative — sending the
+#: old shape and reading the 400 — costs a failed request on every new session.
+#:
+#: Measured against Coarena's whole catalog (18 models, 2026-11): **every**
+#: ``claude-*`` entry there needs the adaptive shape — ``sonnet-5-5``,
+#: ``opus-5-5``, ``haiku-5-5`` and all three ``fable-5*`` — while every
+#: non-Claude entry (``gemini-4-*``, ``grok-4-7``, ``kimi-k3``, ``glm-5-3``,
+#: ``qwen3-8``, ``deepseek-v4``, ``hy4``, ``mimo``, ``minimax``) accepts the
+#: budget. So the rule is a version test on the Claude line rather than a list
+#: of names: a family list missed ``fable-5`` and ``haiku-5-5`` on the first
+#: pass, and would miss the next release too.
+#:
+#: The threshold is Claude 5 and up, plus Opus 4.7 — the generation that
+#: dropped ``budget_tokens``. ``claude-haiku-4-5`` and older keep the budget.
+ADAPTIVE_MIN_MAJOR = 5
+#: Opus 4.7 is the one 4.x that already dropped the budget.
+ADAPTIVE_OPUS_MIN_MINOR = 7
+
+
+def _claude_version(flat: str) -> tuple[int, int] | None:
+    """``(major, minor)`` for a flattened Claude id, or ``None``.
+
+    *flat* is already lowercased with ``.``/``_`` turned into ``-``, so
+    ``claude-sonnet-5-5`` and ``claude-sonnet-5.5`` both read as ``(5, 5)``.
+    The first two integers after the family word are the version; a date suffix
+    (``-20260101``) is longer than two digits and is ignored, which is what
+    keeps ``claude-sonnet-5-5-20260101`` on the adaptive shape.
+    """
+    if "claude" not in flat:
+        return None
+    parts = flat.split("-")
+    nums: list[int] = []
+    for part in parts:
+        if part.isdigit() and len(part) <= 2:
+            nums.append(int(part))
+            if len(nums) == 2:
+                break
+        elif nums:
+            # A non-numeric token after the version starts (a date, a suffix)
+            # ends the version rather than being read as part of it.
+            break
+    if not nums:
+        return None
+    return (nums[0], nums[1] if len(nums) > 1 else 0)
+
+
+def needs_adaptive(model: str | None) -> bool:
+    """Whether *model* takes ``thinking.type=adaptive`` rather than a budget.
+
+    A guess, and only ever a guess: an unrecognised id keeps the budget shape,
+    which is what every model before this generation accepted. A wrong guess
+    costs one 400 and the agent's drop-and-retry, which is the same price the
+    old unconditional shape paid on every adaptive model.
+    """
+    text = (model or "").strip().lower()
+    if not text:
+        return False
+    # `claude-sonnet-5-5` and `claude-sonnet-5.5` both normalise to the same
+    # run of digits, so the separators are flattened before matching.
+    flat = text.replace(".", "-").replace("_", "-")
+    version = _claude_version(flat)
+    if version is None:
+        return False
+    major, minor = version
+    if major >= ADAPTIVE_MIN_MAJOR:
+        return True
+    # Opus 4.7 dropped the budget while the rest of the 4.x line kept it.
+    return "opus" in flat and major == 4 and minor >= ADAPTIVE_OPUS_MIN_MINOR
+
+
+def wants_adaptive(model: str | None, forced: bool = False) -> bool:
+    """Whether to send the adaptive shape: the model says so, or a 400 did.
+
+    *forced* is the agent's ``_adaptive_thinking`` flag, set the first time an
+    endpoint refuses the budget shape. It outranks the id test because the
+    endpoint is the authority on what it accepts — a model this table has
+    never heard of can still be adaptive, and the refusal is the evidence.
+    """
+    return forced or needs_adaptive(model)
+
+
+
+# ---------------------------------------------------------------------------
 # validation
 # ---------------------------------------------------------------------------
 
@@ -137,18 +239,34 @@ def normalise(value: str | None) -> str | None:
 # the wire
 # ---------------------------------------------------------------------------
 
-def body(level: str | None, protocol: str, ceiling: int) -> dict:
+def body(level: str | None, protocol: str, ceiling: int,
+         model: str | None = None, adaptive: bool = False) -> dict:
     """The request-body fragment that carries *level* on *protocol*.
 
     Empty when the level is off, unknown, or when the ceiling leaves no room
     for a legal thinking budget — an empty dict is the honest "send nothing",
     and it keeps the default path byte-identical to what it was before this
     command existed.
+
+    *model* and *adaptive* choose the Messages shape: the budget block for
+    everything that still takes one, ``{"type": "adaptive"}`` plus
+    ``output_config.effort`` for the families that removed it. See
+    :func:`needs_adaptive`.
     """
     spec = LEVELS.get(normalise(level) or "")
     if spec is None:
         return {}
     if protocol == "anthropic":
+        if wants_adaptive(model, adaptive):
+            # No budget to clamp: the model decides how much to spend, and the
+            # level is the only control. `display: summarized` is what makes
+            # the reasoning visible in the transcript — the default is
+            # "omitted", which would silently turn /think into a no-op on
+            # exactly the models this branch exists for.
+            return {
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": spec.wire},
+            }
         budget = min(spec.budget, int(ceiling) - CEILING_HEADROOM)
         if budget < MIN_BUDGET:
             return {}
@@ -158,7 +276,8 @@ def body(level: str | None, protocol: str, ceiling: int) -> dict:
     return {"reasoning_effort": spec.wire}
 
 
-def describe(level: str | None, protocol: str, ceiling: int) -> str:
+def describe(level: str | None, protocol: str, ceiling: int,
+             model: str | None = None, adaptive: bool = False) -> str:
     """What will actually go on the wire, in the operator's own terms.
 
     Accepts ``None`` (and any off-word) because the status panel asks what the
@@ -171,7 +290,10 @@ def describe(level: str | None, protocol: str, ceiling: int) -> str:
     if spec is None:
         return "nothing sent — the model's own default"
     if protocol == "anthropic":
-        fragment = body(level, protocol, ceiling)
+        if wants_adaptive(model, adaptive):
+            return (f"adaptive thinking, output_config.effort={spec.wire} "
+                    f"on Messages")
+        fragment = body(level, protocol, ceiling, model, adaptive)
         thinking = fragment.get("thinking")
         if not thinking:
             return (f"no room for a thinking budget under the {ceiling}-token "

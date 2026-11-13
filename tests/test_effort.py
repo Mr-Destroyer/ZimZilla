@@ -107,6 +107,11 @@ class _Client:
 
 
 def _cfg(workdir: Path, **kw) -> Config:
+    # The model is pinned, not inherited: `ANTHROPIC_MODEL` is set in the
+    # operator's shell, and the shape of the thinking block depends on it. A
+    # test that read the ambient model would assert the budget shape on one
+    # machine and the adaptive shape on another.
+    kw.setdefault("model", "claude-haiku-4-5")
     return Config.from_env(workdir=workdir, api_key="x",
                            base_url="http://localhost:4001", **kw)
 
@@ -275,6 +280,96 @@ def test_refusal_is_dropped(tmp: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 5b — the adaptive shape, and the drop-ordering bug behind it
+# ---------------------------------------------------------------------------
+
+def test_adaptive_shape(tmp: Path) -> None:
+    """Sonnet 5 / Opus 4.7+ / Opus 5 removed `budget_tokens`.
+
+    Two separate defects met on Coarena's `claude-sonnet-5-5`:
+
+    1. `body()` sent the budget shape unconditionally, which those models
+       reject with a 400 naming `thinking.type.adaptive`.
+    2. The drop loop in `_stream_once` ran *before* the `/effort` merge, so
+       dropping `thinking` popped a key that was not there yet and the retry
+       was byte-identical to the request that had just failed. The operator was
+       told the model "does not accept `thinking`, even after dropping it and
+       retrying once" — which was true, and was the harness's fault.
+    """
+    # The id test, across the spellings the gateways actually use. Measured
+    # against Coarena's whole catalog: every `claude-*` entry there needs the
+    # adaptive shape, every non-Claude entry accepts the budget.
+    for model in ("claude-sonnet-5-5", "claude-sonnet-5.5",
+                  "anthropic/claude-sonnet-5-5", "claude-opus-5-5",
+                  "claude-haiku-5-5", "claude-fable-5", "claude-fable-5-2",
+                  "claude-opus-4-7", "claude-sonnet-5-5-20260101"):
+        check(f"adaptive: {model} is recognised", E.needs_adaptive(model), model)
+    for model in ("claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5",
+                  "deepseek-v4.1-flash", "gemini-4-argon", "grok-4-7",
+                  "kimi-k3", "glm-5-3-flash", "qwen3-8-2-4t-a95b",
+                  "hy4", "mimo-v2-6-pro", "minimax-m3-1-flash", "", None):
+        check(f"adaptive: {model!r} keeps the budget shape",
+              not E.needs_adaptive(model), str(model))
+
+    # The body it produces.
+    frag = E.body("high", "anthropic", 32768, model="claude-sonnet-5-5")
+    check("adaptive: the block is type=adaptive",
+          (frag.get("thinking") or {}).get("type") == "adaptive", str(frag))
+    check("adaptive: no budget_tokens is sent",
+          "budget_tokens" not in (frag.get("thinking") or {}), str(frag))
+    check("adaptive: the level rides in output_config.effort",
+          (frag.get("output_config") or {}).get("effort") == "high", str(frag))
+    check("adaptive: reasoning is asked for, not omitted",
+          (frag.get("thinking") or {}).get("display") == "summarized", str(frag))
+    check("adaptive: a small ceiling does not suppress it",
+          E.body("high", "anthropic", 1500,
+                 model="claude-sonnet-5-5").get("output_config") is not None,
+          str(E.body("high", "anthropic", 1500, model="claude-sonnet-5-5")))
+    check("adaptive: Chat Completions is unaffected",
+          E.body("high", "openai", 32768, model="claude-sonnet-5-5")
+          == {"reasoning_effort": "high"})
+
+    # The forced flag outranks the id test: an unknown model that refused the
+    # budget shape is adaptive, whatever its name looks like.
+    frag = E.body("low", "anthropic", 32768, model="mystery-model",
+                  adaptive=True)
+    check("adaptive: a forced flag wins over an unknown id",
+          (frag.get("thinking") or {}).get("type") == "adaptive", str(frag))
+
+    # The refusal is recognised from the real sentence.
+    exc = _bad_request(
+        '"thinking.type.enabled" is not supported for this model. Use '
+        '"thinking.type.adaptive" and "output_config.effort" to control '
+        'thinking behavior.')
+    check("adaptive: the real 400 is recognised",
+          Agent._wants_adaptive_thinking(exc))
+    check("adaptive: an unrelated 400 is not",
+          not Agent._wants_adaptive_thinking(_bad_request("model not found")))
+    check("adaptive: a plain thinking refusal is not adaptive",
+          not Agent._wants_adaptive_thinking(
+              _bad_request("thinking is not supported by this model")))
+
+    # The ordering bug, end to end: a dropped `thinking` must actually be
+    # absent from the retry, not re-added after the drop.
+    seen: dict = {}
+    agent = Agent(_cfg(tmp, protocol="anthropic", reasoning_effort="high",
+                       model="claude-haiku-4-5"))
+    agent._client = _Client(_Msg([_Blk(type="text", text="ok")]), seen)
+    agent._dropped_params.add("thinking")
+
+    async def run():
+        async for _ev, _final in agent._stream_once():
+            pass
+
+    asyncio.run(run())
+    extra = seen.get("extra_body") or {}
+    check("drop: a dropped `thinking` is absent from the request",
+          "thinking" not in extra, str(extra))
+    check("drop: the sampling knob survives the drop",
+          "temperature" in extra, str(extra))
+
+
+# ---------------------------------------------------------------------------
 # 6 — persistence
 # ---------------------------------------------------------------------------
 
@@ -418,6 +513,7 @@ def main() -> int:
         test_body_per_protocol(tmp)
         test_request_carries_the_level(tmp)
         test_refusal_is_dropped(tmp)
+        test_adaptive_shape(tmp)
         test_persistence(tmp)
         test_wiring(tmp)
         # Only the UI check needs a loop of its own; the rest stay plain
