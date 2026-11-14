@@ -16,6 +16,7 @@ simply stays quiet.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
@@ -25,7 +26,14 @@ import threading
 from pathlib import Path
 
 DEFAULT_VOICE = "en-GB-RyanNeural"
-DEFAULT_RATE = "+6%"
+DEFAULT_RATE = "+12%"
+_RATE_RE = re.compile(r"^[+-]\d{1,3}%$")
+
+
+def normalise_rate(value: str | None) -> str:
+    """A valid Edge TTS rate string, or the default."""
+    text = (value or "").strip()
+    return text if _RATE_RE.fullmatch(text) else DEFAULT_RATE
 
 #: Spoken text is bounded, but this is a recap a person listens to, not a
 #: one-line toast: it carries the file and tool names and the result, not just
@@ -152,10 +160,11 @@ class Voice:
     """One non-blocking speaker, newest utterance wins."""
 
     def __init__(self, *, enabled: bool = True, state_dir=None,
-                 voice_name: str = DEFAULT_VOICE, rate: str = DEFAULT_RATE):
+                 voice_name: str = DEFAULT_VOICE, rate: str | None = None):
         self.enabled = bool(enabled)
         self.voice_name = voice_name or DEFAULT_VOICE
-        self.rate = rate or DEFAULT_RATE
+        self.rate = normalise_rate(
+            rate if rate is not None else os.environ.get("ZIMZILLA_VOICE_RATE"))
         self.state_dir = Path(state_dir) if state_dir else None
         self._gen = 0
         self._proc: subprocess.Popen | None = None

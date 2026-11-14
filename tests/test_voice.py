@@ -77,6 +77,11 @@ def test_voice_object() -> None:
     check("voice: a non-TTY stays silent", v.say("hello sir") is False)
     check("voice: disabled is silent", voice.Voice(enabled=False).say("hello") is False)
     check("config: voice is on by default", Config().voice is True)
+    check("rate: the default is a little faster than before",
+          voice.DEFAULT_RATE == "+12%", voice.DEFAULT_RATE)
+    check("rate: a valid override is kept",
+          voice.normalise_rate("+20%") == "+20%")
+    check("rate: junk falls back", voice.normalise_rate("fast") == "+12%")
 
 
 def test_wiring() -> None:

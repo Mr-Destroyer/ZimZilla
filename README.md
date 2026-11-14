@@ -2237,6 +2237,9 @@ it costs no tokens. The launch greeting is a fixed line.
 
 - Backend: Edge neural TTS (`edge-tts`, no key, network) played through `mpv`
   or `ffplay`; `spd-say`/`espeak-ng` are fallbacks if installed.
+- Default pace is `+12%` (a little quicker than the first voice release).
+  Override it with `ZIMZILLA_VOICE_RATE=+20%` (a valid Edge rate such as
+  `+0%`, `-10%`, `+25%`).
 - It never blocks the UI: synthesis and playback run in a daemon thread, and a
   newer utterance stops the old one.
 - No TTS backend, no audio server, a non-TTY stdout, or no network means
