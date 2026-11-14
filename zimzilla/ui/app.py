@@ -1314,7 +1314,7 @@ class ZimZillaApp(App):
         # before the first turn so the launch greeting can use it.
         self._voice = voice_mod.Voice(enabled=self.cfg.voice,
                                       state_dir=self.cfg.state_dir)
-        self._voice_facts: dict = {"tools": [], "files": []}
+        self._voice_facts: dict = {"tools": [], "files": [], "errors": 0}
         self._voice_error = ""
         # While a modal (permission gate) is up, the prompt must be disabled so
         # approval keystrokes like "y" don't leak into it.
@@ -2446,6 +2446,7 @@ class ZimZillaApp(App):
     def _voice_note_result(self, ev: dict) -> None:
         if not ev.get("is_error"):
             return
+        self._voice_facts["errors"] = int(self._voice_facts.get("errors") or 0) + 1
         # A tool error is not necessarily a failed turn — the next call often
         # fixes it. Kept for the case where the turn ends without an answer.
         self._voice_error = str(ev.get("output") or "")
@@ -2467,6 +2468,11 @@ class ZimZillaApp(App):
 
     def _voice_recap(self, *, cancelled: bool = False) -> None:
         final = self._last_assistant_text()
+        self._voice_facts["seconds"] = max(
+            0.0, time.monotonic() - getattr(self, "_turn_started", time.monotonic()))
+        self._voice_facts["cost"] = float(
+            getattr(self.agent, "last_turn_cost", 0.0) or 0.0)
+        self._voice_facts["turn"] = self.agent.turn_count
         # A tool failure that the turn recovered from is not worth announcing;
         # only an answerless turn is.
         error = "" if final else self._voice_error

@@ -34,12 +34,19 @@ def check(name: str, ok: bool, extra: str = "") -> None:
 
 def test_summary() -> None:
     facts = {"tools": ["read_file", "edit_file", "bash"],
-             "files": ["/tmp/a.py", "/tmp/b.py"]}
+             "files": ["/tmp/a.py", "/tmp/b.py"], "errors": 1,
+             "seconds": 12, "cost": 0.0042}
     got = voice.turn_summary(facts, "Tests pass. I also updated the docs.")
     check("summary: it starts with Sir", got.startswith("Sir,"), got)
     check("summary: it says what was done", "2 files" in got and "3 tools" in got, got)
-    check("summary: it carries the final sentence", "Tests pass" in got, got)
-    check("summary: it is one sentence shape", got.count(". ") <= 3, got)
+    check("summary: it carries the final result", "Tests pass" in got, got)
+    check("summary: it goes beyond the first sentence",
+          "updated the docs" in got, got)
+    check("summary: it names the files", "a.py" in got and "b.py" in got, got)
+    check("summary: it is a full recap", len(got) > 180, str(len(got)))
+    check("summary: it reports a recovered error", "1 tool error" in got, got)
+    check("summary: it reports elapsed time", "12 seconds" in got, got)
+    check("summary: it reports cost", "less than a cent" in got, got)
 
     stopped = voice.turn_summary(facts, "", cancelled=True)
     check("summary: cancellation is honest", "stopped" in stopped, stopped)

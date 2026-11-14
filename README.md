@@ -2188,13 +2188,17 @@ idle:
 
 ```text
 ◈ hello sir — ZimZilla online. What are we building?
-Sir, I did the work. I worked on 2 files. ran 3 tools. Tests pass.
+Sir, the work is complete. I worked on 2 files: app.py and voice.py. I used
+4 tools: read_file, edit_file, bash and view_image. There was 1 tool error
+along the way. The result: All tests pass. The recap now reads the full
+result, not just the first sentence. It took 42 seconds. It cost less than a
+cent.
 ```
 
 It is not another model call. The recap is built from the turn's real facts —
-the tools called, the files touched, any error, and the sentence the answer
-ended on — so it cannot invent work and it costs no tokens. The launch greeting
-is a fixed line.
+the files touched (by name), the tools used, tool errors, the full result up to
+a listenable length, elapsed time and turn cost — so it cannot invent work and
+it costs no tokens. The launch greeting is a fixed line.
 
 - Backend: Edge neural TTS (`edge-tts`, no key, network) played through `mpv`
   or `ffplay`; `spd-say`/`espeak-ng` are fallbacks if installed.
@@ -2205,7 +2209,8 @@ is a fixed line.
 - `/voice off` shuts it up for the session; `--no-voice` and
   `ZIMZILLA_VOICE=0` start with it off. `/voice on` brings it back.
 - Secrets are redacted and code fences/links are stripped before speaking;
-  speech is capped at 320 characters.
+  speech is capped at 1,100 characters, with the full answer still in the
+  transcript.
 
 The voice is local display only. Nothing about it leaves the machine except the
 TTS request to Edge unless you switch to the offline fallback.

@@ -27,8 +27,11 @@ from pathlib import Path
 DEFAULT_VOICE = "en-GB-RyanNeural"
 DEFAULT_RATE = "+6%"
 
-#: Spoken text is bounded. A recap is a sentence, not the transcript.
-MAX_SPEECH_CHARS = 320
+#: Spoken text is bounded, but this is a recap a person listens to, not a
+#: one-line toast: it carries the file and tool names and the result, not just
+#: the first sentence. Around 1,100 characters is roughly a minute at the
+#: default neural voice's pace.
+MAX_SPEECH_CHARS = 1100
 
 #: A secret accidentally quoted in a final answer must not be read aloud.
 _SECRET_RE = re.compile(
@@ -64,48 +67,85 @@ def clean_speech(text: str, limit: int = MAX_SPEECH_CHARS) -> str:
     return (cut[:at] if at > 0 else cut).strip() + "…"
 
 
-def _first_sentence(text: str, limit: int = 180) -> str:
-    text = clean_speech(text, limit=limit * 2)
-    match = re.match(r"(.+?[.!?])(?:\s|$)", text)
-    sentence = match.group(1) if match else text
-    if len(sentence) > limit:
-        sentence = sentence[:limit].rsplit(" ", 1)[0] + "…"
-    return sentence.strip()
+def _unique(items) -> list[str]:
+    out: list[str] = []
+    for item in items or []:
+        value = str(item).strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _spoken_list(items: list[str], limit: int = 4) -> str:
+    shown = items[:limit]
+    if len(items) > limit:
+        return ", ".join(shown) + f", and {len(items) - limit} more"
+    if len(shown) <= 1:
+        return shown[0] if shown else ""
+    return ", ".join(shown[:-1]) + " and " + shown[-1]
 
 
 def turn_summary(facts: dict, final_text: str = "", *,
                  cancelled: bool = False, error: str = "") -> str:
-    """The sentence spoken when a turn goes idle.
+    """The recap spoken when a turn goes idle.
 
-    ``facts`` carries ``tools`` and ``files`` collected by the UI. The result
-    is intentionally plain: "Sir, I did the work. I edited 2 files and ran 4
-    tools. The tests pass."
+    Deliberately more than the first sentence: a Jarvis-style report names the
+    files, the tools, any errors, the actual result, and what the turn cost.
+    The final answer is included up to a listenable length, with the full text
+    still in the transcript.
     """
+    tools = _unique([str(t) for t in (facts.get("tools") or []) if t])
+    files = _unique([str(f) for f in (facts.get("files") or []) if f])
+    errors = int(facts.get("errors") or 0)
     if cancelled:
-        return "Sir, I stopped as you asked."
-    if error:
-        clean = clean_speech(error, limit=140)
+        return ("Sir, I stopped as you asked. The work so far is in the "
+                "transcript, and nothing further was run.")
+    if error and not final_text:
+        clean = clean_speech(error, limit=320)
         if clean:
             clean = clean[0].upper() + clean[1:]
-        return f"Sir, I hit a problem. {clean}".strip()
-    tools = [str(t) for t in (facts.get("tools") or []) if t]
-    files = [str(f) for f in (facts.get("files") or []) if f]
-    bits: list[str] = []
+        lead = "Sir, I hit a problem."
+        if files:
+            lead += " I had worked on " + _spoken_list(
+                [Path(f).name for f in files]) + "."
+        return clean_speech(lead + " " + clean)
+
+    parts: list[str] = []
+    if files or tools:
+        parts.append("Sir, the work is complete.")
+    else:
+        parts.append("Sir, I finished.")
     if files:
-        bits.append(f"I worked on {len(files)} file"
-                    f"{'s' if len(files) != 1 else ''}")
+        names = [Path(f).name for f in files]
+        parts.append(f"I worked on {len(names)} file"
+                     f"{'s' if len(names) != 1 else ''}: "
+                     f"{_spoken_list(names)}.")
     if tools:
-        bits.append(f"I ran {len(tools)} tool{'s' if len(tools) != 1 else ''}")
-    sentence = _first_sentence(final_text)
-    if sentence:
-        bits.append(sentence)
-    if not bits:
-        bits.append("the task is complete")
-    lead = "Sir, I did the work." if (files or tools) else "Sir, I finished."
-    body = ". ".join(bits)
-    if not body.endswith((".", "!", "?", "…")):
-        body += "."
-    return clean_speech(lead + " " + body)
+        parts.append(f"I used {len(tools)} tool"
+                     f"{'s' if len(tools) != 1 else ''}: "
+                     f"{_spoken_list(tools, limit=5)}.")
+    if errors:
+        parts.append(f"There {'was' if errors == 1 else 'were'} {errors} "
+                     f"tool error{'s' if errors != 1 else ''} along the way.")
+    cleaned = clean_speech(final_text, limit=700)
+    if cleaned:
+        parts.append("The result: " + cleaned)
+    if facts.get("seconds") is not None:
+        try:
+            seconds = float(facts["seconds"])
+            if seconds >= 5:
+                parts.append(f"It took {seconds:.0f} seconds.")
+        except (TypeError, ValueError):
+            pass
+    cost = facts.get("cost")
+    if isinstance(cost, (int, float)) and cost > 0:
+        if cost < 0.01:
+            parts.append("It cost less than a cent.")
+        else:
+            parts.append(f"It cost {cost:.4f} dollars.")
+    if not files and not tools and not cleaned:
+        parts.append("There is nothing further to report.")
+    return clean_speech(" ".join(parts))
 
 
 class Voice:
