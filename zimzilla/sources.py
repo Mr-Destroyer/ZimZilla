@@ -837,6 +837,12 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import respan as rp_mod
         cached = rp_mod.cached_ids()
         return tuple(cached) if cached else rp_mod.FREE_FALLBACK
+    if key == "numes":
+        # Same free-only rule. Numes' catalogue is key-gated, so the declared
+        # free fallback is the honest cold-cache answer.
+        from . import numes as nm_mod
+        cached = nm_mod.cached_ids()
+        return tuple(cached) if cached else nm_mod.FREE_FALLBACK
     if key == "antseed":
         from . import antseed as as_mod
         cached = as_mod.cached_ids()
@@ -886,6 +892,9 @@ def catalog_models(key: str) -> list | None:
         # ``models_for`` — but the window lookup needs the whole list.
         from . import respan as rp_mod
         return rp_mod.cached_models()
+    if key == "numes":
+        from . import numes as nm_mod
+        return nm_mod.cached_models()
     if key == "antseed":
         from . import antseed as as_mod
         return as_mod.cached_models()
@@ -1020,6 +1029,9 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # to the estimate table and bill the default at DEFAULT_PRICE. A warm
         # cache still resolves through the generic loop below, which reads the
         # catalogue's own $0.00 price.
+        if not catalog_models(key):
+            return (0.0, 0.0)
+    if key == "numes":
         if not catalog_models(key):
             return (0.0, 0.0)
     if key == "flex":
@@ -1417,7 +1429,7 @@ def switchable(exclude: str | None = None) -> list[str]:
     """
     found = discover()
     out: list[str] = []
-    for key in ("openrouter", "unorouter", "unrestricted", "respan",
+    for key in ("openrouter", "unorouter", "unrestricted", "respan", "numes",
                 "aihubmix", "beatapi", "tokenharbour", "moonmath", "coarena",
                 "infronai",
                 "iteracompute", "antseed", "nvidia", "tokenjuice", "logfare",
@@ -1468,6 +1480,7 @@ def _gateway_module(key: str):
     from . import unorouter as uno_mod
     from . import unrestricted as unr_mod
     from . import respan as rp_mod
+    from . import numes as nm_mod
     from . import wandb as wb_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
@@ -1475,7 +1488,7 @@ def _gateway_module(key: str):
         "coarena": co_mod,
         "wandb": wb_mod, "inferx": ix_mod, "inferbase": ib_mod,
         "flex": flex_mod, "gemini": gm_mod, "unrestricted": unr_mod,
-        "respan": rp_mod,
+        "respan": rp_mod, "numes": nm_mod,
     }.get(key)
 
 
@@ -1541,7 +1554,7 @@ def _state_file() -> Path:
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
                           "aihubmix", "beatapi", "moonmath", "coarena", "wandb",
                           "inferx", "inferbase", "flex", "unrestricted",
-                          "respan"})
+                          "respan", "numes"})
 
 
 def current_key() -> str | None:
@@ -1606,6 +1619,7 @@ def active_key(base_url: str) -> str | None:
     from . import unorouter as uno_mod
     from . import unrestricted as unr_mod
     from . import respan as rp_mod
+    from . import numes as nm_mod
     from . import wandb as wb_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
@@ -1622,6 +1636,8 @@ def active_key(base_url: str) -> str | None:
     # the bare gateway host, with no port or path to match on.
     if rp_mod.is_respan(base_url):
         return "respan"
+    if nm_mod.is_numes(base_url):
+        return "numes"
     if ah_mod.is_aihubmix(base_url):
         return "aihubmix"
     if bp_mod.is_beatapi(base_url):

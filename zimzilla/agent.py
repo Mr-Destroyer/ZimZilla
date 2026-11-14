@@ -339,6 +339,7 @@ _CREDENTIAL_PROFILES = (
     # Hosted and Anthropic-native too: the gateway serves /v1/messages itself,
     # and the key is the operator's own (RESPAN_API_KEY / the profile).
     ("respan", "Respan", "ANTHROPIC_AUTH_TOKEN"),
+    ("numes", "Numes", "ANTHROPIC_AUTH_TOKEN"),
     ("aihubmix", "AIHubMix", "ANTHROPIC_AUTH_TOKEN"),
     ("beatapi", "BeatAPI", "ANTHROPIC_AUTH_TOKEN"),
     ("moonmath", "Zro", "ANTHROPIC_AUTH_TOKEN"),

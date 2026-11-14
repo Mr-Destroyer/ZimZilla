@@ -1019,11 +1019,12 @@ caring which. Seventeen sources are wired up:
 | **Coarena** | `coarena.ai/api` | yours (`coa_…`) | hosted, native Messages — free Model API, $5/day allowance |
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 | **Respan** | `gateway.respan.ai` | yours (`RESPAN_API_KEY`) | hosted, native Messages — free-only model list |
+| **Numes** | `api.numes.ai/api/v1` | yours (`NUMES_API_KEY`) | hosted, Chat Completions — free-only model list |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
 `/zim-inferbase`, `/zim-gemini`, `/zim-flex`, `/zim-tokenharbour`,
-`/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-aihubmix`,
+`/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-numes`, `/zim-aihubmix`,
 `/zim-beatapi`, `/zim-moonmath`, `/zim-coarena` or `/zim-antseed`; the choice is
 remembered, so the next launch comes back to the one that was working.
 
@@ -1085,6 +1086,37 @@ route; the free models stay $0 when it does.
 `RESPAN_API_KEY` is read from the environment first, so an exported profile
 needs no setup command. The key is stored in `~/.zimzilla/respan/source`
 (mode 600), never echoed.
+
+### Numes, free models only
+
+Numes is a marketplace of independently hosted models behind one OpenAI-compatible
+endpoint: `https://api.numes.ai/api/v1`. ZimZilla points at it directly (no
+proxy) and offers **only models whose prompt and completion prices are both $0**
+in the catalogue.
+
+```
+/numes-api-setup <key>    # store NUMES_API_KEY
+/zim-numes                # switch; lands on a free model
+/numes-models             # the live $0 list
+/model                    # free models only
+```
+
+The catalogue `GET /api/v1/models` is **key-gated** — 401 without a key — so
+`/numes-models` needs `/numes-api-setup` first. A model is free when
+`pricing.prompt == 0` **and** `pricing.completion == 0`; a missing price is not
+free. The list is measured, not declared: on 2026-11-14 it held 44 models, of
+which 9 were $0/$0; a re-read later showed 7 as promotions moved. The default is
+`deepseek/deepseek-v4.1-flash` (1M window, tools); the free set included
+`z-ai/glm-5.3`, `moonshotai/kimi-k3.1-pro`, `nvidia/nemotron-3-ultra-550b-a55b`
+and the dealignai uncensored variants at the time of writing.
+
+A live free-model call returned `usage.cost: 0`, and a tool call round-tripped.
+Numes holds an upper bound per request, so the account needs a funded balance
+even for a $0 model; `/numes-api-setup` proves the key by reading the key-gated
+catalogue.
+
+`NUMES_API_KEY` is read from the environment first. The key is stored in
+`~/.zimzilla/numes/source` (mode 600), never echoed.
 
 Token Juice is a direct route and nothing else: `/zim-source` lists it with
 `direct` where the others show a port, because there is no proxy to report on.
@@ -1941,6 +1973,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-respan` | switch upstream to Respan — hosted, native Messages, **free models only** |
 | `/respan-api-setup <key>` | store your Respan API key (`RESPAN_API_KEY`) |
 | `/respan-models` | the live catalog — only models priced $0 in and $0 out |
+| `/zim-numes` | switch upstream to Numes — hosted, Chat Completions, **free models only** |
+| `/numes-api-setup <key>` | store your Numes API key (`NUMES_API_KEY`) |
+| `/numes-models` | the live catalog — prompt and completion both $0 |
 | `/zim-aihubmix` | switch upstream to AIHubMix — hosted, free models, native Messages |
 | `/aihubmix-api-setup <key>` | store your AIHubMix API key |
 | `/aihubmix-models` | the live free catalog — what is free and usable |
@@ -3270,6 +3305,7 @@ zimzilla/                     the package
   crack.py                    /crack — hash identification, the bounded ladder, the estimate
   payload.py                  /payload — the extension table, the argv, the build, the handler
   respan.py                   /zim-respan — free-only catalogue, native Messages
+  numes.py                    /zim-numes — free-only catalogue, Chat Completions
   connect.py                  /connect — generate/register MCP app bridges
   bridge.py                   the generated bridge's tools — Kdenlive MLT + desktop
   opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
@@ -3322,6 +3358,7 @@ python tests/test_inferx.py        # /inferx-* — the key-gated catalog, the te
 python tests/test_inferbase.py     # /inferbase-* — the price band, the two routes, the wiring
 python tests/test_vision.py        # /see, browse, view_image — images, browser, screenshots
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
+python tests/test_numes.py         # /zim-numes — free-only catalogue, profile, key-gated probe
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
