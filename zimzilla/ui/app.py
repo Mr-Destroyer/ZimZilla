@@ -880,7 +880,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored | blackhat"),
         ("/clear", "wipe the transcript and conversation history"),
         ("/voice [on|off]", "spoken launch greeting and end-of-turn recap"),
-        ("/discord-rpc [id|on|off|logo]", "show ZimZilla on your Discord profile"),
+        ("/discord-rpc [id|on|off|asset|logo]", "show ZimZilla on your Discord profile"),
         ("/scope", "show allow.yaml / out-of-scope.yaml status"),
         ("/exit", "leave the harness (Ctrl+D also works)"),
     ]),
@@ -2547,8 +2547,11 @@ class ZimZillaApp(App):
             t.append("  last: ", style=f"bold {p.accent}")
             t.append(d.last_error[:180] + "\n", style=p.amber)
         if verbose:
+            t.append("  asset: ", style=f"bold {p.accent}")
+            t.append(f"`{d.asset_key}`  (must match Rich Presence → Art Assets)\n",
+                     style=p.primary)
             t.append("  logo: ", style=f"bold {p.accent}")
-            t.append(str(discord_mod.LOGO) + "  (asset key `zimzilla`)\n",
+            t.append(str(discord_mod.LOGO) + "  (512x512 PNG)\n",
                      style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
@@ -2562,9 +2565,12 @@ class ZimZillaApp(App):
             "  2. Copy its Application ID (17-20 digits)",
             "  3. Run  /discord-rpc <application-id>",
             "  4. Rich Presence → Art Assets → upload "
-            "docs/zimzilla-rpc.png as key `zimzilla`",
+            "docs/zimzilla-rpc.png with the asset name `zimzilla`",
             "  5. Keep Discord running; the presence appears on the account "
             "signed into it",
+            "",
+            "  The asset name is the key, not the filename. If you named it "
+            "something else, run /discord-rpc asset <that-name>.",
             "",
             "  This is Rich Presence via the local Discord client — it does not "
             "link or read your account. No token is stored, only the app id.",
@@ -2573,7 +2579,7 @@ class ZimZillaApp(App):
         self.query_one(ChatPane).write_block(t)
 
     def _cmd_discord_rpc(self, args) -> None:
-        """/discord-rpc [id|on|off|logo] — Rich Presence for this session."""
+        """/discord-rpc [id|on|off|asset|logo] — Rich Presence for this session."""
         arg = str(args[0]).strip() if args else ""
         low = arg.lower()
         if low in ("on", "off"):
@@ -2591,6 +2597,21 @@ class ZimZillaApp(App):
                 self._sys_line("Discord presence off", ok=True)
             self._discord_status()
             return
+        if low == "asset":
+            if len(args) < 2:
+                self._sys_line(f"current asset key: {self._discord.asset_key}",
+                               ok=True)
+                return
+            key = str(args[1]).strip()
+            try:
+                path = discord_mod.save_asset_key(key)
+            except Exception as e:  # noqa: BLE001
+                self._sys_line(f"asset: {type(e).__name__}: {e}", warn=True)
+                return
+            self._discord.asset_key = key
+            self._discord.set_activity("Idle", self.cfg.display_model)
+            self._sys_line(f"asset key set to `{key}` ({path})", ok=True)
+            return
         if low == "logo":
             source = str(args[1]).strip() if len(args) > 1 else None
             try:
@@ -2599,7 +2620,8 @@ class ZimZillaApp(App):
                 self._sys_line(f"logo: {type(e).__name__}: {e}", warn=True)
                 return
             self._sys_line(f"logo prepared: {path} — upload it as asset "
-                           f"`zimzilla` in the Discord app", ok=True)
+                           f"`{self._discord.asset_key}` in the Discord app",
+                           ok=True)
             return
         if low in ("status", "show"):
             self._discord_status()
@@ -2621,7 +2643,8 @@ class ZimZillaApp(App):
             self._sys_line(f"Discord application id saved to {path}", ok=True)
             if logo is not None:
                 self._sys_line(f"logo prepared: {logo} — upload it as asset "
-                               f"`zimzilla` in the app's Rich Presence assets")
+                               f"`{self._discord.asset_key}` in the app's "
+                               f"Rich Presence assets")
             self._discord_status()
             return
         if arg and not discord_mod.valid_client_id(arg):

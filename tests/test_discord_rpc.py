@@ -53,10 +53,15 @@ def test_client_id() -> None:
 
 def test_payload() -> None:
     got = dr.payload("Thinking", "deepseek-v4.1-flash", started=1234)
-    check("payload: details name the app", got["details"] == "ZimZilla", str(got))
-    check("payload: state is the activity", got["state"] == "Thinking")
+    check("payload: details describe it", got["details"] == "Recon with a voice",
+          str(got))
+    check("payload: state is activity plus model",
+          got["state"] == "Thinking · deepseek-v4.1-flash", got["state"])
     check("payload: logo asset key", got["large_image"] == "zimzilla")
-    check("payload: logo hover text", got["large_text"] == "ZimZilla")
+    check("payload: logo hover text",
+          got["large_text"].startswith("ZimZilla"), got["large_text"])
+    check("payload: custom asset key", dr.payload(
+        "Idle", "", asset_key="logo")["large_image"] == "logo")
     check("payload: start timestamp", got["start"] == 1234)
     check("payload: it is not an instance", got["instance"] is False)
     long_state = dr.payload("x" * 400, "m" * 400)
@@ -71,11 +76,21 @@ def test_logo() -> None:
     check("logo: it writes the profile asset", path == dr.LOGO)
     check("logo: it is a PNG", path.is_file())
     image = Image.open(path)
-    check("logo: it is at most 512px", max(image.size) <= 512, str(image.size))
+    check("logo: it is exactly 512x512", image.size == (512, 512), str(image.size))
     check("logo: under Discord's 512KB ceiling",
           path.stat().st_size <= dr.MAX_IMAGE_BYTES,
           f"{path.stat().st_size} bytes")
     check("logo: the repo asset exists", dr.REPO_LOGO.is_file(), str(dr.REPO_LOGO))
+
+
+def test_asset_key() -> None:
+    path = dr.save_asset_key("logo")
+    check("asset: written where it says", path == dr.ASSET_FILE)
+    check("asset: mode 600", oct(path.stat().st_mode & 0o777) == "0o600",
+          oct(path.stat().st_mode & 0o777))
+    check("asset: it loads back", dr.load_asset_key() == "logo")
+    check("asset: junk is refused", not dr.ASSET_KEY_RE.fullmatch("has space"))
+    dr.save_asset_key("zimzilla")
 
 
 def test_sender() -> None:
@@ -95,7 +110,8 @@ def test_wiring() -> None:
     comp = (ROOT / "zimzilla" / "ui" / "complete.py").read_text(encoding="utf-8")
     main = (ROOT / "zimzilla" / "__main__.py").read_text(encoding="utf-8")
     check("wiring: the command is dispatched", '"discord-rpc": lambda a:' in app)
-    check("wiring: the command is in help", '"/discord-rpc [id|on|off|logo]"' in app)
+    check("wiring: the command is in help",
+          '"/discord-rpc [id|on|off|asset|logo]"' in app)
     check("wiring: the command is completed", '("/discord-rpc",' in comp)
     check("wiring: the setup wizard exists", "def _discord_setup_text" in app)
     check("wiring: the logo command exists", 'if low == "logo":' in app)
@@ -110,6 +126,7 @@ def main() -> int:
     test_client_id()
     test_payload()
     test_logo()
+    test_asset_key()
     test_sender()
     test_wiring()
     failed = [n for n, ok, _ in RESULTS if not ok]

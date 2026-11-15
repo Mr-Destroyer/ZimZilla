@@ -28,6 +28,8 @@ DOWNLOADS_LOGO = Path.home() / "Downloads" / "zimzilla.png"
 
 CLIENT_ID_RE = re.compile(r"^\d{17,20}$")
 ASSET_KEY = "zimzilla"
+ASSET_FILE = ZIMZILLA_HOME / "discord" / "asset"
+ASSET_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_IMAGE_BYTES = 512 * 1024   # Discord's Rich Presence asset ceiling
 
 
@@ -86,6 +88,37 @@ def save_client_id(client_id: str) -> Path:
     return PROFILE
 
 
+def load_asset_key() -> str:
+    """The Rich Presence asset key. Must match the portal exactly."""
+    env = os.environ.get("DISCORD_ASSET_KEY", "").strip()
+    if ASSET_KEY_RE.fullmatch(env):
+        return env
+    try:
+        text = ASSET_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ASSET_KEY
+    return text if ASSET_KEY_RE.fullmatch(text) else ASSET_KEY
+
+
+def save_asset_key(key: str) -> Path:
+    key = (key or "").strip()
+    if not ASSET_KEY_RE.fullmatch(key):
+        raise ValueError("asset keys are 1-64 letters, digits, . _ or -")
+    ASSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(ASSET_FILE.parent, 0o700)
+    except OSError:
+        pass
+    fd = os.open(ASSET_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(key + "\n")
+    try:
+        os.chmod(ASSET_FILE, 0o600)
+    except OSError:
+        pass
+    return ASSET_FILE
+
+
 def prepare_logo(source: str | Path | None = None) -> Path:
     """Resize the supplied logo to Discord's 512px/512KB asset limits."""
     from PIL import Image
@@ -96,11 +129,16 @@ def prepare_logo(source: str | Path | None = None) -> Path:
         raise FileNotFoundError(f"no logo found at {DOWNLOADS_LOGO}")
     image = Image.open(src).convert("RGBA")
     image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    # Discord's Rich Presence artwork is square. Pad rather than hand it a
+    # 512x492 image, which some clients treat as too small.
+    canvas = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+    canvas.alpha_composite(image, ((512 - image.width) // 2,
+                                   (512 - image.height) // 2))
     LOGO.parent.mkdir(parents=True, exist_ok=True)
-    image.save(LOGO, optimize=True)
+    canvas.save(LOGO, optimize=True)
     # If optimize still leaves it over the ceiling, quantise to a palette.
     if LOGO.stat().st_size > MAX_IMAGE_BYTES:
-        image.convert("P", palette=Image.Palette.ADAPTIVE).save(LOGO, optimize=True)
+        canvas.convert("P", palette=Image.Palette.ADAPTIVE).save(LOGO, optimize=True)
     try:
         os.chmod(LOGO, 0o644)
     except OSError:
@@ -118,15 +156,24 @@ def ipc_socket() -> Path | None:
     return None
 
 
-def payload(state: str, model: str, *, started: int | None = None) -> dict:
-    """The activity object sent to Discord. Kept pure for tests."""
-    detail = (model or "ZimZilla").strip()[:128]
+def payload(state: str, model: str, *, started: int | None = None,
+            asset_key: str = ASSET_KEY) -> dict:
+    """The activity object sent to Discord. Kept pure for tests.
+
+    The app name is the *title* of the card. ``details`` is the description line
+    under it; ``state`` carries the live activity and model. Using the app name
+    again in ``details`` is why a bare payload can look empty.
+    """
+    activity = (state or "Idle").strip()
+    model = (model or "").strip()
+    if model:
+        activity = f"{activity} · {model}"
     return {
-        "details": "ZimZilla"[:128],
-        "state": (state or "Idle").strip()[:128],
+        "details": "Recon with a voice"[:128],
+        "state": activity[:128],
         "start": started or int(time.time()),
-        "large_image": ASSET_KEY,
-        "large_text": "ZimZilla",
+        "large_image": (asset_key or ASSET_KEY)[:64],
+        "large_text": "ZimZilla — terminal-native AI operator"[:128],
         "instance": False,
     }
 
@@ -139,7 +186,9 @@ class DiscordRPC:
         self.client_id = client_id if valid_client_id(client_id) else ""
         self.enabled = bool(enabled)
         self.started = started or int(time.time())
-        self._activity = payload("Idle", "", started=self.started)
+        self.asset_key = load_asset_key()
+        self._activity = payload("Idle", "", started=self.started,
+                                 asset_key=self.asset_key)
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -153,7 +202,8 @@ class DiscordRPC:
 
     def set_activity(self, state: str, model: str = "") -> None:
         with self._lock:
-            self._activity = payload(state, model, started=self.started)
+            self._activity = payload(state, model, started=self.started,
+                                     asset_key=self.asset_key)
         self._wake.set()
 
     def start(self) -> bool:
@@ -202,7 +252,8 @@ class DiscordRPC:
                     with self._lock:
                         activity = dict(self._activity)
                     try:
-                        rpc.update(**activity)
+                        from pypresence import ActivityType
+                        rpc.update(activity_type=ActivityType.PLAYING, **activity)
                     except Exception as e:  # noqa: BLE001 - reconnect below
                         self.last_error = f"update failed: {e}"
                         break

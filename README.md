@@ -1957,7 +1957,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/rain` | toggle the matrix rain |
 | `/think` | show the model's own reasoning — where the endpoint forwards it |
 | `/voice [on\|off]` | spoken launch greeting and end-of-turn recap |
-| `/discord-rpc [id\|on\|off\|logo]` | show ZimZilla on your Discord profile |
+| `/discord-rpc [id\|on\|off\|asset\|logo]` | show ZimZilla on your Discord profile |
 | `/effort [low\|medium\|high\|off]` | how hard the model thinks — `reasoning_effort`, or a thinking budget, per protocol |
 | `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
 | `/zim-opencode [--model id] [--refresh] [-- args]` | open **opencode** in this terminal behind a fresh rotating IP — free models, no account, nothing global |
@@ -2302,20 +2302,34 @@ there is one setup step that cannot be automated from this repo:
 1. Create an application at https://discord.com/developers/applications
 2. Copy its Application ID (17-20 digits)
 3. /discord-rpc <application-id>
-4. Rich Presence → Art Assets → upload docs/zimzilla-rpc.png as key `zimzilla`
+4. Rich Presence → Art Assets → upload docs/zimzilla-rpc.png with the **asset
+   name** `zimzilla` (the name is the key; the filename is not)
 5. Keep Discord running; the presence appears
 ```
 
 The command stores the app id in `~/.zimzilla/discord/source` (mode 600), not a
-token. The logo source is `~/Downloads/zimzilla.png`; ZimZilla resizes it to
-512 px / under Discord's 512 KB asset ceiling and writes
+token. The logo source is `~/Downloads/zimzilla.png`; ZimZilla pads and resizes
+it to an exact **512×512** PNG under Discord's 512 KB asset ceiling and writes
 `~/.zimzilla/discord/zimzilla.png`. `/discord-rpc logo` re-prepares it from that
 path (or from `docs/zimzilla-rpc.png` when Downloads is absent).
+
+The app **cover image** and **app icon** are not Rich Presence assets. The card
+logo comes only from **Rich Presence → Art Assets**, and the asset's name must
+match `large_image` exactly. If you named it something other than `zimzilla`,
+tell ZimZilla:
+
+```
+/discord-rpc asset logo      # use the asset named "logo"
+```
+
+The card shows the app name as the title, `Recon with a voice` as the
+description, and `Idle · <model>` / `Working · <model>` as the live state.
 
 ```
 /discord-rpc             # status, or setup instructions when unconfigured
 /discord-rpc <id>        # save the app id and start the presence
 /discord-rpc on|off      # enable/disable this session
+/discord-rpc asset <key> # use the asset name you actually uploaded
 /discord-rpc logo        # resize/copy the logo, print the asset key
 ```
 
