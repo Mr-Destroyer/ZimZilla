@@ -38,6 +38,9 @@ Pillow>=10.0
 # rather than a 44-column block mosaic.
 textual-image>=0.14.3
 
+# Discord Rich Presence (local Discord client over IPC; app id required).
+pypresence>=4.6
+
 # The optional voice: Edge neural TTS (no key, network) played through mpv or
 # ffplay; /voice off and --no-voice disable it.
 edge-tts>=7.0

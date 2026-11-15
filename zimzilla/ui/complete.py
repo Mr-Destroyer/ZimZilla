@@ -37,6 +37,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/rain", "toggle the matrix-rain background"),
     ("/think", "toggle showing the model's own reasoning"),
     ("/voice", "spoken launch greeting and turn recaps — /voice on|off"),
+    ("/discord-rpc", "show ZimZilla on your Discord profile"),
     ("/effort", "raise or lower how hard the model thinks: low | medium | high | off"),
     ("/theme", "switch palette: green | amber | cyan | system"),
     ("/zim-logfare", "switch upstream to Logfare (direct, all models)"),

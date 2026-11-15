@@ -16,6 +16,7 @@ dependencies = [
     "Pillow>=10.0",
     "textual-image>=0.14.3",
     "edge-tts>=7.0",
+    "pypresence>=4.6",
 ]
 
 [project.scripts]

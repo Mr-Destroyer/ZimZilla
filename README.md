@@ -1957,6 +1957,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/rain` | toggle the matrix rain |
 | `/think` | show the model's own reasoning — where the endpoint forwards it |
 | `/voice [on\|off]` | spoken launch greeting and end-of-turn recap |
+| `/discord-rpc [id\|on\|off\|logo]` | show ZimZilla on your Discord profile |
 | `/effort [low\|medium\|high\|off]` | how hard the model thinks — `reasoning_effort`, or a thinking budget, per protocol |
 | `/panes` | re-open this session under tmux — `ctrl+b h`/`v` split |
 | `/zim-opencode [--model id] [--refresh] [-- args]` | open **opencode** in this terminal behind a fresh rotating IP — free models, no account, nothing global |
@@ -2281,6 +2282,47 @@ it costs no tokens. The launch greeting is a fixed line.
 
 The voice is local display only. Nothing about it leaves the machine except the
 TTS request to Edge unless you switch to the offline fallback.
+
+---
+
+## Discord Rich Presence
+
+ZimZilla can show **"Playing ZimZilla"** on the Discord profile of whoever is
+signed into the local Discord client.
+
+This is Rich Presence over Discord's local IPC socket. It is **not** account
+linking: ZimZilla never asks for a Discord token, never reads the account, and
+never uploads anything except the activity fields. The activity appears on
+whichever account that Discord client is signed into.
+
+Discord requires an **Application ID** to name the activity and host its art, so
+there is one setup step that cannot be automated from this repo:
+
+```
+1. Create an application at https://discord.com/developers/applications
+2. Copy its Application ID (17-20 digits)
+3. /discord-rpc <application-id>
+4. Rich Presence → Art Assets → upload docs/zimzilla-rpc.png as key `zimzilla`
+5. Keep Discord running; the presence appears
+```
+
+The command stores the app id in `~/.zimzilla/discord/source` (mode 600), not a
+token. The logo source is `~/Downloads/zimzilla.png`; ZimZilla resizes it to
+512 px / under Discord's 512 KB asset ceiling and writes
+`~/.zimzilla/discord/zimzilla.png`. `/discord-rpc logo` re-prepares it from that
+path (or from `docs/zimzilla-rpc.png` when Downloads is absent).
+
+```
+/discord-rpc             # status, or setup instructions when unconfigured
+/discord-rpc <id>        # save the app id and start the presence
+/discord-rpc on|off      # enable/disable this session
+/discord-rpc logo        # resize/copy the logo, print the asset key
+```
+
+While a turn runs the state becomes **Working** / **Using <tool>**; it returns to
+**Idle** when the turn ends. The sender is a daemon thread that reconnects
+quietly when Discord restarts, so it never blocks the TUI. If Discord is closed
+the command reports "waiting for Discord"; it does not fail the session.
 
 ---
 
@@ -3326,6 +3368,7 @@ zimzilla/                     the package
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
   ui/imageview.py             the image pane's half-block/pixel renderer
   voice.py                    launch greeting and idle recap (Edge TTS / mpv)
+  discord_rpc.py              Discord Rich Presence (local IPC, app id required)
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
   osint.py                    /osint kinds, playbooks, case dirs, report archive
@@ -3396,6 +3439,7 @@ python tests/test_crownllm.py      # /zim-crownllm — :free-only catalogue, pro
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
+python tests/test_discord_rpc.py   # Discord presence payload, profile, logo, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
 ```
 

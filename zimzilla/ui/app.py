@@ -36,6 +36,7 @@ from .. import browser as browser_mod
 from .. import coarena as co_mod
 from .. import connect as connect_mod
 from .. import crack as crack_mod
+from .. import discord_rpc as discord_mod
 from .. import crownllm as cl_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
@@ -879,6 +880,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/mode [name]", "switch mode: auto | edits | plan | zim | danger | uncensored | blackhat"),
         ("/clear", "wipe the transcript and conversation history"),
         ("/voice [on|off]", "spoken launch greeting and end-of-turn recap"),
+        ("/discord-rpc [id|on|off|logo]", "show ZimZilla on your Discord profile"),
         ("/scope", "show allow.yaml / out-of-scope.yaml status"),
         ("/exit", "leave the harness (Ctrl+D also works)"),
     ]),
@@ -1322,6 +1324,7 @@ class ZimZillaApp(App):
         # before the first turn so the launch greeting can use it.
         self._voice = voice_mod.Voice(enabled=self.cfg.voice,
                                       state_dir=self.cfg.state_dir)
+        self._discord = discord_mod.DiscordRPC.from_config()
         self._voice_facts: dict = {"tools": [], "files": [], "errors": 0}
         self._voice_error = ""
         # While a modal (permission gate) is up, the prompt must be disabled so
@@ -1523,6 +1526,8 @@ class ZimZillaApp(App):
         )
         self._splash()
         self._voice_welcome()
+        self._discord.start()
+        self._discord.set_activity("Idle", self.cfg.display_model)
         # A session relaunched by `/panes` arrives with its conversation already
         # in `agent.messages` and an empty transcript pane — `/load` restores the
         # history but nothing repaints it. Replaying it here is what makes
@@ -2024,6 +2029,8 @@ class ZimZillaApp(App):
         self._reason_buf = ""
         self._voice_facts = {"tools": [], "files": []}
         self._voice_error = ""
+        self._turn_started = time.monotonic()
+        self._discord.set_activity("Working", self.cfg.display_model)
         self._set_rain(False)  # keep the transcript readable during a turn
 
         loop = self._loop_rail()
@@ -2080,6 +2087,7 @@ class ZimZillaApp(App):
             self._sync_rails()
             self._set_rain(self.rain_on)
             self._voice_recap(cancelled=self._cancelled)
+            self._discord.set_activity("Idle", self.cfg.display_model)
             if self._cancelled:
                 self.agent.cancel_turn()
                 self._sys_line("turn interrupted", warn=True)
@@ -2226,6 +2234,9 @@ class ZimZillaApp(App):
             if ev.get("gated"):
                 bar.set_activity(f"awaiting permission: {ev['name']}", busy=True)
             self._voice_note_call(ev)
+            self._discord.set_activity(
+                f"Using {str(ev.get('name') or 'a tool')[:80]}",
+                self.cfg.display_model)
 
         elif etype == "tool_result":
             args = ev.get("args") or {}
@@ -2518,6 +2529,113 @@ class ZimZillaApp(App):
         t.append("\n")
         self.query_one(ChatPane).write_block(t)
 
+    def _discord_status(self, *, verbose: bool = True) -> None:
+        d = self._discord
+        p = self.palette
+        t = Text()
+        t.append("  discord: ", style=f"bold {p.accent}")
+        if not d.client_id:
+            t.append("not configured\n", style=p.amber)
+        else:
+            t.append(f"app {d.client_id}\n", style=p.primary)
+        t.append("  presence: ", style=f"bold {p.accent}")
+        t.append("connected" if d.connected else
+                 ("disabled" if not d.enabled else "waiting for Discord"),
+                 style=p.primary if d.connected else p.dim)
+        t.append("\n")
+        if d.last_error:
+            t.append("  last: ", style=f"bold {p.accent}")
+            t.append(d.last_error[:180] + "\n", style=p.amber)
+        if verbose:
+            t.append("  logo: ", style=f"bold {p.accent}")
+            t.append(str(discord_mod.LOGO) + "  (asset key `zimzilla`)\n",
+                     style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    def _discord_setup_text(self) -> None:
+        p = self.palette
+        t = Text()
+        t.append("  DISCORD RICH PRESENCE\n\n", style=f"bold {p.accent}")
+        for line in (
+            "  1. Create an application at "
+            "https://discord.com/developers/applications",
+            "  2. Copy its Application ID (17-20 digits)",
+            "  3. Run  /discord-rpc <application-id>",
+            "  4. Rich Presence → Art Assets → upload "
+            "docs/zimzilla-rpc.png as key `zimzilla`",
+            "  5. Keep Discord running; the presence appears on the account "
+            "signed into it",
+            "",
+            "  This is Rich Presence via the local Discord client — it does not "
+            "link or read your account. No token is stored, only the app id.",
+        ):
+            t.append(line + "\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    def _cmd_discord_rpc(self, args) -> None:
+        """/discord-rpc [id|on|off|logo] — Rich Presence for this session."""
+        arg = str(args[0]).strip() if args else ""
+        low = arg.lower()
+        if low in ("on", "off"):
+            self._discord.enabled = low == "on"
+            if self._discord.enabled:
+                if not self._discord.client_id:
+                    self._sys_line("no Discord application id yet", warn=True)
+                    self._discord_setup_text()
+                    return
+                self._discord.start()
+                self._discord.set_activity("Idle", self.cfg.display_model)
+                self._sys_line("Discord presence on", ok=True)
+            else:
+                self._discord.stop()
+                self._sys_line("Discord presence off", ok=True)
+            self._discord_status()
+            return
+        if low == "logo":
+            source = str(args[1]).strip() if len(args) > 1 else None
+            try:
+                path = discord_mod.prepare_logo(source)
+            except Exception as e:  # noqa: BLE001
+                self._sys_line(f"logo: {type(e).__name__}: {e}", warn=True)
+                return
+            self._sys_line(f"logo prepared: {path} — upload it as asset "
+                           f"`zimzilla` in the Discord app", ok=True)
+            return
+        if low in ("status", "show"):
+            self._discord_status()
+            return
+        if arg and discord_mod.valid_client_id(arg):
+            try:
+                path = discord_mod.save_client_id(arg)
+            except Exception as e:  # noqa: BLE001
+                self._sys_line(f"discord: {type(e).__name__}: {e}", warn=True)
+                return
+            self._discord.client_id = arg
+            self._discord.enabled = True
+            try:
+                logo = discord_mod.prepare_logo()
+            except Exception:  # noqa: BLE001 - the ID still works without it
+                logo = None
+            self._discord.start()
+            self._discord.set_activity("Idle", self.cfg.display_model)
+            self._sys_line(f"Discord application id saved to {path}", ok=True)
+            if logo is not None:
+                self._sys_line(f"logo prepared: {logo} — upload it as asset "
+                               f"`zimzilla` in the app's Rich Presence assets")
+            self._discord_status()
+            return
+        if arg and not discord_mod.valid_client_id(arg):
+            self._sys_line("a Discord application id is 17-20 digits", warn=True)
+            return
+        # Bare command: status when configured, setup instructions when not.
+        if self._discord.client_id:
+            if self._discord.enabled:
+                self._discord.start()
+                self._discord.set_activity("Idle", self.cfg.display_model)
+            self._discord_status()
+        else:
+            self._discord_setup_text()
+
     # ---- image pane -------------------------------------------------------
     def _image_pane(self) -> ImagePane | None:
         try:
@@ -2778,6 +2896,8 @@ class ZimZillaApp(App):
         "connect",
         # A voice toggle is display/audio only.
         "voice",
+        # Discord presence is a background connection, not a turn.
+        "discord-rpc",
         # Same reasoning as /rain: a display toggle reads and writes only
         # harness state, starts no turn, and is most wanted while a turn is
         # running — which is exactly when the reasoning is on screen.
@@ -2824,6 +2944,7 @@ class ZimZillaApp(App):
             "mcp": lambda a: self._cmd_mcp(a),
             "connect": lambda a: self._cmd_connect(a),
             "voice": lambda a: self._cmd_voice(a),
+            "discord-rpc": lambda a: self._cmd_discord_rpc(a),
             "team": lambda a: self._cmd_team(a),
             "see": lambda a: self._cmd_see(a),
             "osint": lambda a: self._cmd_osint(a),
@@ -11130,6 +11251,7 @@ class ZimZillaApp(App):
             ("/rain", "toggle the matrix rain", "rain"),
             ("/think", "show the model's reasoning", "think"),
             ("/voice", "spoken launch greeting and turn recaps", "voice"),
+            ("/discord-rpc", "show ZimZilla on your Discord profile", "discord-rpc"),
             ("/effort", "raise or lower how hard the model thinks", "effort"),
             ("/theme", "switch palette", "theme"),
             ("/zim-source", "upstream sources and status", "zim-source"),
@@ -11361,6 +11483,10 @@ class ZimZillaApp(App):
             pass
         try:
             self._voice.shutdown()
+        except Exception:
+            pass
+        try:
+            self._discord.stop()
         except Exception:
             pass
         self.exit()
