@@ -1020,11 +1020,13 @@ caring which. Seventeen sources are wired up:
 | **AntSeed** | `:8377` | **none** | `antseed buyer start` — a local buyer on a P2P network |
 | **Respan** | `gateway.respan.ai` | yours (`RESPAN_API_KEY`) | hosted, native Messages — free-only model list |
 | **Numes** | `api.numes.ai/api/v1` | yours (`NUMES_API_KEY`) | hosted, Chat Completions — free-only model list |
+| **CrowLLM** | `crowllm.com/v1` | yours (`CROWNLLM_API_KEY`) | hosted, Chat Completions — `:free` models only |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
 `/zim-inferbase`, `/zim-gemini`, `/zim-flex`, `/zim-tokenharbour`,
-`/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-numes`, `/zim-aihubmix`,
+`/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-numes`,
+`/zim-crownllm`, `/zim-aihubmix`,
 `/zim-beatapi`, `/zim-moonmath`, `/zim-coarena` or `/zim-antseed`; the choice is
 remembered, so the next launch comes back to the one that was working.
 
@@ -1117,6 +1119,30 @@ catalogue.
 
 `NUMES_API_KEY` is read from the environment first. The key is stored in
 `~/.zimzilla/numes/source` (mode 600), never echoed.
+
+### CrowLLM, `:free` models only
+
+CrowLLM is a hosted OpenAI-compatible gateway at `https://crowllm.com/v1`.
+Its catalogue is public and marks free models with the **`:free` suffix**;
+ZimZilla offers only those, so the two paid catalogue ids can never be selected.
+
+```
+/crownllm-api-key <key>   # store CROWNLLM_API_KEY
+/zim-crownllm             # switch; lands on a working free model
+/crownllm-models          # the live :free list
+/model                    # :free models only
+```
+
+Measured 2026-11-15: 76 catalogue entries, **74 ending in `:free`**; the two
+paid ids were `runpod/kimi-k3` and `typhoon-v2.5-30b-a3b-instruct`. Free-model
+health is uneven — several answered provider `503`s while `gpt-4o:free` and
+`qwen-3.8-27b:free` replied, and `gpt-4o:free` round-tripped a tool call. The
+default is therefore `gpt-4o:free`, not simply the first catalogue row. The
+catalogue has no context-length or price fields; `:free` is the free signal.
+
+The catalogue is public, so `/crownllm-models` works before a key exists. A key
+is stored in `~/.zimzilla/crownllm/source` (mode 600) and proved by one tiny
+free-model chat call, because a keyless catalogue cannot validate a credential.
 
 Token Juice is a direct route and nothing else: `/zim-source` lists it with
 `direct` where the others show a port, because there is no proxy to report on.
@@ -1976,6 +2002,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-numes` | switch upstream to Numes — hosted, Chat Completions, **free models only** |
 | `/numes-api-setup <key>` | store your Numes API key (`NUMES_API_KEY`) |
 | `/numes-models` | the live catalog — prompt and completion both $0 |
+| `/zim-crownllm` | switch upstream to CrowLLM — hosted, Chat Completions, `:free` models only |
+| `/crownllm-api-key <key>` | store your CrowLLM API key (`CROWNLLM_API_KEY`) |
+| `/crownllm-models` | the live catalog — only ids ending in `:free` |
 | `/zim-aihubmix` | switch upstream to AIHubMix — hosted, free models, native Messages |
 | `/aihubmix-api-setup <key>` | store your AIHubMix API key |
 | `/aihubmix-models` | the live free catalog — what is free and usable |
@@ -3309,6 +3338,7 @@ zimzilla/                     the package
   payload.py                  /payload — the extension table, the argv, the build, the handler
   respan.py                   /zim-respan — free-only catalogue, native Messages
   numes.py                    /zim-numes — free-only catalogue, Chat Completions
+  crownllm.py                 /zim-crownllm — :free-only catalogue, Chat Completions
   connect.py                  /connect — generate/register MCP app bridges
   bridge.py                   the generated bridge's tools — Kdenlive MLT + desktop
   opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
@@ -3362,6 +3392,7 @@ python tests/test_inferbase.py     # /inferbase-* — the price band, the two ro
 python tests/test_vision.py        # /see, browse, view_image — images, browser, screenshots
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 python tests/test_numes.py         # /zim-numes — free-only catalogue, profile, key-gated probe
+python tests/test_crownllm.py      # /zim-crownllm — :free-only catalogue, profile, paid ids excluded
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
