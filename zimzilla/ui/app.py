@@ -1324,7 +1324,7 @@ class ZimZillaApp(App):
         # before the first turn so the launch greeting can use it.
         self._voice = voice_mod.Voice(enabled=self.cfg.voice,
                                       state_dir=self.cfg.state_dir)
-        self._discord = discord_mod.DiscordRPC.from_config()
+        self._discord = discord_mod.DiscordRPC.from_config(workdir=self.cfg.workdir)
         self._voice_facts: dict = {"tools": [], "files": [], "errors": 0}
         self._voice_error = ""
         # While a modal (permission gate) is up, the prompt must be disabled so
@@ -2030,7 +2030,7 @@ class ZimZillaApp(App):
         self._voice_facts = {"tools": [], "files": []}
         self._voice_error = ""
         self._turn_started = time.monotonic()
-        self._discord.set_activity("Working", self.cfg.display_model)
+        self._discord.set_activity("Thinking", self.cfg.display_model)
         self._set_rain(False)  # keep the transcript readable during a turn
 
         loop = self._loop_rail()
@@ -2235,7 +2235,7 @@ class ZimZillaApp(App):
                 bar.set_activity(f"awaiting permission: {ev['name']}", busy=True)
             self._voice_note_call(ev)
             self._discord.set_activity(
-                f"Using {str(ev.get('name') or 'a tool')[:80]}",
+                f"Running {str(ev.get('name') or 'a tool')[:80]}",
                 self.cfg.display_model)
 
         elif etype == "tool_result":

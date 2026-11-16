@@ -52,9 +52,10 @@ def test_client_id() -> None:
 
 
 def test_payload() -> None:
-    got = dr.payload("Thinking", "deepseek-v4.1-flash", started=1234)
-    check("payload: details describe it", got["details"] == "Recon with a voice",
-          str(got))
+    got = dr.payload("Thinking", "deepseek-v4.1-flash", started=1234,
+                     workdir=_HOME / "Projects" / "ZimZilla")
+    check("payload: details show the working directory",
+          got["details"].endswith("Projects/ZimZilla"), got["details"])
     check("payload: state is activity plus model",
           got["state"] == "Thinking · deepseek-v4.1-flash", got["state"])
     check("payload: logo asset key", got["large_image"] == "zimzilla")
@@ -62,6 +63,10 @@ def test_payload() -> None:
           got["large_text"].startswith("ZimZilla"), got["large_text"])
     check("payload: custom asset key", dr.payload(
         "Idle", "", asset_key="logo")["large_image"] == "logo")
+    check("path: home is abbreviated", dr.display_path(Path.home()) == "~",
+          dr.display_path(Path.home()))
+    check("path: a long path keeps its leaf",
+          dr.display_path("/x/" + "a" * 300).endswith("a" * 127))
     check("payload: start timestamp", got["start"] == 1234)
     check("payload: it is not an instance", got["instance"] is False)
     long_state = dr.payload("x" * 400, "m" * 400)
@@ -117,7 +122,7 @@ def test_wiring() -> None:
     check("wiring: the logo command exists", 'if low == "logo":' in app)
     check("wiring: presence starts at boot", "self._discord.start()" in app)
     check("wiring: turn activity is published",
-          'set_activity("Working"' in app and 'set_activity("Idle"' in app)
+          'set_activity("Thinking"' in app and 'set_activity("Idle"' in app)
     check("wiring: it stops on quit", "self._discord.stop()" in app)
     check("launch: no import crash", "discord_rpc" not in main)  # imported by app
 

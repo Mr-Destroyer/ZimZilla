@@ -156,20 +156,43 @@ def ipc_socket() -> Path | None:
     return None
 
 
+def display_path(path: str | Path | None) -> str:
+    """A compact, speakable working directory for the card."""
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved = Path(raw).expanduser()
+    try:
+        rel = resolved.relative_to(Path.home())
+    except ValueError:
+        shown = str(resolved)
+    else:
+        shown = "~" if not rel.parts else "~/" + str(rel)
+    if len(shown) <= 128:
+        return shown
+    # Keep the leaf: a long path is more useful as ".../project" than as a
+    # truncated prefix that hides where the work actually is.
+    return "…" + shown[-(127):]
+
+
 def payload(state: str, model: str, *, started: int | None = None,
-            asset_key: str = ASSET_KEY) -> dict:
+            asset_key: str = ASSET_KEY,
+            workdir: str | Path | None = None) -> dict:
     """The activity object sent to Discord. Kept pure for tests.
 
-    The app name is the *title* of the card. ``details`` is the description line
-    under it; ``state`` carries the live activity and model. Using the app name
-    again in ``details`` is why a bare payload can look empty.
+    The app name is the *title* of the card. ``details`` is the directory the
+    operator is working in; ``state`` carries what the model is doing and which
+    model is doing it.
     """
     activity = (state or "Idle").strip()
     model = (model or "").strip()
     if model:
         activity = f"{activity} · {model}"
     return {
-        "details": "Recon with a voice"[:128],
+        "details": display_path(workdir or Path.cwd())[:128],
         "state": activity[:128],
         "start": started or int(time.time()),
         "large_image": (asset_key or ASSET_KEY)[:64],
@@ -182,13 +205,14 @@ class DiscordRPC:
     """A reconnecting, non-blocking Rich Presence sender."""
 
     def __init__(self, client_id: str = "", *, enabled: bool = True,
-                 started: int | None = None) -> None:
+                 started: int | None = None, workdir: str | Path | None = None) -> None:
         self.client_id = client_id if valid_client_id(client_id) else ""
         self.enabled = bool(enabled)
         self.started = started or int(time.time())
         self.asset_key = load_asset_key()
+        self.workdir = Path(workdir or Path.cwd())
         self._activity = payload("Idle", "", started=self.started,
-                                 asset_key=self.asset_key)
+                                 asset_key=self.asset_key, workdir=self.workdir)
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -197,13 +221,15 @@ class DiscordRPC:
         self.last_error = ""
 
     @classmethod
-    def from_config(cls) -> "DiscordRPC":
-        return cls(load_client_id(), enabled=bool(load_client_id()))
+    def from_config(cls, workdir: str | Path | None = None) -> "DiscordRPC":
+        return cls(load_client_id(), enabled=bool(load_client_id()),
+                   workdir=workdir)
 
     def set_activity(self, state: str, model: str = "") -> None:
         with self._lock:
             self._activity = payload(state, model, started=self.started,
-                                     asset_key=self.asset_key)
+                                     asset_key=self.asset_key,
+                                     workdir=self.workdir)
         self._wake.set()
 
     def start(self) -> bool:

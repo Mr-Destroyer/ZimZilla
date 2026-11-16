@@ -2322,8 +2322,10 @@ tell ZimZilla:
 /discord-rpc asset logo      # use the asset named "logo"
 ```
 
-The card shows the app name as the title, `Recon with a voice` as the
-description, and `Idle · <model>` / `Working · <model>` as the live state.
+The card shows the app name as the title, the **working directory** (home
+abbreviated to `~`, long paths keeping their leaf) as the description, and
+`Idle · <model>` / `Thinking · <model>` / `Running <tool> · <model>` as the
+live state. It updates when a turn starts and as tools run.
 
 ```
 /discord-rpc             # status, or setup instructions when unconfigured
