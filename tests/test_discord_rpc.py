@@ -54,19 +54,25 @@ def test_client_id() -> None:
 def test_payload() -> None:
     got = dr.payload("Thinking", "deepseek-v4.1-flash", started=1234,
                      workdir=_HOME / "Projects" / "ZimZilla")
-    check("payload: details show the working directory",
-          got["details"].endswith("Projects/ZimZilla"), got["details"])
-    check("payload: state is activity plus model",
-          got["state"] == "Thinking · deepseek-v4.1-flash", got["state"])
+    check("payload: details are the tagline",
+          got["details"] == dr.TAGLINE, got["details"])
+    check("payload: state carries the directory, action and model",
+          "Projects/ZimZilla" in got["state"] and
+          "Thinking · deepseek-v4.1-flash" in got["state"], got["state"])
     check("payload: logo asset key", got["large_image"] == "zimzilla")
     check("payload: logo hover text",
-          got["large_text"].startswith("ZimZilla"), got["large_text"])
+          got["large_text"] == "ZimZilla — " + dr.TAGLINE, got["large_text"])
     check("payload: custom asset key", dr.payload(
         "Idle", "", asset_key="logo")["large_image"] == "logo")
     check("path: home is abbreviated", dr.display_path(Path.home()) == "~",
           dr.display_path(Path.home()))
     check("path: a long path keeps its leaf",
           dr.display_path("/x/" + "a" * 300).endswith("a" * 127))
+    squeezed = dr.payload("Thinking", "m" * 120,
+                          workdir="/x/" + "a" * 300)
+    check("payload: state is bounded and keeps the action",
+          len(squeezed["state"]) <= 128 and "Thinking" in squeezed["state"],
+          str(len(squeezed["state"])))
     check("payload: start timestamp", got["start"] == 1234)
     check("payload: it is not an instance", got["instance"] is False)
     long_state = dr.payload("x" * 400, "m" * 400)

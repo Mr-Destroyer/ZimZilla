@@ -2322,10 +2322,18 @@ tell ZimZilla:
 /discord-rpc asset logo      # use the asset named "logo"
 ```
 
-The card shows the app name as the title, the **working directory** (home
-abbreviated to `~`, long paths keeping their leaf) as the description, and
-`Idle · <model>` / `Thinking · <model>` / `Running <tool> · <model>` as the
-live state. It updates when a turn starts and as tools run.
+The card shows:
+
+```text
+ZimZilla
+The most powerful hacking agent
+~/Projects/ZimZilla · Thinking · gpt-4o:free
+```
+
+The app name is the title, `The most powerful hacking agent` is the
+description, and the state carries the **working directory** (home abbreviated
+to `~`, long paths keeping their leaf), what the model is doing, and which
+model is doing it. It updates when a turn starts and as tools run.
 
 ```
 /discord-rpc             # status, or setup instructions when unconfigured
@@ -2335,8 +2343,11 @@ live state. It updates when a turn starts and as tools run.
 /discord-rpc logo        # resize/copy the logo, print the asset key
 ```
 
-While a turn runs the state becomes **Working** / **Using <tool>**; it returns to
-**Idle** when the turn ends. The sender is a daemon thread that reconnects
+While a turn runs the state becomes
+**<directory> · Thinking · <model>** / **<directory> · Running <tool> · <model>**;
+it returns to **<directory> · Idle · <model>** when the turn ends. Set the same
+tagline in the Developer Portal's **Description** field so the app page and the
+presence card agree. The sender is a daemon thread that reconnects
 quietly when Discord restarts, so it never blocks the TUI. If Discord is closed
 the command reports "waiting for Discord"; it does not fail the session.
 

@@ -28,6 +28,7 @@ DOWNLOADS_LOGO = Path.home() / "Downloads" / "zimzilla.png"
 
 CLIENT_ID_RE = re.compile(r"^\d{17,20}$")
 ASSET_KEY = "zimzilla"
+TAGLINE = "The most powerful hacking agent"
 ASSET_FILE = ZIMZILLA_HOME / "discord" / "asset"
 ASSET_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 MAX_IMAGE_BYTES = 512 * 1024   # Discord's Rich Presence asset ceiling
@@ -178,25 +179,41 @@ def display_path(path: str | Path | None) -> str:
     return "…" + shown[-(127):]
 
 
+def _state_line(path: str, activity: str) -> str:
+    """Directory + action in Discord's 128-character state field."""
+    activity = activity[:128]
+    if not path:
+        return activity
+    full = f"{path} · {activity}"
+    if len(full) <= 128:
+        return full
+    room = 128 - len(activity) - 3
+    if room >= 8:
+        leaf = path if len(path) <= room else "…" + path[-(room - 1):]
+        return f"{leaf} · {activity}"
+    return activity
+
+
 def payload(state: str, model: str, *, started: int | None = None,
             asset_key: str = ASSET_KEY,
             workdir: str | Path | None = None) -> dict:
     """The activity object sent to Discord. Kept pure for tests.
 
-    The app name is the *title* of the card. ``details`` is the directory the
-    operator is working in; ``state`` carries what the model is doing and which
+    The app name is the *title* of the card. ``details`` is the tagline;
+    ``state`` carries the working directory, what the model is doing and which
     model is doing it.
     """
     activity = (state or "Idle").strip()
     model = (model or "").strip()
     if model:
         activity = f"{activity} · {model}"
+    path = display_path(workdir or Path.cwd())
     return {
-        "details": display_path(workdir or Path.cwd())[:128],
-        "state": activity[:128],
+        "details": TAGLINE[:128],
+        "state": _state_line(path, activity),
         "start": started or int(time.time()),
         "large_image": (asset_key or ASSET_KEY)[:64],
-        "large_text": "ZimZilla — terminal-native AI operator"[:128],
+        "large_text": f"ZimZilla — {TAGLINE}"[:128],
         "instance": False,
     }
 
