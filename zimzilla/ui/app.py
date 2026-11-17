@@ -51,6 +51,7 @@ from .. import ldxhub as ldx_mod
 from .. import leadgen as leadgen_mod
 from .. import logfare as lf_mod
 from .. import mcp as mcp_mod
+from .. import memory as memory_mod
 from .. import moonmath as mm_mod
 from .. import numes as nm_mod
 from .. import nvidia as nv_mod
@@ -69,6 +70,7 @@ from .. import team as team_mod
 from .. import tokenharbour as th_mod
 from .. import tools as tools_mod
 from .. import unrestricted as unr_mod
+from .. import usage as usage_mod
 from .. import voice as voice_mod
 from .. import unorouter as uno_mod
 from .. import wandb as wb_mod
@@ -892,6 +894,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/mcp [add|remove|connect|tools]", "connect MCP servers; their tools join the tool set"),
         ("/compact", "summarise history to free context"),
         ("/cost", "session token and cost breakdown"),
+        ("/usage [reset]", "all-time usage — models, sources, tokens, daily graph"),
+        ("/memory [add|forget|clear]", "what ZimZilla remembers about you"),
     ]),
     ("upstreams", "UPSTREAMS", "where the tokens come from", [
         ("/zim-source", "show upstream sources and their status"),
@@ -1328,6 +1332,9 @@ class ZimZillaApp(App):
         self._voice = voice_mod.Voice(enabled=self.cfg.voice,
                                       state_dir=self.cfg.state_dir)
         self._discord = discord_mod.DiscordRPC.from_config(workdir=self.cfg.workdir)
+        self.memory = memory_mod.Memory(self.cfg.state_dir / "memory.json")
+        self.agent.memory_note = self.memory.prompt_note()
+        self.usage = usage_mod.UsageStats(self.cfg.state_dir / "usage.json")
         self._voice_facts: dict = {"tools": [], "files": [], "errors": 0}
         self._voice_error = ""
         # While a modal (permission gate) is up, the prompt must be disabled so
@@ -2053,6 +2060,13 @@ class ZimZillaApp(App):
         self._voice_facts = {"tools": [], "files": []}
         self._voice_error = ""
         self._turn_started = time.monotonic()
+        self._usage_before = (self.agent.session_input_tokens,
+                              self.agent.session_output_tokens,
+                              self.agent.session_cost,
+                              self.agent.turn_count)
+        self._usage_source = sources_mod.active_key(self.cfg.base_url) or "custom"
+        if self.memory.learn(text, source="conversation"):
+            self.agent.memory_note = self.memory.prompt_note()
         self._discord.set_activity("Thinking", self.cfg.display_model)
         self._set_rain(False)  # keep the transcript readable during a turn
 
@@ -2103,6 +2117,7 @@ class ZimZillaApp(App):
             bar.turns = self.agent.turn_count
             bar.model = self.cfg.display_model
             bar.render_bar()
+            self._record_usage()
             loop = self._loop_rail()
             if loop is not None:
                 loop.set_stage("idle")
@@ -2944,6 +2959,8 @@ class ZimZillaApp(App):
         "voice",
         # Discord presence is a background connection, not a turn.
         "discord-rpc",
+        # Memory/usage are local reads (or a local reset), not model turns.
+        "memory", "usage",
         # Same reasoning as /rain: a display toggle reads and writes only
         # harness state, starts no turn, and is most wanted while a turn is
         # running — which is exactly when the reasoning is on screen.
@@ -2979,6 +2996,8 @@ class ZimZillaApp(App):
             "mode": self._cmd_mode,
             "model": self._cmd_model,
             "cost": self._cmd_cost,
+            "usage": lambda a: self._cmd_usage(a),
+            "memory": lambda a: self._cmd_memory(a),
             "scope": self._cmd_scope,
             "rain": self._cmd_rain,
             "think": self._cmd_think,
@@ -4009,6 +4028,145 @@ class ZimZillaApp(App):
         t.append(f"  {'session total':<18}", style=p.dim)
         t.append(f"${a.session_cost:.4f}\n", style=f"bold {p.accent}")
         self.query_one(ChatPane).write_block(t)
+
+    def _record_usage(self) -> None:
+        before = getattr(self, "_usage_before", None)
+        if before is None:
+            return
+        tin, tout, tcost, tturn = before
+        din = max(0, self.agent.session_input_tokens - tin)
+        dout = max(0, self.agent.session_output_tokens - tout)
+        dcost = max(0.0, self.agent.session_cost - tcost)
+        if not (din or dout or dcost or self.agent.turn_count > tturn):
+            return
+        self.usage.record(
+            self.cfg.model,
+            getattr(self, "_usage_source", "custom"),
+            din, dout, dcost,
+        )
+
+    @staticmethod
+    def _usage_bar(value: int, maximum: int, width: int = 22) -> str:
+        if maximum <= 0:
+            return "·" * width
+        filled = max(0, min(width, round(width * int(value) / int(maximum))))
+        return "█" * filled + "·" * (width - filled)
+
+    def _cmd_usage(self, args=None) -> None:
+        """/usage — all-time models, sources, tokens and daily activity."""
+        args = list(args or [])
+        if args and str(args[0]).lower() == "reset":
+            self.usage.reset()
+            self._sys_line("usage ledger reset", ok=True)
+            return
+        p = self.palette
+        d = self.usage.data
+        totals = d.get("totals") or {}
+        t = Text()
+        t.append("  USAGE LEDGER\n\n", style=f"bold {p.accent}")
+        if not totals.get("turns"):
+            t.append("  no completed turns recorded yet — run a turn, then "
+                     "come back\n", style=p.dim)
+            t.append("  /usage reset clears the ledger\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+        since = self.usage.last_used()
+        t.append("  ALL TIME   ", style=f"bold {p.accent}")
+        t.append(f"{int(totals.get('turns') or 0)} turns  ·  "
+                 f"{usage_mod.format_tokens(totals.get('input') or 0)} in  ·  "
+                 f"{usage_mod.format_tokens(totals.get('output') or 0)} out  ·  "
+                 f"${float(totals.get('cost') or 0):.4f}\n", style=p.primary)
+        t.append("  SESSION   ", style=f"bold {p.accent}")
+        t.append(f"{self.agent.turn_count} turns  ·  "
+                 f"{usage_mod.format_tokens(self.agent.session_input_tokens)} in  ·  "
+                 f"{usage_mod.format_tokens(self.agent.session_output_tokens)} out  ·  "
+                 f"${self.agent.session_cost:.4f}\n", style=p.primary)
+        if since:
+            t.append("  LAST TURN  ", style=f"bold {p.accent}")
+            t.append(since.strftime("%Y-%m-%d %H:%M") + "\n", style=p.dim)
+
+        top_model = self.usage.top("models")
+        top_source = self.usage.top("sources")
+        if top_model:
+            name, bucket = top_model
+            share = (int(bucket.get("turns") or 0) * 100.0 /
+                     max(1, int(totals.get("turns") or 1)))
+            t.append("\n  FAVOURITE MODEL  ", style=f"bold {p.accent}")
+            t.append(f"{name}  ({share:.0f}% of turns)\n", style=p.primary)
+        if top_source:
+            name, bucket = top_source
+            share = (int(bucket.get("turns") or 0) * 100.0 /
+                     max(1, int(totals.get("turns") or 1)))
+            t.append("  MOST USED SOURCE ", style=f"bold {p.accent}")
+            t.append(f"{name}  ({share:.0f}% of turns)\n", style=p.primary)
+
+        models = self.usage.ranked("models", limit=6)
+        if models:
+            t.append("\n  MODELS\n", style=f"bold {p.accent}")
+            max_turns = max(int(b.get("turns") or 0) for _, b in models)
+            for name, b in models:
+                turns = int(b.get("turns") or 0)
+                tok = int(b.get("input") or 0) + int(b.get("output") or 0)
+                t.append(f"  {name:<28}", style=p.primary)
+                t.append(self._usage_bar(turns, max_turns), style=p.accent)
+                t.append(f" {turns:>4}  {usage_mod.format_tokens(tok):>7}\n",
+                         style=p.dim)
+
+        sources = self.usage.ranked("sources", limit=6)
+        if sources:
+            t.append("\n  SOURCES\n", style=f"bold {p.accent}")
+            max_turns = max(int(b.get("turns") or 0) for _, b in sources)
+            for name, b in sources:
+                turns = int(b.get("turns") or 0)
+                t.append(f"  {name:<28}", style=p.primary)
+                t.append(self._usage_bar(turns, max_turns), style=p.accent)
+                t.append(f" {turns:>4}\n", style=p.dim)
+
+        days = self.usage.recent_days(14)
+        if any(count for _, count in days):
+            maximum = max(count for _, count in days) or 1
+            spark = "".join("▁▂▃▄▅▆▇█"[min(7, round(7 * count / maximum))]
+                            for _, count in days)
+            t.append("\n  LAST 14 DAYS  ", style=f"bold {p.accent}")
+            t.append(spark + "\n", style=p.primary)
+            t.append("  " + days[0][0][5:] + " → " + days[-1][0][5:] + "\n",
+                     style=p.dim)
+        t.append("\n  /usage reset clears the ledger\n", style=p.dim)
+        self.query_one(ChatPane).write_block(t)
+
+    def _cmd_memory(self, args=None) -> None:
+        """/memory [add|forget|clear] — inspect or edit what ZimZilla remembers."""
+        args = list(args or [])
+        sub = str(args[0]).lower() if args else ""
+        if sub == "add":
+            text = " ".join(str(a) for a in args[1:]).strip()
+            if not text:
+                self._sys_line("usage: /memory add <what to remember>", warn=True)
+                return
+            fact = self.memory.add("note", text, source="explicit")
+            self.agent.memory_note = self.memory.prompt_note()
+            if fact is None:
+                self._sys_line("nothing to remember", warn=True)
+            else:
+                self._sys_line(f"remembered: {fact.text}", ok=True)
+            return
+        if sub == "forget":
+            query = " ".join(str(a) for a in args[1:]).strip()
+            if not query:
+                self._sys_line("usage: /memory forget <text>", warn=True)
+                return
+            removed = self.memory.forget(query)
+            self.agent.memory_note = self.memory.prompt_note()
+            self._sys_line(f"forgot {removed} fact(s)" if removed
+                           else "no matching fact", ok=bool(removed),
+                           warn=not removed)
+            return
+        if sub == "clear":
+            self.memory.clear()
+            self.agent.memory_note = ""
+            self._sys_line("operator memory cleared", ok=True)
+            return
+        self.query_one(ChatPane).write_block(self.memory.render())
 
     def _cmd_mcp(self, args) -> None:
         """/mcp — connect MCP servers and list the tools they offer.

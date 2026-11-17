@@ -1957,6 +1957,8 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/mode [name]` | show or switch mode |
 | `/model [name]` | show or switch the model |
 | `/cost` | session token + cost breakdown |
+| `/usage [reset]` | all-time models, sources, tokens, cost and a 14-day graph |
+| `/memory [add\|forget\|clear]` | inspect or edit what ZimZilla remembers about you |
 | `/scope` | scope status and entries |
 | `/theme green\|amber\|cyan\|system` | switch palette — `system` adopts the terminal's own colours |
 | `/rain` | toggle the matrix rain |
@@ -2248,6 +2250,59 @@ then show the operator what you found.
 
 The pane lives in `~/.zimzilla`'s UI only; it writes nothing to the working
 tree. URL fetches go through the scope guard before the image is downloaded.
+
+---
+
+## Memory
+
+ZimZilla keeps a small, local operator memory in `~/.zimzilla/memory.json`
+(mode 600). It learns only from patterns with an unambiguous shape:
+
+```text
+my name is Zim
+I like dark terminals, fast cars
+I hate light mode
+I always use short answers
+my favourite editor is Neovim
+remember that this project is ZimZilla
+```
+
+The facts are folded into the system prompt as **context, not commands** — a
+current request always wins and the model is told not to recite them
+unprompted. They survive restarts and are visible/editable:
+
+```text
+/memory                 # what it knows
+/memory add <fact>      # add one explicitly
+/memory forget <text>   # remove matching facts
+/memory clear           # forget everything
+```
+
+There is no model call and no vector database: a preference is a sentence, so
+it is stored as one. Credentials are redacted before storage.
+
+## Usage
+
+`/usage` is the all-time ledger, not just this session:
+
+```text
+USAGE LEDGER
+
+ALL TIME   128 turns  ·  4.2M in  ·  830k out  ·  $0.1840
+SESSION    12 turns   ·  410k in  ·  80k out   ·  $0.0200
+FAVOURITE MODEL  gpt-4o:free  (42% of turns)
+MOST USED SOURCE crowllm  (61% of turns)
+
+MODELS
+gpt-4o:free      ██████████████████  54   1.2M
+deepseek...      ████████            21   800k
+
+LAST 14 DAYS  ▁▂▃▅▇█▆▅▃▂▁▂▄█
+```
+
+It is written per completed turn to `~/.zimzilla/usage.json` (mode 600) and
+charts model/source by turns, plus input/output tokens and cost. `/usage reset`
+clears the ledger.
 
 ---
 
@@ -3400,6 +3455,8 @@ zimzilla/                     the package
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
   ui/imageview.py             the image pane's half-block/pixel renderer
   voice.py                    launch greeting and idle recap (Edge TTS / mpv)
+  memory.py                   local operator facts — name, likes, preferences
+  usage.py                    persistent per-turn usage ledger
   discord_rpc.py              Discord Rich Presence (local IPC, app id required)
   scope.py                    allow.yaml / out-of-scope.yaml
   session.py                  save / load / list
@@ -3471,6 +3528,7 @@ python tests/test_crownllm.py      # /zim-crownllm — :free-only catalogue, pro
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
+python tests/test_memory_usage.py  # operator memory + persistent /usage ledger
 python tests/test_focus_mode.py    # header ⛶ toggle — hide/restore rails, reflow
 python tests/test_discord_rpc.py   # Discord presence payload, profile, logo, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial

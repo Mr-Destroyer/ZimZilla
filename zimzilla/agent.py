@@ -755,6 +755,9 @@ class Agent:
         #: prompt it costs nothing: the system prompt is already a message on
         #: the wire, and appending to it does not add another.
         self._summary: str = ""
+        #: The operator's remembered preferences, folded into the system prompt.
+        #: The UI refreshes it after learning something new; empty means none.
+        self.memory_note: str = ""
         #: Facts buffered by ``notice``, folded into the next turn's user text.
         #: Not appended to ``messages`` directly — see ``notice``.
         self._notices: list[str] = []
@@ -1022,7 +1025,9 @@ class Agent:
         self._summary = ""
 
     def system_prompt(self) -> str:
-        return self._base_system_prompt() + self._summary_note()
+        note = getattr(self, "memory_note", "")
+        memory = ("\n\n---\n\n" + note) if note else ""
+        return self._base_system_prompt() + self._summary_note() + memory
 
     def _summary_note(self) -> str:
         """The compacted-history recap, as a tail on the system prompt.

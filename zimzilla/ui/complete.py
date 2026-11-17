@@ -33,6 +33,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/mode", "switch mode: auto | edits | plan | zim | danger | uncensored | blackhat"),
     ("/model", "show or switch the model"),
     ("/cost", "session token and cost breakdown"),
+    ("/usage", "all-time usage — models, sources, tokens, daily graph"),
+    ("/memory", "what ZimZilla remembers about you"),
     ("/scope", "show scope guard status"),
     ("/rain", "toggle the matrix-rain background"),
     ("/think", "toggle showing the model's own reasoning"),
