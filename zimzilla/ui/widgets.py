@@ -13,11 +13,11 @@ from rich.cells import cell_len, get_character_cell_size
 from rich.text import Text
 from textual import events, work
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.events import Click, MouseDown, MouseMove, MouseUp
 from textual.expand_tabs import expand_tabs_inline
 from textual.geometry import Offset, clamp
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Button, Input, RichLog, Static
 
 from ..theme import Palette
 from .imageview import (MAX_ZOOM, MIN_ZOOM, halfblocks, load, zoom_label,
@@ -109,8 +109,8 @@ class PromptInput(Input):
         return clamp(offset, 0, len(self.value))
 
 
-class HeaderBar(Static):
-    """Top bar: model, cwd, scope status, theme name."""
+class HeaderBar(Horizontal):
+    """Top bar: model, cwd, scope status, theme name, and the focus toggle."""
 
     DEFAULT_CSS = """
     HeaderBar {
@@ -118,7 +118,54 @@ class HeaderBar(Static):
         height: 1;
         padding: 0 1;
     }
+    HeaderBar #header-text {
+        width: 1fr;
+        height: 1;
+    }
+    HeaderBar #focus-toggle {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        border: none;
+        padding: 0;
+        background: transparent;
+        color: $accent;
+    }
+    HeaderBar #focus-toggle:hover {
+        background: $accent;
+        color: $background;
+    }
+    HeaderBar #focus-toggle.active {
+        color: $primary;
+        text-style: bold;
+    }
     """
+
+    def compose(self):
+        yield Static(id="header-text")
+        yield Button("⛶", id="focus-toggle")
+
+    def render(self):
+        """The text tests (and a screen reader) expect from the bar."""
+        try:
+            return self.query_one("#header-text", Static).render()
+        except Exception:  # noqa: BLE001 - before compose
+            return Text()
+
+    def _text_widget(self) -> Static | None:
+        try:
+            return self.query_one("#header-text", Static)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def set_focus_mode(self, on: bool) -> None:
+        self._focus_mode = bool(on)
+        try:
+            button = self.query_one("#focus-toggle", Button)
+            button.label = "⊡" if on else "⛶"
+            button.set_class(on, "active")
+        except Exception:  # noqa: BLE001
+            pass
 
     def __init__(self, palette: Palette, model: str, cwd: str, unsafe: bool, theme: str,
                  mode: str = "auto", **kwargs) -> None:
@@ -131,6 +178,8 @@ class HeaderBar(Static):
         self.mode = mode
         self.scope_text = "off"
         self.scope_ok = True
+        self._focus_mode = False
+        self.can_focus = False
 
     def set_scope(self, text: str, ok: bool) -> None:
         self.scope_text = text
@@ -192,19 +241,29 @@ class HeaderBar(Static):
         fixed.append("⌖ scope ", style=p.dim)
         fixed.append(self.scope_text, style=f"bold {p.accent if self.scope_ok else p.red}")
 
-        limit = self.size.width or 200
+        # The focus button is a fixed 3 cells on the right; the text must fit
+        # in what remains, or the button would be the thing that gets clipped.
+        limit = max(20, (self.size.width or 200) - 4)
         while tail:
             t = fixed.copy()
             for text, style in tail:
                 t.append(*sep)
                 t.append(text, style=style)
             if t.cell_len <= limit:
-                self.update(t)
+                widget = self._text_widget()
+                if widget is not None:
+                    widget.update(t)
                 return
             tail.pop()  # shed the least important field and try again
-        self.update(fixed)
+        widget = self._text_widget()
+        if widget is not None:
+            widget.update(fixed)
 
     def on_mount(self) -> None:
+        try:
+            self.query_one("#focus-toggle", Button).can_focus = False
+        except Exception:  # noqa: BLE001
+            pass
         self.refresh_content()
 
     def on_resize(self) -> None:

@@ -39,6 +39,11 @@ and two rails that keep the loop and the cost in view. The left rail is the
 agent's state — think, call, observe, idle. The right rail is the bill:
 throughput, how full the context is, what it has cost, which files it touched.*
 
+The **⛶ button at the top right** hides both rails and gives their width to the
+harness; the transcript re-wraps immediately. Click it again (it becomes **⊡**)
+and the rails return at their previous widths. The image and Zim panes are left
+alone — they are content, not chrome.
+
 <table>
 <tr>
 <td width="50%">
@@ -3466,6 +3471,7 @@ python tests/test_crownllm.py      # /zim-crownllm — :free-only catalogue, pro
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
+python tests/test_focus_mode.py    # header ⛶ toggle — hide/restore rails, reflow
 python tests/test_discord_rpc.py   # Discord presence payload, profile, logo, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
 ```

@@ -1144,6 +1144,9 @@ class ZimZillaApp(App):
     /* Below ~100 cols the rails are hidden by on_resize and the layout is
        today's two-pane shell. The transcript is never the thing that shrinks. */
     Screen.narrow LoopRail, Screen.narrow TelemetryRail { display: none; }
+    /* The focus toggle hides both rails and gives the whole row to the
+       harness. The image/zim panes stay: they are content, not chrome. */
+    Screen.focus-mode LoopRail, Screen.focus-mode TelemetryRail { display: none; }
     /* ZimPane stays up on a narrow terminal: the operator opened it on
        purpose, and close/minimize/resize are how they put it away. */
     #bottom-dock {
@@ -1841,6 +1844,26 @@ class ZimZillaApp(App):
         window = a.context_window()
         rail.set_context(self._last_call_input, window, a.compact_threshold(window))
         loop.set_counters(a.turn_count, self.query_one(StatusBar).iterations)
+
+    def on_button_pressed(self, event) -> None:
+        if getattr(getattr(event, "button", None), "id", "") == "focus-toggle":
+            self._toggle_focus()
+            event.stop()
+
+    def _toggle_focus(self) -> None:
+        """Hide both side rails, or bring them back; the middle keeps its width."""
+        screen = self.screen
+        on = not screen.has_class("focus-mode")
+        if on:
+            screen.add_class("focus-mode")
+        else:
+            screen.remove_class("focus-mode")
+        try:
+            self.query_one(HeaderBar).set_focus_mode(on)
+        except Exception:  # noqa: BLE001
+            pass
+        self._sys_line("focus mode — rails hidden" if on
+                       else "focus mode off — rails restored", ok=True)
 
     def on_resize(self, event) -> None:
         """Drop the rails on a narrow terminal rather than squeezing the chat."""
