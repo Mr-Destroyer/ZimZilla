@@ -38,6 +38,7 @@ from .. import connect as connect_mod
 from .. import crack as crack_mod
 from .. import discord_rpc as discord_mod
 from .. import crownllm as cl_mod
+from .. import kenari as kn_mod
 from .. import antseed as as_mod
 from .. import effort as effort_mod
 from .. import flex as flex_mod
@@ -908,6 +909,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-respan", "switch upstream to Respan (hosted, free models only)"),
         ("/zim-numes", "switch upstream to Numes (hosted, free models only)"),
         ("/zim-crownllm", "switch upstream to CrowLLM (hosted, free models only)"),
+        ("/zim-kenari", "switch upstream to Kenari (hosted, free models only)"),
         ("/zim-aihubmix", "switch upstream to AIHubMix (hosted, free models)"),
         ("/zim-beatapi", "switch upstream to BeatAPI (hosted, free models)"),
         ("/zim-coarena", "switch upstream to Coarena (hosted, free Model API)"),
@@ -941,6 +943,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/numes-models", "the live catalog — $0 prompt and completion models"),
         ("/crownllm-api-key [key]", "store your CrowLLM key — free models only"),
         ("/crownllm-models", "the live catalog — only :free models"),
+        ("/kenari-api-setup [key]", "store your Kenari key — free models only"),
+        ("/kenari-models", "the live catalog — pricing.free models"),
         ("/aihubmix-api-setup [key]", "store your AIHubMix API key (optional)"),
         ("/aihubmix-models", "the live free catalog — what is free and usable"),
         ("/beatapi-api-setup [key]", "store your BeatAPI API key (optional)"),
@@ -2901,6 +2905,7 @@ class ZimZillaApp(App):
         "respan-api-setup", "respan-models", "zim-respan",
         "numes-api-setup", "numes-models", "zim-numes",
         "crownllm-api-key", "crownllm-models", "zim-crownllm",
+        "kenari-api-setup", "kenari-models", "zim-kenari",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
         "coarena-api-setup", "coarena-models", "zim-coarena",
@@ -3072,6 +3077,9 @@ class ZimZillaApp(App):
             "zim-crownllm": lambda a: self._cmd_zim_gateway("crownllm"),
             "crownllm-api-key": lambda a: self._cmd_gateway_key("crownllm", a),
             "crownllm-models": lambda a: self._cmd_models(["crownllm"]),
+            "zim-kenari": lambda a: self._cmd_zim_gateway("kenari"),
+            "kenari-api-setup": lambda a: self._cmd_gateway_key("kenari", a),
+            "kenari-models": lambda a: self._cmd_models(["kenari"]),
             "zim-aihubmix": lambda a: self._cmd_zim_gateway("aihubmix"),
             "aihubmix-api-setup": lambda a: self._cmd_gateway_key("aihubmix", a),
             "aihubmix-models": lambda a: self._cmd_models(["aihubmix"]),
@@ -3378,6 +3386,8 @@ class ZimZillaApp(App):
                       if active == "numes" else None)
         cl_catalog = (cl_mod.cached_free_models()
                       if active == "crownllm" else None)
+        kn_catalog = (kn_mod.cached_free_models()
+                      if active == "kenari" else None)
         # AIHubMix's is fetched too. Read once here for the same reason as the
         # others: the fetch is the slow part and this is a render.
         ah_catalog = (ah_mod.cached_models()
@@ -3447,7 +3457,7 @@ class ZimZillaApp(App):
             order = self._model_display_order(
                 models,
                 th_catalog or as_catalog or uno_catalog or unr_catalog
-                or resp_catalog or nm_catalog or cl_catalog or ah_catalog
+                or resp_catalog or nm_catalog or cl_catalog or kn_catalog or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
                 or mm_catalog or co_catalog or ix_catalog or ib_catalog)
             for m in order:
@@ -3468,7 +3478,7 @@ class ZimZillaApp(App):
                                         inf_catalog, nv_catalog, mm_catalog,
                                         co_catalog, ix_catalog, ib_catalog,
                                         unr_catalog, resp_catalog, nm_catalog,
-                                        cl_catalog)
+                                        cl_catalog, kn_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -3514,6 +3524,14 @@ class ZimZillaApp(App):
                     "  are offered; a paid id cannot be selected. The catalogue "
                     "is key-gated.\n  Key currency is USD or BTC and cannot be "
                     "changed after creation\n",
+                    style=p.dim)
+            elif active == "kenari":
+                t.append(
+                    f"  catalog {_catalog_clause(kn_mod.catalog_age(), kn_mod.CACHE_TTL)}"
+                    " — only models with pricing.free true AND openai-chat are "
+                    "offered;\n  paid ids cannot be selected. The catalogue is "
+                    "public; a key is needed\n  to send. Free models are RPM "
+                    "limited (429 free_quota_rpm)\n",
                     style=p.dim)
             elif active == "crownllm":
                 t.append(
@@ -3695,6 +3713,11 @@ class ZimZillaApp(App):
                     fetched, _ = cl_mod.free_models()
                 else:
                     fetched = list(cl_catalog)
+            elif active == "kenari":
+                if kn_catalog is None:
+                    fetched, _ = kn_mod.free_models()
+                else:
+                    fetched = list(kn_catalog)
             elif active == "aihubmix":
                 # Keyless like OpenRouter's and UnoRouter's: /api/v1/models
                 # answers with no credential. Fetched rather than read from the
@@ -3809,6 +3832,8 @@ class ZimZillaApp(App):
                     nm_catalog = fetched
                 elif active == "crownllm":
                     cl_catalog = fetched
+                elif active == "kenari":
+                    kn_catalog = fetched
                 elif active == "aihubmix":
                     ah_catalog = fetched
                 elif active == "beatapi":
@@ -3887,7 +3912,7 @@ class ZimZillaApp(App):
                     nv_catalog=None, mm_catalog=None, co_catalog=None,
                     ix_catalog=None, ib_catalog=None,
                     unr_catalog=None, resp_catalog=None,
-                    nm_catalog=None, cl_catalog=None) -> str:
+                    nm_catalog=None, cl_catalog=None, kn_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
@@ -3932,6 +3957,8 @@ class ZimZillaApp(App):
             live = ix_mod.price_for(name, ix_catalog)
         if live is None:
             live = ib_mod.price_for(name, ib_catalog)
+        if live is None:
+            live = kn_mod.price_for(name, kn_catalog)
         if live is None:
             live = cl_mod.price_for(name, cl_catalog)
         if live is None:
@@ -4741,6 +4768,7 @@ class ZimZillaApp(App):
                 ("respan", rp_mod, "Respan", "/respan-api-setup"),
                 ("numes", nm_mod, "Numes", "/numes-api-setup"),
                 ("crownllm", cl_mod, "CrowLLM", "/crownllm-api-key"),
+                ("kenari", kn_mod, "Kenari", "/kenari-api-setup"),
                 ("aihubmix", ah_mod, "AIHubMix", "/aihubmix-api-setup"),
                 ("beatapi", bp_mod, "BeatAPI", "/beatapi-api-setup"),
                 ("iteracompute", ic_mod, "IteraCompute",
@@ -4821,7 +4849,8 @@ class ZimZillaApp(App):
                      "                 /zim-openrouter,\n"
                      "                 /zim-unorouter,  /zim-unrestricted,\n"
                      "                 /zim-respan,  /zim-numes,\n"
-                     "                 /zim-crownllm,  /zim-aihubmix,\n"
+                     "                 /zim-crownllm,  /zim-kenari,\n"
+                     "                 /zim-aihubmix,\n"
                      "                 /zim-beatapi,  /zim-iteracompute,\n"
                      "                 /zim-infronai,  /zim-nvidia,\n"
                      "                 /zim-moonmath,  /zim-coarena,\n"
@@ -5770,6 +5799,8 @@ class ZimZillaApp(App):
             return nm_mod, "Numes"
         if kind == "crownllm":
             return cl_mod, "CrowLLM"
+        if kind == "kenari":
+            return kn_mod, "Kenari"
         if kind == "aihubmix":
             return ah_mod, "AIHubMix"
         if kind == "beatapi":
@@ -6151,6 +6182,19 @@ class ZimZillaApp(App):
                     "works without a key. Some free models return\n"
                     "               provider 503s; try another if one is down\n",
                     style=p.dim)
+            if kind == "kenari":
+                t.append("  get a key at  ", style=p.dim)
+                t.append("https://kenari.id — API keys\n", style=p.primary)
+                t.append("  keys start    ", style=p.dim)
+                t.append("kn-  · the key is required to send, not to list\n",
+                         style=p.dim)
+                t.append("  note:        ", style=p.dim)
+                t.append(
+                    "only models with pricing.free true and openai-chat are "
+                    "offered;\n               the 87 paid ids cannot be "
+                    "selected. The catalogue is public.\n               Free "
+                    "models are RPM-limited (429 free_quota_rpm), so pace\n"
+                    "               requests\n", style=p.dim)
             if kind in ("openrouter", "unorouter", "aihubmix", "beatapi",
                         "iteracompute", "infronai", "nvidia", "moonmath",
                         "coarena", "inferbase", "respan"):
@@ -6280,6 +6324,11 @@ class ZimZillaApp(App):
                 return
         if kind == "crownllm" and cl_mod.is_crownllm(self.cfg.base_url):
             if cl_mod.apply_to(self.cfg) is not None:
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+                return
+        if kind == "kenari" and kn_mod.is_kenari(self.cfg.base_url):
+            if kn_mod.apply_to(self.cfg) is not None:
                 self.agent._client = None
                 self._sys_line("applied to this session — no restart", ok=True)
                 return
@@ -6522,6 +6571,9 @@ class ZimZillaApp(App):
             self._fetch_models(kind)
         elif kind == "crownllm":
             self._sys_line("free models only — /crownllm-models to see the list")
+            self._fetch_models(kind)
+        elif kind == "kenari":
+            self._sys_line("free models only — /kenari-models to see the list")
             self._fetch_models(kind)
         elif kind == "coarena":
             # Every listed model is free per token, and the account is metered
@@ -6796,7 +6848,7 @@ class ZimZillaApp(App):
 
         known = {"logfare", "tokenjuice", "tokenharbour", "openrouter",
                  "unorouter", "unrestricted", "respan", "numes", "crownllm",
-                 "antseed",
+                 "kenari", "antseed",
                  "aihubmix",
                  "beatapi", "coarena",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
@@ -6877,6 +6929,9 @@ class ZimZillaApp(App):
         if kind == "crownllm":
             # The catalogue is public and marks free ids with :free.
             return cl_mod.usable_free_models()
+        if kind == "kenari":
+            # The catalogue is public and marks free models with pricing.free.
+            return kn_mod.usable_free_models()
         if kind == "aihubmix":
             # Keyless as well: /api/v1/models answers 200 with no Authorization
             # header at all (857 models when this was written). The key is sent
@@ -6987,6 +7042,7 @@ class ZimZillaApp(App):
         label = {"openrouter": "OPENROUTER", "unorouter": "UNOROUTER",
                  "unrestricted": "UNRESTRICTED.SH", "respan": "RESPAN",
                  "numes": "NUMES", "crownllm": "CROWNLLM",
+                 "kenari": "KENARI",
                  "aihubmix": "AIHUBMIX", "beatapi": "BEATAPI",
                  "iteracompute": "ITERACOMPUTE",
                  "infronai": "INFRONAI",
@@ -7028,6 +7084,12 @@ class ZimZillaApp(App):
                     "right now, not that the source is broken.\n  Individual "
                     "free models can return provider 503s — try another)\n",
                     style=p.dim)
+            if kind == "kenari":
+                t.append(
+                    "  (only models with pricing.free true and openai-chat are "
+                    "listed.\n  The catalogue is public, so this works before a "
+                    "key exists; free models\n  are RPM-limited — a 429 is "
+                    "pacing, not an empty catalogue)\n", style=p.dim)
             if kind == "numes":
                 t.append(
                     "  (only models with prompt AND completion priced at $0 are "
@@ -7201,6 +7263,12 @@ class ZimZillaApp(App):
                 "list went from one entry\n  to none. An empty list here means "
                 "nothing is priced at zero right now —\n  not that the source "
                 "is broken\n", style=p.dim)
+        if kind == "kenari":
+            t.append(
+                "  free = pricing.free true AND openai-chat · 23 of 110 models "
+                "at the time\n  of writing. Prices are in IDR per 1M tokens, but "
+                "a free model is\n  not billed; the free quota is RPM-limited. "
+                "A paid id cannot be selected\n", style=p.dim)
         if kind == "crownllm":
             t.append(
                 "  free = the catalogue id ends in :free · the two paid ids "
@@ -11470,6 +11538,8 @@ class ZimZillaApp(App):
              "zim-numes"),
             ("/zim-crownllm", "switch upstream to CrowLLM — free models only",
              "zim-crownllm"),
+            ("/zim-kenari", "switch upstream to Kenari — free models only",
+             "zim-kenari"),
             ("/zim-aihubmix", "switch upstream to AIHubMix", "zim-aihubmix"),
             ("/zim-beatapi", "switch upstream to BeatAPI", "zim-beatapi"),
             ("/zim-iteracompute", "switch upstream to IteraCompute", "zim-iteracompute"),
@@ -11493,6 +11563,8 @@ class ZimZillaApp(App):
             ("/numes-models", "the free Numes catalogue", "numes-models"),
             ("/crownllm-api-key", "store your CrowLLM key", "crownllm-api-key"),
             ("/crownllm-models", "the free CrowLLM catalogue", "crownllm-models"),
+            ("/kenari-api-setup", "store your Kenari key", "kenari-api-setup"),
+            ("/kenari-models", "the free Kenari catalogue", "kenari-models"),
             ("/aihubmix-api-setup", "store your AIHubMix API key",
              "aihubmix-api-setup"),
             ("/aihubmix-models", "the live free catalog — what is free and usable",

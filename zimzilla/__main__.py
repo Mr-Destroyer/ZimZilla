@@ -20,6 +20,7 @@ from . import sources as sources_mod
 from . import session as session_mod
 from . import tokenharbour as th_mod
 from . import crownllm as cl_mod
+from . import kenari as kn_mod
 from . import numes as nm_mod
 from . import respan as rp_mod
 from . import unrestricted as unr_mod
@@ -296,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     for _key, _mod in (("tokenharbour", th_mod), ("openrouter", or_mod),
                        ("unorouter", uno_mod), ("unrestricted", unr_mod),
                        ("respan", rp_mod), ("numes", nm_mod),
-                       ("crownllm", cl_mod),
+                       ("crownllm", cl_mod), ("kenari", kn_mod),
                        ("antseed", as_mod),
                        ("aihubmix", ah_mod), ("beatapi", bp_mod),
                        ("moonmath", mm_mod), ("coarena", co_mod)):

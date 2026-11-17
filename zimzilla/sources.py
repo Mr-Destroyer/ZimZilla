@@ -847,6 +847,10 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
         from . import crownllm as cl_mod
         cached = cl_mod.cached_ids()
         return tuple(cached) if cached else cl_mod.FREE_FALLBACK
+    if key == "kenari":
+        from . import kenari as kn_mod
+        cached = kn_mod.cached_ids()
+        return tuple(cached) if cached else kn_mod.FREE_FALLBACK
     if key == "antseed":
         from . import antseed as as_mod
         cached = as_mod.cached_ids()
@@ -902,6 +906,9 @@ def catalog_models(key: str) -> list | None:
     if key == "crownllm":
         from . import crownllm as cl_mod
         return cl_mod.cached_models()
+    if key == "kenari":
+        from . import kenari as kn_mod
+        return kn_mod.cached_models()
     if key == "antseed":
         from . import antseed as as_mod
         return as_mod.cached_models()
@@ -1042,6 +1049,9 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         if not catalog_models(key):
             return (0.0, 0.0)
     if key == "crownllm":
+        if not catalog_models(key):
+            return (0.0, 0.0)
+    if key == "kenari":
         if not catalog_models(key):
             return (0.0, 0.0)
     if key == "flex":
@@ -1440,7 +1450,8 @@ def switchable(exclude: str | None = None) -> list[str]:
     found = discover()
     out: list[str] = []
     for key in ("openrouter", "unorouter", "unrestricted", "respan", "numes",
-                "crownllm", "aihubmix", "beatapi", "tokenharbour", "moonmath",
+                "crownllm", "kenari", "aihubmix", "beatapi", "tokenharbour",
+                "moonmath",
                 "coarena",
                 "infronai",
                 "iteracompute", "antseed", "nvidia", "tokenjuice", "logfare",
@@ -1493,6 +1504,7 @@ def _gateway_module(key: str):
     from . import respan as rp_mod
     from . import numes as nm_mod
     from . import crownllm as cl_mod
+    from . import kenari as kn_mod
     from . import wandb as wb_mod
     return {
         "openrouter": or_mod, "unorouter": uno_mod, "aihubmix": ah_mod,
@@ -1501,6 +1513,7 @@ def _gateway_module(key: str):
         "wandb": wb_mod, "inferx": ix_mod, "inferbase": ib_mod,
         "flex": flex_mod, "gemini": gm_mod, "unrestricted": unr_mod,
         "respan": rp_mod, "numes": nm_mod, "crownllm": cl_mod,
+        "kenari": kn_mod,
     }.get(key)
 
 
@@ -1566,7 +1579,7 @@ def _state_file() -> Path:
 BUILTIN_KEYS = frozenset({"tokenharbour", "openrouter", "unorouter", "antseed",
                           "aihubmix", "beatapi", "moonmath", "coarena", "wandb",
                           "inferx", "inferbase", "flex", "unrestricted",
-                          "respan", "numes", "crownllm"})
+                          "respan", "numes", "crownllm", "kenari"})
 
 
 def current_key() -> str | None:
@@ -1633,6 +1646,7 @@ def active_key(base_url: str) -> str | None:
     from . import respan as rp_mod
     from . import numes as nm_mod
     from . import crownllm as cl_mod
+    from . import kenari as kn_mod
     from . import wandb as wb_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
@@ -1653,6 +1667,8 @@ def active_key(base_url: str) -> str | None:
         return "numes"
     if cl_mod.is_crownllm(base_url):
         return "crownllm"
+    if kn_mod.is_kenari(base_url):
+        return "kenari"
     if ah_mod.is_aihubmix(base_url):
         return "aihubmix"
     if bp_mod.is_beatapi(base_url):

@@ -1026,12 +1026,13 @@ caring which. Seventeen sources are wired up:
 | **Respan** | `gateway.respan.ai` | yours (`RESPAN_API_KEY`) | hosted, native Messages — free-only model list |
 | **Numes** | `api.numes.ai/api/v1` | yours (`NUMES_API_KEY`) | hosted, Chat Completions — free-only model list |
 | **CrowLLM** | `crowllm.com/v1` | yours (`CROWNLLM_API_KEY`) | hosted, Chat Completions — `:free` models only |
+| **Kenari** | `kenari.id/v1` | yours (`KENARI_API_KEY`) | hosted, Chat Completions — `pricing.free` models only |
 
 Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-infronai`, `/zim-nvidia`, `/zim-wandb`, `/zim-inferx`,
 `/zim-inferbase`, `/zim-gemini`, `/zim-flex`, `/zim-tokenharbour`,
 `/zim-openrouter`, `/zim-unorouter`, `/zim-respan`, `/zim-numes`,
-`/zim-crownllm`, `/zim-aihubmix`,
+`/zim-crownllm`, `/zim-kenari`, `/zim-aihubmix`,
 `/zim-beatapi`, `/zim-moonmath`, `/zim-coarena` or `/zim-antseed`; the choice is
 remembered, so the next launch comes back to the one that was working.
 
@@ -1148,6 +1149,31 @@ catalogue has no context-length or price fields; `:free` is the free signal.
 The catalogue is public, so `/crownllm-models` works before a key exists. A key
 is stored in `~/.zimzilla/crownllm/source` (mode 600) and proved by one tiny
 free-model chat call, because a keyless catalogue cannot validate a credential.
+
+### Kenari, `pricing.free` models only
+
+Kenari is a hosted OpenAI-compatible gateway at `https://kenari.id/v1`. Its
+catalogue is public and marks free models with **`pricing.free: true`**; those
+are the only ids ZimZilla offers.
+
+```
+/kenari-api-setup <key>   # store KENARI_API_KEY
+/zim-kenari               # switch; lands on a free model
+/kenari-models            # the live free list
+/model                    # free models only
+```
+
+Measured 2026-11-17: **110 catalogue entries, 23 free**, all advertising
+`openai-chat` and `anthropic-messages`. The default is
+`qwen3-8-27b:free` (262k window); `glm-4-7-flash:free`, `beam-1-0:free`,
+`nemotron-3-ultra-550b-a55b:free` and the Qwen/Omni models are in the same set.
+A live turn answered `KENARI OK` with `usage.cost: 0`.
+
+The catalogue is public, so `/kenari-models` works before a key exists; a key
+is needed to send. Free models are RPM-limited — `429 free_quota_rpm` means
+"slow down", not "bad key" — and `/kenari-api-setup` proves the key with one
+tiny free chat call. The key is stored in `~/.zimzilla/kenari/source` (mode
+600), never echoed.
 
 Token Juice is a direct route and nothing else: `/zim-source` lists it with
 `direct` where the others show a port, because there is no proxy to report on.
@@ -2013,6 +2039,9 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/zim-crownllm` | switch upstream to CrowLLM — hosted, Chat Completions, `:free` models only |
 | `/crownllm-api-key <key>` | store your CrowLLM API key (`CROWNLLM_API_KEY`) |
 | `/crownllm-models` | the live catalog — only ids ending in `:free` |
+| `/zim-kenari` | switch upstream to Kenari — hosted, Chat Completions, **pricing.free models only** |
+| `/kenari-api-setup <key>` | store your Kenari API key (`KENARI_API_KEY`) |
+| `/kenari-models` | the live catalog — only `pricing.free` models |
 | `/zim-aihubmix` | switch upstream to AIHubMix — hosted, free models, native Messages |
 | `/aihubmix-api-setup <key>` | store your AIHubMix API key |
 | `/aihubmix-models` | the live free catalog — what is free and usable |
@@ -3471,6 +3500,7 @@ zimzilla/                     the package
   respan.py                   /zim-respan — free-only catalogue, native Messages
   numes.py                    /zim-numes — free-only catalogue, Chat Completions
   crownllm.py                 /zim-crownllm — :free-only catalogue, Chat Completions
+  kenari.py                   /zim-kenari — pricing.free-only catalogue, Chat Completions
   connect.py                  /connect — generate/register MCP app bridges
   bridge.py                   the generated bridge's tools — Kdenlive MLT + desktop
   opencode.py                 /zim-opencode — the proxy pool, rotation, and the launch
@@ -3525,6 +3555,7 @@ python tests/test_vision.py        # /see, browse, view_image — images, browse
 python tests/test_respan.py        # /zim-respan — free-only catalogue, profile, activation state
 python tests/test_numes.py         # /zim-numes — free-only catalogue, profile, key-gated probe
 python tests/test_crownllm.py      # /zim-crownllm — :free-only catalogue, profile, paid ids excluded
+python tests/test_kenari.py        # /zim-kenari — pricing.free-only catalogue, profile, RPM errors
 python tests/test_image_pane.py    # show_image — half-block renderer, pane controls, tool
 python tests/test_connect.py       # /connect — bridge generation, MCP handshake, Kdenlive render
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring

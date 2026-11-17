@@ -341,6 +341,7 @@ _CREDENTIAL_PROFILES = (
     ("respan", "Respan", "ANTHROPIC_AUTH_TOKEN"),
     ("numes", "Numes", "ANTHROPIC_AUTH_TOKEN"),
     ("crownllm", "CrowLLM", "ANTHROPIC_AUTH_TOKEN"),
+    ("kenari", "Kenari", "ANTHROPIC_AUTH_TOKEN"),
     ("aihubmix", "AIHubMix", "ANTHROPIC_AUTH_TOKEN"),
     ("beatapi", "BeatAPI", "ANTHROPIC_AUTH_TOKEN"),
     ("moonmath", "Zro", "ANTHROPIC_AUTH_TOKEN"),
