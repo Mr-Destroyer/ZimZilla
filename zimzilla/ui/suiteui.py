@@ -229,12 +229,14 @@ class SuiteScreen(ModalScreen):
     def _select_flow(self, flow) -> None:
         self._selected = flow
         log = self.query_one("#flow-detail", RichLog)
+        # RichLog's default is to follow new content to the bottom. Turn that
+        # off for a selected flow, then pin the view to the request.
+        log.auto_scroll = False
         log.clear()
         log.write(flow.request_text())
         log.write("\n" + "─" * 40 + "\n")
         log.write(flow.response_text())
-        # RichLog scrolls to the bottom after a write; the operator wants the
-        # request first, not the tail of the response.
+        log.scroll_home(animate=False, immediate=True)
         self.call_after_refresh(log.scroll_home, animate=False, immediate=True)
         try:
             self.query_one("#repeater-request", TextArea).load_text(
@@ -254,6 +256,15 @@ class SuiteScreen(ModalScreen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         flow = self._flows.get(str(event.row_key.value))
         if flow:
+            self._select_flow(flow)
+
+    def on_data_table_row_highlighted(
+            self, event: DataTable.RowHighlighted) -> None:
+        # A single mouse click moves the cursor rather than emitting
+        # CellSelected in Textual 8. RowHighlighted is the event that actually
+        # fires on the click, so selection hangs off it.
+        flow = self._flows.get(str(event.row_key.value))
+        if flow and flow is not self._selected:
             self._select_flow(flow)
 
     def _select_cell_event(self, event) -> None:

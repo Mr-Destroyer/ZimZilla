@@ -151,6 +151,25 @@ async def test_screen(tmp: Path) -> None:
                   len(app.screen.query_one("#flow-table").columns) == 6)
             check("screen: the mini harness is on the right",
                   app.screen.query_one("#suite-side") is not None)
+            # A single click must select the row, and the detail must open at
+            # the request rather than the bottom of a long response.
+            f1 = sm.Flow(id="click-1", method="GET",
+                         url="https://example.com/a", status=200,
+                         mime="text/html", resp_body="A" * 5000)
+            f2 = sm.Flow(id="click-2", method="GET",
+                         url="https://example.com/b", status=404,
+                         mime="text/html", resp_body="B" * 5000)
+            app.screen._add_flow(f1)
+            app.screen._add_flow(f2)
+            await pilot.pause()
+            await pilot.click("#flow-table", offset=(5, 2))
+            await pilot.pause()
+            check("screen: one click selects a row",
+                  app.screen._selected is f2, str(app.screen._selected.id
+                                                  if app.screen._selected else None))
+            check("screen: the detail opens at the top",
+                  app.screen.query_one("#flow-detail").scroll_y == 0,
+                  str(app.screen.query_one("#flow-detail").scroll_y))
             await pilot.press("escape")
             await asyncio.sleep(0.3)
             check("screen: Escape closes it", not isinstance(app.screen, SuiteScreen))
