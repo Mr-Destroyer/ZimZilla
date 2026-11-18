@@ -399,7 +399,7 @@ class Suite:
     # ---- requests ---------------------------------------------------------
     def request(self, method: str, url: str, headers: dict | None = None,
                 body: str = "", *, source: str = "repeater",
-                timeout: float = 30.0) -> Flow:
+                timeout: float = 30.0, record: bool = True) -> Flow:
         method = (method or "GET").upper()
         hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
         # A bare urllib request is an instant 403 on many WAFs. Behave like the
@@ -432,13 +432,50 @@ class Suite:
             resp_body=payload.decode("utf-8", "replace"),
             ts=time.time(), source=source,
         )
-        self.flows.append(flow)
+        if record:
+            self.flows.append(flow)
+            if self.on_flow:
+                try:
+                    self.on_flow(flow)
+                except Exception:  # noqa: BLE001
+                    pass
+        return flow
+
+    def probe_flow(self, flow: Flow) -> Flow:
+        """Fetch one seeded endpoint and update its existing history row."""
+        try:
+            live = self.request(flow.method or "GET", flow.url,
+                                source="probe", record=False)
+        except SuiteError as e:
+            flow.status = 0
+            flow.mime = "error"
+            flow.resp_body = str(e)
+            flow.resp_headers = {}
+        else:
+            flow.status = live.status
+            flow.mime = live.mime
+            flow.req_headers = live.req_headers
+            flow.resp_headers = live.resp_headers
+            flow.req_body = live.req_body
+            flow.resp_body = live.resp_body
+            flow.ts = live.ts
+        flow.source = "probe"
         if self.on_flow:
             try:
                 self.on_flow(flow)
             except Exception:  # noqa: BLE001
                 pass
         return flow
+
+    def probe_seeds(self, *, limit: int = 250) -> list[Flow]:
+        """Turn the hunt placeholders into live responses, in place."""
+        pending = [f for f in self.flows
+                   if f.source == "hunt" and f.status is None]
+        for flow in pending[:limit]:
+            if self._stop.is_set():
+                break
+            self.probe_flow(flow)
+        return pending[:limit]
 
     def replay(self, method: str, url: str, headers: dict | None = None,
                body: str = "") -> Flow:

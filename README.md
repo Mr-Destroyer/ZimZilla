@@ -3155,8 +3155,8 @@ authorised to test. It starts a local **mitmproxy** child and gives you:
 
 - **HISTORY** — host, method, path, status, MIME and size, with the full
   request and response in the detail pane. When a saved `/bug-hunt` exists, its
-  URLs/endpoints are seeded into HISTORY immediately, before any proxy traffic;
-  they show with status `—` until crawled or replayed.
+  URLs/endpoints are seeded into HISTORY immediately, then probed once on a
+  worker thread so their real 200/403/error statuses replace the placeholders.
 - **REPEATER** — edit the raw request and send it again; the response lands in
   the same history.
 - **INTRUDER** — a URL with `FUZZ`, a payload list, and a result table.

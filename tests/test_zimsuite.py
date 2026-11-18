@@ -90,6 +90,11 @@ def test_backend(tmp: Path) -> None:
               "https://example.com/login" in {f.url for f in seeded})
         check("suite: a flow has request text", "GET /" in got.request_text())
         check("suite: a flow has response text", "HTTP 200" in got.response_text())
+        probe = sm.Flow(id="probe-test", method="GET", url=url + "/",
+                        source="hunt")
+        suite.probe_flow(probe)
+        check("suite: probing a seeded flow updates it live",
+              probe.status == 200 and probe.source == "probe", str(probe.status))
         suite.set_intercept(True)
         check("suite: intercept can be armed", suite.intercept_file.exists())
         suite.set_intercept(False)

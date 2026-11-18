@@ -166,6 +166,10 @@ class SuiteScreen(ModalScreen):
         # HISTORY immediately so the workbench is useful before a browser is
         # pointed at it.
         self.suite.seed_hunt_flows()
+        # Fetch each seeded endpoint once, on a worker thread, so the history
+        # fills with real 200/403/error statuses instead of staying placeholders.
+        if any(f.source == "hunt" and f.status is None for f in self.suite.flows):
+            self._probe_seeded()
         self.query_one("#suite-input", Input).focus()
 
     def _header_text(self, state: str) -> Text:
@@ -211,6 +215,10 @@ class SuiteScreen(ModalScreen):
             return
         self._flows[flow.id] = flow
         table = self.query_one("#flow-table", DataTable)
+        try:
+            table.remove_row(flow.id)
+        except Exception:  # noqa: BLE001 - a new flow, not an update
+            pass
         table.add_row(
             flow.host or "—", flow.method, flow.path,
             str(flow.status or "—"), flow.mime.split(";")[0][:24],
@@ -225,6 +233,9 @@ class SuiteScreen(ModalScreen):
         log.write(flow.request_text())
         log.write("\n" + "─" * 40 + "\n")
         log.write(flow.response_text())
+        # RichLog scrolls to the bottom after a write; the operator wants the
+        # request first, not the tail of the response.
+        self.call_after_refresh(log.scroll_home, animate=False, immediate=True)
         try:
             self.query_one("#repeater-request", TextArea).load_text(
                 flow.request_text())
@@ -244,6 +255,21 @@ class SuiteScreen(ModalScreen):
         flow = self._flows.get(str(event.row_key.value))
         if flow:
             self._select_flow(flow)
+
+    def _select_cell_event(self, event) -> None:
+        try:
+            row_key = event.cell_key.row_key.value
+        except Exception:  # noqa: BLE001
+            return
+        flow = self._flows.get(str(row_key))
+        if flow and flow is not self._selected:
+            self._select_flow(flow)
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        self._select_cell_event(event)
+
+    def on_data_table_cell_highlighted(self, event: DataTable.CellHighlighted) -> None:
+        self._select_cell_event(event)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
@@ -386,6 +412,10 @@ class SuiteScreen(ModalScreen):
                 log.write(f"  {len(found)} URL(s)\n")
             self.app.call_from_thread(paint)
         run()
+
+    @work(thread=True, exclusive=True)
+    def _probe_seeded(self) -> None:
+        self.suite.probe_seeds()
 
     # ---- findings ---------------------------------------------------------
     def _load_findings(self) -> None:
