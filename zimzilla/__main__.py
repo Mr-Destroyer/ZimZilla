@@ -52,8 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to out-of-scope.yaml — hosts that are never touched")
     parser.add_argument("--scope", default=None,
                         help="DEPRECATED — replaced by --allow / --deny; ignored with a warning")
-    parser.add_argument("--unsafe", action="store_true",
-                        help="disable the filesystem sandbox (paths may escape the workdir)")
+    parser.add_argument("--sandbox", action="store_true",
+                        help="re-enable the filesystem jail (default: unrestricted — "
+                             "file tools may use any path)")
+    # Kept as a no-op for old launch scripts: --unsafe used to opt out, and the
+    # default is now the same behaviour.
+    parser.add_argument("--unsafe", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ask-mcp", action="store_true",
                         help="ask before every MCP tool call (default: auto-allow; "
                              "MCP is the operator's own connected code)")
@@ -250,7 +254,8 @@ def main(argv: list[str] | None = None) -> int:
         allow_path=allow_path,
         deny_path=deny_path,
         legacy_scope_path=legacy_scope,
-        unsafe=args.unsafe or None,
+        # Unrestricted by default, by request. `--sandbox` is the opt-in.
+        unsafe=not args.sandbox,
         theme=theme,
         max_tokens=args.max_tokens,
         # `from_env` applies only non-None overrides, so False is passed

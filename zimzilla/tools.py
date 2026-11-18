@@ -1348,7 +1348,7 @@ def _tool_glob(args: dict, cfg) -> ToolResult:
     base = resolve_in_jail(cfg.workdir, base_arg, cfg.unsafe)
     if not base.exists():
         return ToolResult(f"path does not exist: {base_arg}", is_error=True)
-    if not safe_glob_pattern(pattern):
+    if not cfg.unsafe and not safe_glob_pattern(pattern):
         return ToolResult(
             f"sandbox: glob pattern escapes the working directory: {pattern}", is_error=True
         )
@@ -1379,7 +1379,7 @@ def _tool_grep(args: dict, cfg) -> ToolResult:
         return ToolResult("empty pattern", is_error=True)
     base = resolve_in_jail(cfg.workdir, args.get("path") or ".", cfg.unsafe, must_exist=True)
     file_glob = args.get("glob") or "**/*"
-    if not safe_glob_pattern(file_glob):
+    if not cfg.unsafe and not safe_glob_pattern(file_glob):
         return ToolResult(
             f"sandbox: glob pattern escapes the working directory: {file_glob}", is_error=True
         )

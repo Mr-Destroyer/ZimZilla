@@ -1518,7 +1518,11 @@ class ZimZillaApp(App):
                 "out-of-scope.yaml; nothing is armed",
                 False,
             ))
-        checks.append(("SANDBOX", "DISABLED (--unsafe)" if cfg.unsafe else "enabled", not cfg.unsafe))
+        checks.append((
+            "SANDBOX",
+            "UNRESTRICTED (default)" if cfg.unsafe else "enabled (--sandbox)",
+            True,
+        ))
         checks.append((
             "TOOLS",
             f"{len(tools_mod.TOOL_SCHEMAS)} registered "

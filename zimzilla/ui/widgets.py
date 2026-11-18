@@ -232,7 +232,7 @@ class HeaderBar(Horizontal):
         ]
         # The sandbox being OFF is not cosmetic — it never gets dropped.
         if self.unsafe:
-            tail.insert(0, ("⚠ SANDBOX OFF", f"bold white on {p.red}"))
+            tail.insert(0, ("⛨ unrestricted", p.amber))
             tail = [f for f in tail if f[0] != "⛨ sandbox on"]
 
         # Scope sits between the fixed head and the droppable tail.

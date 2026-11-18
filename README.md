@@ -348,7 +348,9 @@ will restart the checkout under you on the next launch.
 --no-auto-compact    never compact history automatically (/compact still works)
 --compact-at N       compact once the prompt reaches N tokens (default 200000;
                      0 = percentage of the window only)
---unsafe             disable the filesystem jail
+--sandbox            re-enable the filesystem jail
+                     (default: unrestricted — file tools may use any path)
+--unsafe             legacy no-op; the default is already unrestricted
 --panes              run under tmux; ctrl+b h/v open more ZimZilla panes
 --resume SESSION     restore a saved session at launch (used by /panes)
 --list-models
@@ -1966,6 +1968,12 @@ Worth being straight about, because the difference matters:
 
 Use it as a seatbelt, not as a cage.
 
+**Filesystem:** the file tools are **unrestricted by default** — reads, writes,
+globs and edits may use any path the process can reach, not just the working
+directory. `--sandbox` restores the old jail when you want one; the header
+shows `⛨ unrestricted` otherwise. This default was changed by request, so a
+launch script that used to rely on the jail needs `--sandbox` added.
+
 ### Upgrading from `scope.yaml`
 
 `scope.yaml` is no longer read. It was one file doing three jobs at once, and
@@ -3521,7 +3529,7 @@ zimzilla/                     the package
   effort.py                   /effort levels, the per-protocol translation, and
                               the remembered choice ($ZIMZILLA_HOME/effort)
   tools.py                    the tool layer — schemas, previews, dispatch
-  sandbox.py                  the filesystem jail
+  sandbox.py                  opt-in filesystem jail (--sandbox)
   images.py                   image attachments — read, fit, hand to either protocol
   browser.py                  /see, browse, watch_video — Chromium, screenshots, frames
   ui/imageview.py             the image pane's half-block/pixel renderer
@@ -3606,6 +3614,7 @@ python tests/test_voice.py         # launch greeting, idle recap, redaction, wir
 python tests/test_memory_usage.py  # operator memory + persistent /usage ledger
 python tests/test_focus_mode.py    # header ⛶ toggle — hide/restore rails, reflow
 python tests/test_zimsuite.py      # proxy history, repeater tool, workbench screen
+python tests/test_sandbox_default.py  # --sandbox is opt-in; default is unrestricted
 python tests/test_discord_rpc.py   # Discord presence payload, profile, logo, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
 ```
