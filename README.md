@@ -3686,7 +3686,6 @@ out-of-scope.yaml.example     hosts that are never touched
 
 docs/                         README graphics + screenshots
   gen_graphics.py             regenerate the animated header/hero SVGs
-  gen_screenshots.py          re-shoot the screenshots from a live app
 tests/                        the test suite
 ```
 
