@@ -26,6 +26,7 @@ from textual.widgets import (Button, DataTable, Input, RichLog, Static,
 
 from .. import suite as suite_mod
 from ..agent import Agent
+from .rain import RainRichLog
 
 
 class SuiteScreen(ModalScreen):
@@ -33,7 +34,7 @@ class SuiteScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "close_suite", "close", priority=True, show=False),
-        Binding("ctrl+c", "stop_agent", "stop agent", priority=True,
+        Binding("ctrl+c", "copy_or_stop", "copy / stop", priority=True,
                 show=False),
         Binding("ctrl+s", "close_suite", "close", priority=True, show=False),
     ]
@@ -104,7 +105,7 @@ class SuiteScreen(ModalScreen):
                     with TabbedContent(initial="tab-history", id="suite-tabs"):
                         with TabPane("HISTORY", id="tab-history"):
                             yield DataTable(id="flow-table")
-                            yield RichLog(id="flow-detail", markup=False, wrap=True)
+                            yield RainRichLog(self.palette, rain_on=False, id="flow-detail", markup=False, wrap=True)
                         with TabPane("REPEATER", id="tab-repeater"):
                             yield TextArea(
                                 "GET / HTTP/1.1\nHost: example.com\n\n",
@@ -112,8 +113,8 @@ class SuiteScreen(ModalScreen):
                             with Horizontal():
                                 yield Button("SEND", id="repeater-send")
                                 yield Button("LOAD FLOW", id="repeater-load")
-                            yield RichLog(id="repeater-response", markup=False,
-                                          wrap=True)
+                            yield RainRichLog(self.palette, rain_on=False, id="repeater-response",
+                                         markup=False, wrap=True)
                         with TabPane("INTRUDER", id="tab-intruder"):
                             yield Input(placeholder="URL with FUZZ marker",
                                         id="intruder-url")
@@ -123,30 +124,30 @@ class SuiteScreen(ModalScreen):
                                            id="intruder-request")
                             with Horizontal():
                                 yield Button("RUN", id="intruder-run")
-                            yield RichLog(id="intruder-response", markup=False,
-                                          wrap=True)
+                            yield RainRichLog(self.palette, rain_on=False, id="intruder-response",
+                                         markup=False, wrap=True)
                         with TabPane("INTERCEPT", id="tab-intercept"):
                             with Horizontal():
                                 yield Button("INTERCEPT OFF",
                                              id="intercept-toggle")
                                 yield Button("FORWARD", id="intercept-forward")
                                 yield Button("DROP", id="intercept-drop")
-                            yield RichLog(id="intercept-log", markup=False,
-                                          wrap=True)
+                            yield RainRichLog(self.palette, rain_on=False, id="intercept-log",
+                                         markup=False, wrap=True)
                         with TabPane("CRAWLER", id="tab-crawler"):
                             yield Input(placeholder="start URL",
                                         id="crawler-url")
                             with Horizontal():
                                 yield Button("CRAWL", id="crawler-run")
-                            yield RichLog(id="crawler-log", markup=False,
-                                          wrap=True)
+                            yield RainRichLog(self.palette, rain_on=False, id="crawler-log",
+                                         markup=False, wrap=True)
                         with TabPane("FINDINGS", id="tab-findings"):
-                            yield RichLog(id="findings-log", markup=False,
-                                          wrap=True)
+                            yield RainRichLog(self.palette, rain_on=False, id="findings-log",
+                                         markup=False, wrap=True)
                 with Vertical(id="suite-side"):
                     yield Static("  ⟩ MINI HARNESS", id="suite-side-title")
                     yield Static("  ○ idle", id="suite-agent-status")
-                    yield RichLog(id="suite-chat", markup=False, wrap=True)
+                    yield RainRichLog(self.palette, rain_on=False, id="suite-chat", markup=False, wrap=True)
                     with Horizontal(id="suite-input-row"):
                         yield Input(placeholder="guide the agent…",
                                     id="suite-input")
@@ -326,6 +327,21 @@ class SuiteScreen(ModalScreen):
 
     def action_stop_agent(self) -> None:
         self._stop_agent()
+
+    def action_copy_or_stop(self) -> None:
+        """Ctrl+C copies a selection; with none selected it stops the agent."""
+        text = ""
+        try:
+            text = self.get_selected_text() or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        if not text:
+            focused = self.focused
+            text = getattr(focused, "selected_text", "") or ""
+        if text:
+            self._copy_selection(text)
+        else:
+            self._stop_agent()
 
     def _toggle_intercept(self) -> None:
         on = not self.suite.intercept_file.exists()

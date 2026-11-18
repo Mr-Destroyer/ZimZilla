@@ -3289,7 +3289,8 @@ While the mini agent is working, a spinner beside **MINI HARNESS** shows the liv
 tool (`running suite_repeater…`), so a long request never looks frozen. STOP
 cancels the turn. `Ctrl+S` (or `Esc`) closes the suite and stops the proxy.
 Selections made with the mouse — in the transcript, history detail, request or
-agent output — are copied to the clipboard automatically on release.
+agent output — are copied to the clipboard automatically on release. `Ctrl+C`
+copies the current selection; with nothing selected it stops the agent.
 
 ```text
 /zimsuite target.com
