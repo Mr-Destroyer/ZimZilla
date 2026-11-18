@@ -52,6 +52,7 @@ class SuiteScreen(ModalScreen):
         width: 42; height: 100%; border-left: heavy $secondary;
     }
     #suite-side-title { height: 1; padding: 0 1; }
+    #suite-agent-status { height: 1; padding: 0 1; color: $accent; }
     #suite-chat { height: 1fr; background: transparent; }
     #suite-input-row { height: 3; }
     #suite-input { width: 1fr; }
@@ -89,6 +90,10 @@ class SuiteScreen(ModalScreen):
         self._proxy_ready = False
         self._started_at = 0.0
         self._agent_text = ""
+        self._agent_busy = False
+        self._agent_tool = ""
+        self._spinner_frame = 0
+        self._spinner_timer = None
 
     # ---- compose ----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -140,6 +145,7 @@ class SuiteScreen(ModalScreen):
                                           wrap=True)
                 with Vertical(id="suite-side"):
                     yield Static("  ⟩ MINI HARNESS", id="suite-side-title")
+                    yield Static("  ○ idle", id="suite-agent-status")
                     yield RichLog(id="suite-chat", markup=False, wrap=True)
                     with Horizontal(id="suite-input-row"):
                         yield Input(placeholder="guide the agent…",
@@ -429,6 +435,46 @@ class SuiteScreen(ModalScreen):
     def _probe_seeded(self) -> None:
         self.suite.probe_seeds()
 
+    # ---- busy animation ---------------------------------------------------
+    _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _paint_agent_status(self, text: str) -> None:
+        try:
+            self.query_one("#suite-agent-status", Static).update(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _tick_agent_spinner(self) -> None:
+        if not self._agent_busy:
+            return
+        frame = self._SPIN[self._spinner_frame % len(self._SPIN)]
+        self._spinner_frame += 1
+        label = "working"
+        if self._agent_tool:
+            label = "running " + self._agent_tool[:48]
+        self._paint_agent_status(f"  {frame} {label}…")
+
+    def _start_agent_spinner(self) -> None:
+        self._agent_busy = True
+        self._agent_tool = ""
+        self._spinner_frame = 0
+        self._tick_agent_spinner()
+        if self._spinner_timer is None:
+            self._spinner_timer = self.set_interval(
+                0.08, self._tick_agent_spinner)
+
+    def _stop_agent_spinner(self, label: str = "○ idle") -> None:
+        self._agent_busy = False
+        self._agent_tool = ""
+        timer = self._spinner_timer
+        self._spinner_timer = None
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._paint_agent_status("  " + label)
+
     # ---- selection / clipboard -------------------------------------------
     def _copy_selection(self, text: str) -> None:
         """Copy a completed selection; never let the clipboard break the UI."""
@@ -501,6 +547,7 @@ class SuiteScreen(ModalScreen):
         if not text:
             return
         self._chat_line(f"\n  you: {text}\n")
+        self._start_agent_spinner()
         # A request about URLs/endpoints/findings should fill HISTORY, not just
         # produce a chat answer. Seed first; the agent can then inspect it.
         if any(word in text.lower() for word in
@@ -538,24 +585,31 @@ class SuiteScreen(ModalScreen):
                     if "\n" in self._agent_text or len(self._agent_text) > 320:
                         self._flush_agent_text()
                 elif kind == "tool_call":
+                    self._agent_tool = str(ev.get("name") or "tool")
+                    self._tick_agent_spinner()
                     self._chat_line(
                         f"\n  ▸ {ev.get('name')} {json.dumps(ev.get('args') or {})[:220]}\n")
                 elif kind == "tool_result":
+                    self._agent_tool = ""
                     out = str(ev.get("output") or "")
                     self._chat_line(f"  {'✗' if ev.get('is_error') else '✓'} "
                                     f"{out[:500]}\n")
                 elif kind == "error":
                     self._chat_line(f"  error: {ev.get('message')}\n")
             self._flush_agent_text()
+            self._stop_agent_spinner()
         except asyncio.CancelledError:
             self._flush_agent_text()
+            self._stop_agent_spinner("○ stopped")
             self._chat_line("  agent stopped\n")
             raise
         except Exception as e:  # noqa: BLE001
             self._flush_agent_text()
+            self._stop_agent_spinner("○ error")
             self._chat_line(f"  agent failed: {type(e).__name__}: {e}\n")
 
     def _stop_agent(self) -> None:
+        self._stop_agent_spinner()
         task = self._agent_task
         if task is not None and not task.done():
             task.cancel()
@@ -567,6 +621,7 @@ class SuiteScreen(ModalScreen):
 
     def on_unmount(self) -> None:
         self._closed = True
+        self._stop_agent_spinner()
         try:
             self.suite.stop()
         except Exception:  # noqa: BLE001

@@ -151,6 +151,17 @@ async def test_screen(tmp: Path) -> None:
                   len(app.screen.query_one("#flow-table").columns) == 6)
             check("screen: the mini harness is on the right",
                   app.screen.query_one("#suite-side") is not None)
+            status = app.screen.query_one("#suite-agent-status")
+            check("screen: the agent status starts idle",
+                  "idle" in str(status.render()), str(status.render()))
+            app.screen._start_agent_spinner()
+            await pilot.pause()
+            await asyncio.sleep(0.2)
+            check("screen: the agent status animates while working",
+                  "working" in str(status.render()), str(status.render()))
+            app.screen._stop_agent_spinner()
+            check("screen: the agent status returns idle",
+                  "idle" in str(status.render()), str(status.render()))
             # A single click must select the row, and the detail must open at
             # the request rather than the bottom of a long response.
             f1 = sm.Flow(id="click-1", method="GET",
