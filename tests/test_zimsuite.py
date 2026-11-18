@@ -170,6 +170,11 @@ async def test_screen(tmp: Path) -> None:
             check("screen: the detail opens at the top",
                   app.screen.query_one("#flow-detail").scroll_y == 0,
                   str(app.screen.query_one("#flow-detail").scroll_y))
+            copied = []
+            app.copy_to_clipboard = copied.append
+            app.screen._copy_selection("selected text\n")
+            check("screen: a selection is copied automatically",
+                  copied == ["selected text"], str(copied))
             await pilot.press("escape")
             await asyncio.sleep(0.3)
             check("screen: Escape closes it", not isinstance(app.screen, SuiteScreen))

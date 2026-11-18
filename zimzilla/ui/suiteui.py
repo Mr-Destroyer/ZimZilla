@@ -19,6 +19,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import MouseUp, TextSelected
 from textual.screen import ModalScreen
 from textual.widgets import (Button, DataTable, Input, RichLog, Static,
                              TabbedContent, TabPane, TextArea)
@@ -427,6 +428,37 @@ class SuiteScreen(ModalScreen):
     @work(thread=True, exclusive=True)
     def _probe_seeded(self) -> None:
         self.suite.probe_seeds()
+
+    # ---- selection / clipboard -------------------------------------------
+    def _copy_selection(self, text: str) -> None:
+        """Copy a completed selection; never let the clipboard break the UI."""
+        text = (text or "").rstrip("\n")
+        if not text.strip():
+            return
+        try:
+            self.app.copy_to_clipboard(text)
+        except Exception:  # noqa: BLE001
+            return
+        self._chat_line(
+            f"  copied {len(text)} char{'s' if len(text) != 1 else ''}\n")
+
+    def on_text_selected(self, event: TextSelected) -> None:
+        try:
+            text = self.get_selected_text()
+        except Exception:  # noqa: BLE001
+            text = None
+        if text:
+            self._copy_selection(text)
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        # Inputs and TextAreas keep their own selection and do not emit
+        # TextSelected; copy them on release like the main prompt does.
+        focused = self.focused
+        if not isinstance(focused, (Input, TextArea)):
+            return
+        selected = getattr(focused, "selected_text", "") or ""
+        if selected:
+            self._copy_selection(selected)
 
     # ---- findings ---------------------------------------------------------
     def _load_findings(self) -> None:

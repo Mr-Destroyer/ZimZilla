@@ -3171,6 +3171,8 @@ The right-hand **MINI HARNESS** is a separate agent with `suite_history`,
 `suite_crawl` and `suite_intercept`. Ask it to inspect an endpoint, replay a request with a header
 change, or fuzz a parameter; its calls and responses stream in that column, and
 STOP cancels the turn. `Ctrl+S` (or `Esc`) closes the suite and stops the proxy.
+Selections made with the mouse — in the transcript, history detail, request or
+agent output — are copied to the clipboard automatically on release.
 
 ```text
 /zimsuite target.com
