@@ -3145,20 +3145,24 @@ directory. It makes no model call: the document is exactly what was recorded.
 `/zimsuite <target>` opens a full-screen workbench for a target you are
 authorised to test. It starts a local **mitmproxy** child and gives you:
 
-- **HISTORY** — every request the proxy saw: method, path, status, MIME, size,
-  with the full request and response in the detail pane.
+- **HISTORY** — host, method, path, status, MIME and size, with the full
+  request and response in the detail pane. When a saved `/bug-hunt` exists, its
+  URLs/endpoints are seeded into HISTORY immediately, before any proxy traffic;
+  they show with status `—` until crawled or replayed.
 - **REPEATER** — edit the raw request and send it again; the response lands in
   the same history.
 - **INTRUDER** — a URL with `FUZZ`, a payload list, and a result table.
 - **INTERCEPT** — arm the queue, then FORWARD or DROP each parked request.
-- **CRAWLER** — follows same-host links and feeds them into history.
+- **CRAWLER** — follows same-host links, seeded from the saved hunt's URLs,
+  and feeds every response (including a real 403) into history.
 - **FINDINGS** — loads the existing `/bug-hunt` campaign files for the target.
+  `suite_urls` and `suite_seed` expose the same extraction to the agent.
 
 The right-hand **MINI HARNESS** is a separate agent with `suite_history`,
-`suite_flow`, `suite_repeater`, `suite_intruder`, `suite_crawl` and
-`suite_intercept`. Ask it to inspect an endpoint, replay a request with a header
+`suite_flow`, `suite_urls`, `suite_seed`, `suite_repeater`, `suite_intruder`,
+`suite_crawl` and `suite_intercept`. Ask it to inspect an endpoint, replay a request with a header
 change, or fuzz a parameter; its calls and responses stream in that column, and
-STOP cancels the turn. `Esc` closes the suite and stops the proxy.
+STOP cancels the turn. `Ctrl+S` (or `Esc`) closes the suite and stops the proxy.
 
 ```text
 /zimsuite target.com

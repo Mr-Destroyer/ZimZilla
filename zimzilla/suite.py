@@ -15,6 +15,7 @@ from __future__ import annotations
 import html.parser
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -401,6 +402,15 @@ class Suite:
                 timeout: float = 30.0) -> Flow:
         method = (method or "GET").upper()
         hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
+        # A bare urllib request is an instant 403 on many WAFs. Behave like the
+        # browser whose traffic Burp would capture, unless the operator supplied
+        # their own identity.
+        if not any(k.lower() == "user-agent" for k in hdrs):
+            hdrs["User-Agent"] = (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        if not any(k.lower() == "accept" for k in hdrs):
+            hdrs["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         data = body.encode("utf-8", "replace") if body else None
         req = urllib.request.Request(url, data=data, headers=hdrs,
                                      method=method)
@@ -449,11 +459,18 @@ class Suite:
         return results
 
     # ---- crawl ------------------------------------------------------------
-    def crawl(self, start_url: str, *, limit: int = CRAWL_LIMIT) -> list[Flow]:
+    def crawl(self, start_url: str, *, limit: int = CRAWL_LIMIT,
+              seeds: list[str] | None = None) -> list[Flow]:
+        if not start_url.startswith(("http://", "https://")):
+            start_url = "https://" + start_url
         root = urllib.parse.urlsplit(start_url)
         host = root.hostname or ""
         seen: set[str] = set()
         queue = [start_url]
+        for seed in seeds or []:
+            if not seed.startswith(("http://", "https://")):
+                seed = "https://" + seed
+            queue.append(seed)
         found: list[Flow] = []
         while queue and len(seen) < limit:
             url = queue.pop(0)
@@ -481,13 +498,137 @@ class Suite:
         return found
 
     # ---- findings ---------------------------------------------------------
+    _ABS_RE = re.compile(r"https?://[^\s)\]}\"'<>]+", re.I)
+    _HOSTPATH_RE = re.compile(
+        r"\b(?:www\.)?[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}(?::\d+)?"
+        r"(?:/[^\s)\]}\"'<>]*)?", re.I)
+    _PATH_RE = re.compile(
+        r"(?<![\w:/])/[A-Za-z0-9._~%!$&'()*+,;=:@/-]+"
+        r"(?:\?[^\s)\]}\"'<>]*)?", re.I)
+
+    def _normalise_url(self, value: str) -> str | None:
+        value = (value or "").strip().strip(".,;:)]}\"'`")
+        if not value:
+            return None
+        if value.startswith("//"):
+            value = "https:" + value
+        if not value.startswith(("http://", "https://")):
+            value = "https://" + value
+        try:
+            parts = urllib.parse.urlsplit(value)
+        except ValueError:
+            return None
+        host = (parts.hostname or "").lower()
+        if not host or "." not in host:
+            return None
+        if host in ("localhost",) or host.startswith("127.") or host.endswith(".md"):
+            return None
+        path = parts.path or "/"
+        if path.startswith(("/home/", "/tmp/", "/usr/", "/etc/")):
+            return None
+        if path.lower().split("?")[0].endswith((".md", ".markdown")):
+            return None
+        if path in ("/script", "/style", "/link"):
+            return None
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, path, parts.query, ""))
+
+    def hunt_urls(self, limit: int = 250) -> list[str]:
+        """Absolute URLs and endpoint paths extracted from the campaign."""
+        base = self.target if "://" in self.target else "https://" + self.target
+        base_parts = urllib.parse.urlsplit(base)
+        host = base_parts.hostname or self.scope_target
+        bases = [f"https://{host}", f"http://{host}"]
+        found: list[str] = []
+        seen: set[str] = set()
+        base_host = (host or "").lower()
+        root_host = base_host[4:] if base_host.startswith("www.") else base_host
+
+        def in_scope(value: str) -> bool:
+            try:
+                candidate = (urllib.parse.urlsplit(value).hostname or "").lower()
+            except ValueError:
+                return False
+            if not candidate:
+                return False
+            return (candidate == root_host or candidate.endswith("." + root_host)
+                    or candidate == base_host)
+
+        def add(value: str, *, path_only: bool = False) -> None:
+            if path_only:
+                if not value.startswith("/"):
+                    value = "/" + value
+                for b in bases:
+                    url = self._normalise_url(b + value)
+                    if url and url not in seen and in_scope(url):
+                        seen.add(url)
+                        found.append(url)
+                        return
+                return
+            url = self._normalise_url(value)
+            if url and url not in seen and in_scope(url):
+                seen.add(url)
+                found.append(url)
+
+        for path in self.hunt_files():
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            for match in self._ABS_RE.finditer(text):
+                add(match.group(0))
+            for match in self._HOSTPATH_RE.finditer(text):
+                value = match.group(0)
+                if value.lower().startswith(("http", "www.")) or "/" in value:
+                    add(value)
+            for match in self._PATH_RE.finditer(text):
+                value = match.group(0)
+                # A markdown heading or local path is not an endpoint.
+                if value.startswith(("//", "/home", "/tmp", "/usr", "/etc")):
+                    continue
+                if value.count("/") < 1 or len(value) > 300:
+                    continue
+                add(value, path_only=True)
+            if len(found) >= limit:
+                break
+        return found[:limit]
+
+    def seed_hunt_flows(self, *, limit: int = 250) -> list[Flow]:
+        """Put the campaign's URLs into the history without sending anything."""
+        existing = {f.url for f in self.flows if f.source == "hunt"}
+        seeded: list[Flow] = []
+        for n, url in enumerate(self.hunt_urls(limit=limit), 1):
+            if url in existing:
+                continue
+            flow = Flow(
+                id=f"hunt-{n}", method="GET", url=url, status=None,
+                mime="endpoint", source="hunt", ts=time.time(),
+            )
+            self.flows.append(flow)
+            seeded.append(flow)
+            if self.on_flow:
+                try:
+                    self.on_flow(flow)
+                except Exception:  # noqa: BLE001
+                    pass
+        if seeded:
+            self.log(f"seeded {len(seeded)} endpoint(s) from the hunt")
+        return seeded
+
     def hunt_files(self) -> list[Path]:
         from . import hunt as hunt_mod
         try:
             slug = hunt_mod.scope_slug(self.scope_target)
         except ValueError:
             return []
-        campaign = Path(self.cfg.state_dir) / "hunts" / slug
+        base = Path(self.cfg.state_dir) / "hunts"
+        candidates = [slug]
+        if slug.startswith("www."):
+            candidates.append(slug[4:])
+        if slug.startswith("*."):
+            candidates.append(slug[2:])
+        campaign = next((base / c for c in candidates if (base / c).exists()),
+                        base / slug)
         if not campaign.exists():
             return []
         files = []

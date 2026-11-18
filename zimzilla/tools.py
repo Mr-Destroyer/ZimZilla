@@ -390,6 +390,19 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "suite_urls",
+        "description": "ZimSuite only: URLs/endpoints extracted from the saved "
+                       "bug-hunt campaign.",
+        "input_schema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "max URLs (default 250)"}}},
+    },
+    {
+        "name": "suite_seed",
+        "description": "ZimSuite only: put the saved hunt's URLs into the "
+                       "HISTORY tab without sending requests.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "suite_intercept",
         "description": "ZimSuite only: turn the proxy intercept queue on or off.",
         "input_schema": {
@@ -801,7 +814,8 @@ PEER_SCHEMAS: list[dict] = [
 ]
 
 SUITE_TOOLS = frozenset({"suite_history", "suite_flow", "suite_repeater",
-                         "suite_intruder", "suite_crawl", "suite_intercept"})
+                         "suite_intruder", "suite_crawl", "suite_urls",
+                         "suite_seed", "suite_intercept"})
 
 TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
 
@@ -1829,11 +1843,39 @@ def _tool_suite_crawl(args: dict, cfg) -> ToolResult:
         limit = max(1, min(int(args.get("limit") or 25), 60))
     except (TypeError, ValueError):
         limit = 25
-    found = suite.crawl(str(args.get("url") or ""), limit=limit)
+    found = suite.crawl(str(args.get("url") or ""), limit=limit,
+                        seeds=suite.hunt_urls())
     return ToolResult(
         f"crawled {len(found)} URL(s)\n" +
         "\n".join(f"{f.status}  {f.url}" for f in found),
         meta={"flows": [f.id for f in found]})
+
+
+def _tool_suite_urls(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    try:
+        limit = max(1, min(int(args.get("limit") or 250), 500))
+    except (TypeError, ValueError):
+        limit = 250
+    urls = suite.hunt_urls(limit=limit)
+    if not urls:
+        return ToolResult("no URLs found in the saved hunt")
+    return ToolResult("\n".join(urls), meta={"urls": urls})
+
+
+def _tool_suite_seed(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    seeded = suite.seed_hunt_flows()
+    if not seeded:
+        return ToolResult("no new URLs to seed")
+    return ToolResult(
+        f"seeded {len(seeded)} endpoint(s) into HISTORY\n" +
+        "\n".join(f"{f.id}  {f.url}" for f in seeded),
+        meta={"flows": [f.id for f in seeded]})
 
 
 def _tool_suite_intercept(args: dict, cfg) -> ToolResult:
@@ -2613,6 +2655,8 @@ _DISPATCH = {
     "suite_repeater": _tool_suite_repeater,
     "suite_intruder": _tool_suite_intruder,
     "suite_crawl": _tool_suite_crawl,
+    "suite_urls": _tool_suite_urls,
+    "suite_seed": _tool_suite_seed,
     "suite_intercept": _tool_suite_intercept,
     "show_image": _tool_show_image,
     "watch_video": _tool_watch_video,

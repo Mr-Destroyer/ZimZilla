@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import urllib.parse
 from pathlib import Path
 
@@ -33,6 +34,7 @@ class SuiteScreen(ModalScreen):
         Binding("escape", "close_suite", "close", priority=True, show=False),
         Binding("ctrl+c", "stop_agent", "stop agent", priority=True,
                 show=False),
+        Binding("ctrl+s", "close_suite", "close", priority=True, show=False),
     ]
 
     DEFAULT_CSS = """
@@ -85,6 +87,7 @@ class SuiteScreen(ModalScreen):
         self._closed = False
         self._proxy_ready = False
         self._started_at = 0.0
+        self._agent_text = ""
 
     # ---- compose ----------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -147,7 +150,7 @@ class SuiteScreen(ModalScreen):
     def on_mount(self) -> None:
         table = self.query_one("#flow-table", DataTable)
         table.cursor_type = "row"
-        table.add_columns("METHOD", "PATH", "STATUS", "TYPE", "SIZE")
+        table.add_columns("HOST", "METHOD", "PATH", "STATUS", "TYPE", "SIZE")
         self.query_one("#crawler-url", Input).value = self.target
         self.cfg._suite = self.suite
         self._agent = Agent(self.cfg, permission_handler=self._allow)
@@ -159,6 +162,10 @@ class SuiteScreen(ModalScreen):
         self.query_one("#suite-chat", RichLog).write(
             "  suite open — ask me to inspect, replay or crawl.\n")
         self._load_findings()
+        # A saved bug hunt has URLs but no live proxy traffic. Seed them into
+        # HISTORY immediately so the workbench is useful before a browser is
+        # pointed at it.
+        self.suite.seed_hunt_flows()
         self.query_one("#suite-input", Input).focus()
 
     def _header_text(self, state: str) -> Text:
@@ -179,29 +186,25 @@ class SuiteScreen(ModalScreen):
         return "yes"
 
     # ---- proxy wiring -----------------------------------------------------
-    def _thread_flow(self, flow) -> None:
+    def _on_ui(self, callback, *args) -> None:
         if self._closed:
             return
         try:
-            self.app.call_from_thread(self._add_flow, flow)
+            if threading.current_thread() is threading.main_thread():
+                callback(*args)
+            else:
+                self.app.call_from_thread(callback, *args)
         except Exception:  # noqa: BLE001
             pass
+
+    def _thread_flow(self, flow) -> None:
+        self._on_ui(self._add_flow, flow)
 
     def _thread_pending(self, pending) -> None:
-        if self._closed:
-            return
-        try:
-            self.app.call_from_thread(self._paint_pending, pending)
-        except Exception:  # noqa: BLE001
-            pass
+        self._on_ui(self._paint_pending, pending)
 
     def _thread_log(self, text: str) -> None:
-        if self._closed:
-            return
-        try:
-            self.app.call_from_thread(self._chat_line, "  " + text)
-        except Exception:  # noqa: BLE001
-            pass
+        self._on_ui(self._chat_line, "  " + text)
 
     def _add_flow(self, flow) -> None:
         if self._closed:
@@ -209,9 +212,9 @@ class SuiteScreen(ModalScreen):
         self._flows[flow.id] = flow
         table = self.query_one("#flow-table", DataTable)
         table.add_row(
-            flow.method, flow.path, str(flow.status or "—"),
-            flow.mime.split(";")[0][:24], str(flow.length),
-            key=flow.id)
+            flow.host or "—", flow.method, flow.path,
+            str(flow.status or "—"), flow.mime.split(";")[0][:24],
+            str(flow.length), key=flow.id)
         if not self._selected:
             self._select_flow(flow)
 
@@ -369,11 +372,13 @@ class SuiteScreen(ModalScreen):
 
     def _run_crawler(self) -> None:
         url = self.query_one("#crawler-url", Input).value.strip() or self.target
-        self.query_one("#crawler-log", RichLog).write(f"  crawling {url}…\n")
+        seeds = self.suite.hunt_urls()
+        self.query_one("#crawler-log", RichLog).write(
+            f"  crawling {url} with {len(seeds)} hunt seed(s)…\n")
 
         @work(thread=True)
         def run():
-            found = self.suite.crawl(url)
+            found = self.suite.crawl(url, seeds=seeds)
             def paint():
                 log = self.query_one("#crawler-log", RichLog)
                 for f in found:
@@ -399,11 +404,21 @@ class SuiteScreen(ModalScreen):
             log.write(text[:6000])
 
     # ---- mini agent -------------------------------------------------------
-    def _chat_line(self, text: str) -> None:
+    def _chat_write(self, text: str) -> None:
         try:
             self.query_one("#suite-chat", RichLog).write(text)
         except Exception:  # noqa: BLE001
             pass
+
+    def _flush_agent_text(self) -> None:
+        text = self._agent_text
+        self._agent_text = ""
+        if text:
+            self._chat_write(text)
+
+    def _chat_line(self, text: str) -> None:
+        self._flush_agent_text()
+        self._chat_write(text)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "suite-input":
@@ -413,24 +428,42 @@ class SuiteScreen(ModalScreen):
         if not text:
             return
         self._chat_line(f"\n  you: {text}\n")
+        # A request about URLs/endpoints/findings should fill HISTORY, not just
+        # produce a chat answer. Seed first; the agent can then inspect it.
+        if any(word in text.lower() for word in
+               ("url", "endpoint", "finding", "crawl")):
+            seeded = self.suite.seed_hunt_flows()
+            if seeded:
+                self._chat_line(
+                    f"  seeded {len(seeded)} hunt endpoint(s) into HISTORY\n")
         self._agent_task = asyncio.create_task(self._agent_turn(text))
 
     async def _agent_turn(self, text: str) -> None:
         if self._agent is None:
             return
         self._chat_line("  agent: working…\n")
+        selected = (f"{self._selected.method} {self._selected.url}"
+                    if self._selected else "none")
         prompt = (
-            f"ZimSuite target: {self.target}. You are the live suite operator. "
-            f"Use suite_history, suite_flow, suite_repeater, suite_intruder and "
-            f"suite_crawl to inspect and act. Do not invent a request that is "
-            f"not in the history; if you need one, use the selected flow. "
+            f"ZimSuite target: {self.target}. You are the live suite operator, "
+            f"not a chat assistant. The HISTORY tab already contains the "
+            f"campaign's endpoints. Use suite_history/suite_urls/suite_seed to "
+            f"inspect them, suite_repeater to send, and suite_crawl to follow "
+            f"links. When the operator asks for URLs, call suite_seed and/or "
+            f"suite_history so they appear in HISTORY; never answer with a URL "
+            f"list only in chat. Selected flow: {selected}. "
             f"Operator instruction: {text}"
         )
         try:
             async for ev in self._agent.run_turn(prompt):
                 kind = ev.get("type")
                 if kind == "text_delta":
-                    self._chat_line(ev.get("text", ""))
+                    self._agent_text += ev.get("text", "")
+                    # Write complete lines, not one-line-per-token: RichLog
+                    # inserts a newline per write, which is what shredded the
+                    # earlier replies into "fin\nding\nlimit".
+                    if "\n" in self._agent_text or len(self._agent_text) > 320:
+                        self._flush_agent_text()
                 elif kind == "tool_call":
                     self._chat_line(
                         f"\n  ▸ {ev.get('name')} {json.dumps(ev.get('args') or {})[:220]}\n")
@@ -440,10 +473,13 @@ class SuiteScreen(ModalScreen):
                                     f"{out[:500]}\n")
                 elif kind == "error":
                     self._chat_line(f"  error: {ev.get('message')}\n")
+            self._flush_agent_text()
         except asyncio.CancelledError:
+            self._flush_agent_text()
             self._chat_line("  agent stopped\n")
             raise
         except Exception as e:  # noqa: BLE001
+            self._flush_agent_text()
             self._chat_line(f"  agent failed: {type(e).__name__}: {e}\n")
 
     def _stop_agent(self) -> None:

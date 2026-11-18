@@ -75,6 +75,19 @@ def test_backend(tmp: Path) -> None:
         check("suite: history receives the flow", len(flows) >= 1)
         crawled = suite.crawl(url + "/")
         check("suite: crawler follows links", len(crawled) >= 2, str(len(crawled)))
+        # A tiny campaign file proves URLs are imported into history without
+        # any proxy traffic.
+        campaign = Path(cfg.state_dir) / "hunts" / "example.com"
+        campaign.mkdir(parents=True, exist_ok=True)
+        (campaign / "findings.md").write_text(
+            "Endpoint /login\nAlso https://example.com/next\n")
+        seed_suite = sm.Suite("https://example.com", cfg)
+        seeded = seed_suite.seed_hunt_flows()
+        check("suite: hunt URLs seed history", len(seeded) >= 1, str(len(seeded)))
+        check("suite: seeded URLs are absolute",
+              all(f.url.startswith(("http://", "https://")) for f in seeded))
+        check("suite: hunt extraction finds the path",
+              "https://example.com/login" in {f.url for f in seeded})
         check("suite: a flow has request text", "GET /" in got.request_text())
         check("suite: a flow has response text", "HTTP 200" in got.response_text())
         suite.set_intercept(True)
@@ -130,7 +143,7 @@ async def test_screen(tmp: Path) -> None:
             check("screen: the target is carried",
                   "example.com" in app.screen.target, app.screen.target)
             check("screen: history table exists",
-                  len(app.screen.query_one("#flow-table").columns) == 5)
+                  len(app.screen.query_one("#flow-table").columns) == 6)
             check("screen: the mini harness is on the right",
                   app.screen.query_one("#suite-side") is not None)
             await pilot.press("escape")
@@ -147,6 +160,10 @@ def test_wiring() -> None:
           (ROOT / "zimzilla" / "agent.py").read_text(encoding="utf-8"))
     check("wiring: suite tools are registered", "suite_history" in
           (ROOT / "zimzilla" / "tools.py").read_text(encoding="utf-8"))
+    check("wiring: Ctrl+S closes the suite", 'Binding("ctrl+s"' in
+          (ROOT / "zimzilla" / "ui" / "suiteui.py").read_text(encoding="utf-8"))
+    check("wiring: hunt URLs seed on mount", "seed_hunt_flows()" in
+          (ROOT / "zimzilla" / "ui" / "suiteui.py").read_text(encoding="utf-8"))
 
 
 def main() -> int:
