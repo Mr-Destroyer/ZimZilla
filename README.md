@@ -65,6 +65,121 @@ alone — they are content, not chrome.
 </tr>
 </table>
 
+
+### The workbench, in screens
+
+<table>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/05-help.png" alt="the full command reference, grouped by task">
+<sub><b>Every command, grouped.</b> Sessions, models, upstreams, recon, media and the workbench.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/09-connect.png" alt="MCP bridge list and generated app connections">
+<sub><b>Connect what you already use.</b> MCP bridges, generated app adapters, live tools.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/07-usage.png" alt="all-time usage ledger with model and source bar charts">
+<sub><b>Where the tokens went.</b> Favourite model, top source, totals and a 14-day graph.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/06-memory.png" alt="operator memory showing name, likes and preferences">
+<sub><b>It remembers you.</b> Name, likes and preferences, editable with <code>/memory</code>.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/08-focus.png" alt="focus mode with both side rails hidden">
+<sub><b>Focus mode.</b> The ⛶ button hides both rails and gives the width to the harness.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/10-findings.png" alt="findings panel for a saved bug-hunt campaign">
+<sub><b>Findings on disk.</b> A saved bug hunt opens as a ranked, readable panel.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/11-suite-history.png" alt="ZimSuite history with host, method, path, status and type columns">
+<sub><b>ZimSuite history.</b> Hunt endpoints seeded into a real proxy history, with host and live status.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/12-suite-repeater.png" alt="ZimSuite repeater with an editable raw request">
+<sub><b>Repeater.</b> Edit the raw request; the new response lands in history.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/13-suite-intruder.png" alt="ZimSuite intruder with URL, payload list and request editor">
+<sub><b>Intruder.</b> A URL with <code>FUZZ</code>, a payload list, and a result table.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/14-suite-findings.png" alt="ZimSuite findings tab beside the mini agent">
+<sub><b>Findings beside the agent.</b> The hunt report and the live mini-harness share one screen.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/16-suite-intercept.png" alt="ZimSuite intercept tab with forward and drop controls">
+<sub><b>Intercept.</b> Arm the queue, then forward or drop each parked request.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/17-suite-crawler.png" alt="ZimSuite crawler tab with a start URL">
+<sub><b>Crawler.</b> Follow same-host links and seed from the saved hunt's URLs.</sub>
+</td>
+</tr>
+</table>
+
+<img src="docs/screenshots/15-image-pane.png" alt="the resizable image pane showing a locally drawn ZIMZILLA logo" width="880">
+
+*<b>Images without an image API.</b> The model writes SVG/HTML, Chromium renders it, and the image pane shows the result.*
+
+### The specialist surfaces
+
+<table>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/18-mcp.png" alt="MCP servers, tools and connection status">
+<sub><b>MCP.</b> Connected servers, their tools, and what is live.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/19-sources.png" alt="upstream sources and their status">
+<sub><b>Upstreams.</b> Every source, its key state, route, and free-model rules.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/20-osint.png" alt="OSINT command reference">
+<sub><b>OSINT.</b> Username, email, domain, IP and phone cases.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/21-payload.png" alt="payload generation surface">
+<sub><b>Payloads.</b> Generated, platform-aware, refusal-resistant.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/22-reverse-tools.png" alt="reverse-engineering tools">
+<sub><b>Reverse engineering.</b> The local binary-analysis toolkit.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/23-crack.png" alt="cracking workflow">
+<sub><b>Cracking.</b> Captures, rules and a local wordlist.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="docs/screenshots/24-ad.png" alt="Active Directory campaign gate">
+<sub><b>Active Directory.</b> The gated AD campaign surface.</sub>
+</td>
+<td width="50%">
+<img src="docs/screenshots/10-findings.png" alt="saved bug-hunt findings panel">
+<sub><b>Bug hunt.</b> Findings from a saved campaign, ranked and readable.</sub>
+</td>
+</tr>
+</table>
+
 </div>
 
 ---

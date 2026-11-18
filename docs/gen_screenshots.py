@@ -15,6 +15,7 @@ tool card is the thing worth photographing.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -46,8 +48,10 @@ LIST_SIZE = (124, 34)
 
 
 def _cfg(workdir: Path, **kw) -> Config:
-    return Config.from_env(workdir=workdir, api_key="x",
-                           base_url="http://localhost:4001", **kw)
+    cfg = Config.from_env(workdir=workdir, api_key="x",
+                          base_url="http://localhost:4001", **kw)
+    cfg.state_dir = workdir / "state"
+    return cfg
 
 
 def _stub(workdir: Path):
@@ -259,6 +263,116 @@ async def _shot_list(wd: Path, name: str, command: str) -> None:
         _write_shot(app, name)
 
 
+async def _shot_simple(wd: Path, name: str, command: str, prepare=None) -> None:
+    app = ZimZillaApp(_cfg(wd, boot_rain=False, theme="green"))
+    async with app.run_test(size=LIST_SIZE) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        if prepare is not None:
+            prepare(app)
+        app._handle_command(command)
+        await pilot.pause()
+        await asyncio.sleep(0.2)
+        await pilot.pause()
+        _write_shot(app, name)
+
+
+async def _shot_focus(wd: Path) -> None:
+    app = ZimZillaApp(_cfg(wd, boot_rain=False, theme="green"))
+    async with app.run_test(size=(150, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        await pilot.click("#focus-toggle")
+        await pilot.pause()
+        await asyncio.sleep(0.2)
+        _write_shot(app, "08-focus")
+
+
+async def _shot_findings(wd: Path) -> None:
+    app = ZimZillaApp(_cfg(wd, boot_rain=False, theme="green"))
+    async with app.run_test(size=(150, 40)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        app._handle_command("/findings")
+        await pilot.pause()
+        await asyncio.sleep(0.3)
+        _write_shot(app, "10-findings")
+        if hasattr(app.screen, "dismiss"):
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+
+async def _shot_suite(wd: Path) -> None:
+    from textual.widgets import TabbedContent
+    from zimzilla import suite as suite_mod
+
+    app = ZimZillaApp(_cfg(wd, boot_rain=False, theme="green"))
+    async with app.run_test(size=(160, 45)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        with mock.patch.object(suite_mod.Suite, "start", return_value=True), \
+             mock.patch.object(suite_mod.Suite, "stop", return_value=None), \
+             mock.patch.object(suite_mod.Suite, "probe_seeds", return_value=[]):
+            app._handle_command("/zimsuite https://www.lerevecraze.com")
+            await asyncio.sleep(0.8)
+            await _shot(app, "11-suite-history")
+            tabs = app.screen.query_one(TabbedContent)
+            tabs.active = "tab-repeater"
+            await pilot.pause()
+            flows = list(app.screen.suite.flows)
+            if flows:
+                app.screen._select_flow(flows[0])
+            await pilot.pause()
+            await _shot(app, "12-suite-repeater")
+            tabs.active = "tab-intruder"
+            await pilot.pause()
+            await _shot(app, "13-suite-intruder")
+            tabs.active = "tab-intercept"
+            await pilot.pause()
+            await _shot(app, "16-suite-intercept")
+            tabs.active = "tab-crawler"
+            await pilot.pause()
+            await _shot(app, "17-suite-crawler")
+            tabs.active = "tab-findings"
+            await pilot.pause()
+            await _shot(app, "14-suite-findings")
+            app.screen.dismiss(None)
+            await pilot.pause()
+
+
+async def _shot_image(wd: Path) -> None:
+    app = ZimZillaApp(_cfg(wd, boot_rain=False, theme="green"))
+    async with app.run_test(size=(160, 45)) as pilot:
+        app.pop_screen()
+        await pilot.pause()
+        drawing = await asyncio.to_thread(tools_mod.execute, "draw_image", {
+            "spec": (
+                '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">'
+                '<rect width="900" height="600" fill="#071007"/>'
+                '<circle cx="450" cy="270" r="150" fill="none" '
+                'stroke="#00ff41" stroke-width="8"/>'
+                '<text x="450" y="290" text-anchor="middle" fill="#00ff41" '
+                'font-family="monospace" font-size="64" font-weight="bold">'
+                'ZIMZILLA</text>'
+                '<text x="450" y="350" text-anchor="middle" fill="#88ffaa" '
+                'font-family="monospace" font-size="24">DRAW IT YOURSELF</text>'
+                '</svg>'
+            ),
+            "format": "svg", "width": 900, "height": 600,
+            "dest": "images/zimzilla-shot.png",
+        }, _cfg(wd))
+        if not drawing.is_error:
+            app._show_image_pane({"path": drawing.meta["image"],
+                                  "caption": "draw_image · local SVG render"})
+            await pilot.pause()
+            await asyncio.sleep(0.4)
+            _write_shot(app, "15-image-pane")
+
+
+async def _shot(app: ZimZillaApp, name: str) -> None:
+    _write_shot(app, name)
+
+
 async def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
@@ -277,11 +391,61 @@ async def main() -> None:
         allow = wd / "allow.yaml"
         allow.write_text("in_scope:\n  - api.example.com\n  - 10.0.0.0/24\n")
 
+        # A local campaign for the findings/suite shots. Reuse the author's
+        # saved campaign when present; otherwise write a small fixture.
+        hunts = wd / "state" / "hunts"
+        hunts.mkdir(parents=True)
+        source = Path.home() / ".zimzilla" / "hunts" / "lerevecraze.com"
+        if source.exists():
+            shutil.copytree(source, hunts / "lerevecraze.com")
+        else:
+            d = hunts / "lerevecraze.com" / "wave-1" / "findings"
+            d.mkdir(parents=True)
+            (d / "rest-api.md").write_text(
+                "# WordPress REST API information disclosure\n\n"
+                "**Severity:** medium\n\n"
+                "**Asset:** https://www.lerevecraze.com/wp-json/wp/v2/pages\n\n"
+                "Evidence: https://www.lerevecraze.com/wp-json/wp/v2/pages?per_page=1\n"
+                "Endpoints: /login, /wp-json/wp/v2/users, /?s=\n")
+        (hunts / "lerevecraze.com" / "recon.md").write_text(
+            "# Recon\n\nTarget answers on HTTPS. Endpoints: /login, "
+            "/wp-json/wp/v2/pages, /wp-json/wp/v2/users, /?s=\n")
+
         print("generating screenshots…")
         await _shot_boot(wd)
         await _shot_shell(wd)
         await _shot_list(wd, "03-models", "/model")
         await _shot_list(wd, "04-modes", "/mode")
+
+        await _shot_simple(wd, "05-help", "/help")
+        await _shot_simple(wd, "06-memory", "/memory",
+                           prepare=lambda app: (
+                               app.memory.add("identity", "Zim", source="explicit"),
+                               app.memory.add("like", "dark terminals and fast cars",
+                                              source="explicit"),
+                               app.memory.add("preference", "short answers",
+                                              source="explicit"),
+                               setattr(app.agent, "memory_note",
+                                       app.memory.prompt_note())))
+        await _shot_simple(wd, "07-usage", "/usage",
+                           prepare=lambda app: [
+                               app.usage.record(m, s, i, o, c) for m, s, i, o, c in (
+                                   ("gpt-4o:free", "crowllm", 12000, 2200, 0.0),
+                                   ("qwen3-8-27b:free", "kenari", 9000, 1600, 0.0),
+                                   ("deepseek-v4.1-flash", "numes", 7000, 1200, 0.0),
+                               )])
+        await _shot_focus(wd)
+        await _shot_simple(wd, "09-connect", "/connect")
+        await _shot_simple(wd, "18-mcp", "/mcp")
+        await _shot_simple(wd, "19-sources", "/zim-source")
+        await _shot_simple(wd, "20-osint", "/osint")
+        await _shot_simple(wd, "21-payload", "/payload")
+        await _shot_simple(wd, "22-reverse-tools", "/reverse-engineer-tools")
+        await _shot_simple(wd, "23-crack", "/crack")
+        await _shot_simple(wd, "24-ad", "/ad")
+        await _shot_findings(wd)
+        await _shot_suite(wd)
+        await _shot_image(wd)
     print("done.")
 
 
