@@ -957,6 +957,10 @@ class Agent:
         from . import imagegen as imagegen_mod
         if not imagegen_mod.available(self.cfg):
             deny = deny | tools_mod.IMAGEGEN_TOOLS
+        # Suite tools act on a live proxy. Outside `/zimsuite` they can only
+        # fail, so they are not advertised.
+        if getattr(self.cfg, "_suite", None) is None:
+            deny = deny | tools_mod.SUITE_TOOLS
         schemas = tools_mod.TOOL_SCHEMAS + tools_mod.PEER_SCHEMAS
         # MCP tools are discovered at runtime, so they are appended rather than
         # listed. Withheld entirely when no server is connected: an advertised

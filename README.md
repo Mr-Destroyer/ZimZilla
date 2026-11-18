@@ -2089,6 +2089,7 @@ startup and then ignored. Rename it to `allow.yaml` or `out-of-scope.yaml`.
 | `/reverse-engineer-tools [kind]` | reverse-engineering tooling: what is installed, what is missing |
 | `/scope-validator` | paste a programme overview → scope files + ranked targets |
 | `/bug-hunt [--fresh] [--wave N] <target>` | recon (reused if already done), then **one** wave of 10 agents |
+| `/zimsuite <target>` | proxy workbench: history, repeater, intruder, intercept, crawler, mini agent |
 | `/ad [--fresh] [--wave N] [--lockout N] [--arm] <domain> --ack <domain>` | Active Directory campaign — gated and interlocked |
 | `/ad tools` | reprint the AD tool probe |
 | `/crack <file\|dir> [--mode N] [--max-time S] [--deep]` | crack hashes offline — CPU only, budgeted |
@@ -3138,6 +3139,43 @@ directory. It makes no model call: the document is exactly what was recorded.
 
 ---
 
+
+## ZimSuite — proxy workbench
+
+`/zimsuite <target>` opens a full-screen workbench for a target you are
+authorised to test. It starts a local **mitmproxy** child and gives you:
+
+- **HISTORY** — every request the proxy saw: method, path, status, MIME, size,
+  with the full request and response in the detail pane.
+- **REPEATER** — edit the raw request and send it again; the response lands in
+  the same history.
+- **INTRUDER** — a URL with `FUZZ`, a payload list, and a result table.
+- **INTERCEPT** — arm the queue, then FORWARD or DROP each parked request.
+- **CRAWLER** — follows same-host links and feeds them into history.
+- **FINDINGS** — loads the existing `/bug-hunt` campaign files for the target.
+
+The right-hand **MINI HARNESS** is a separate agent with `suite_history`,
+`suite_flow`, `suite_repeater`, `suite_intruder`, `suite_crawl` and
+`suite_intercept`. Ask it to inspect an endpoint, replay a request with a header
+change, or fuzz a parameter; its calls and responses stream in that column, and
+STOP cancels the turn. `Esc` closes the suite and stops the proxy.
+
+```text
+/zimsuite target.com
+/zimsuite https://target.com/app
+```
+
+The proxy listens on a random localhost port (shown in the header). Point a
+browser or `curl -x <proxy>` at it. HTTPS interception needs mitmproxy's CA
+installed in the client; without it, use the workbench's own requests or an
+HTTP target. The crawler and repeater speak directly, so they do not depend on
+the browser's proxy settings.
+
+This is the first slice of the Burp-on-steroids plan: history, replay, a simple
+intruder, file-based intercept, a link crawler and an agent that can see the
+same flows. It is deliberately one process and one screen, not a second product.
+
+
 ## Active Directory
 
 `/ad` runs the same campaign engine as `/bug-hunt`, aimed at a domain. Recon
@@ -3510,6 +3548,8 @@ zimzilla/                     the package
   termbg.py                   asks the terminal for its own background
   termcolors.py               ...and for its foreground and 16 ANSI slots
   ui/                         the terminal interface
+  suite.py                    mitmproxy child, flow store, replay/crawl/intruder
+  ui/suiteui.py               /zimsuite workbench screen
     markdown.py               a model's answer, rendered as markdown not as source
 
 allow.yaml.example            declared targets
@@ -3561,6 +3601,7 @@ python tests/test_connect.py       # /connect — bridge generation, MCP handsha
 python tests/test_voice.py         # launch greeting, idle recap, redaction, wiring
 python tests/test_memory_usage.py  # operator memory + persistent /usage ledger
 python tests/test_focus_mode.py    # header ⛶ toggle — hide/restore rails, reflow
+python tests/test_zimsuite.py      # proxy history, repeater tool, workbench screen
 python tests/test_discord_rpc.py   # Discord presence payload, profile, logo, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
 ```

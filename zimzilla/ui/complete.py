@@ -142,6 +142,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/obfuscate", "run a payload through one or more msfvenom encoders"),
     ("/scope-validator", "paste a programme overview → scope files + ranked targets"),
     ("/bug-hunt", "recon, then one wave of 10 agents"),
+    ("/zimsuite", "proxy workbench — history, repeater, intruder, crawl"),
     ("/ad", "Active Directory campaign — gated and interlocked"),
     ("/reverse-engineer", "map an artifact, then choose what to change"),
     ("/reverse-engineer-tools", "RE tooling: what is here, what is missing"),

@@ -317,6 +317,90 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "suite_history",
+        "description": "ZimSuite only: list captured proxy requests. Filter by "
+                       "substring and cap the count.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string", "description": "substring filter"},
+                "limit": {"type": "integer",
+                          "description": "max rows (default 30)", "default": 30},
+            },
+        },
+    },
+    {
+        "name": "suite_flow",
+        "description": "ZimSuite only: show the full request and response for "
+                       "one captured flow id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string",
+                       "description": "flow id from suite_history"},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "suite_repeater",
+        "description": "ZimSuite only: send a request to the target and return "
+                       "the response (always shown in the suite history).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string", "description": "HTTP method"},
+                "url": {"type": "string", "description": "absolute URL"},
+                "headers": {"type": "object",
+                            "description": "request headers"},
+                "body": {"type": "string", "description": "request body"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "suite_intruder",
+        "description": "ZimSuite only: run a payload list against a URL with a "
+                       "FUZZ marker.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL containing FUZZ"},
+                "payloads": {"type": "array", "items": {"type": "string"},
+                             "description": "payload values"},
+                "marker": {"type": "string",
+                           "description": "marker (default FUZZ)"},
+                "method": {"type": "string", "description": "HTTP method"},
+            },
+            "required": ["url", "payloads"],
+        },
+    },
+    {
+        "name": "suite_crawl",
+        "description": "ZimSuite only: crawl links under the target and add "
+                       "them to the request history.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "start URL"},
+                "limit": {"type": "integer",
+                          "description": "max pages (default 25)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "suite_intercept",
+        "description": "ZimSuite only: turn the proxy intercept queue on or off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "on": {"type": "boolean", "description": "true to intercept"},
+            },
+            "required": ["on"],
+        },
+    },
+    {
         # Display, as opposed to analysis. `view_image` hands the picture to
         # the *model*; this hands it to the *operator*, in a pane they can
         # resize, zoom and pan. The model can open it mid-turn, and a second
@@ -715,6 +799,9 @@ PEER_SCHEMAS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}},
     },
 ]
+
+SUITE_TOOLS = frozenset({"suite_history", "suite_flow", "suite_repeater",
+                         "suite_intruder", "suite_crawl", "suite_intercept"})
 
 TOOL_NAMES = [t["name"] for t in TOOL_SCHEMAS]
 
@@ -1661,6 +1748,103 @@ def _slug_from(text: str, limit: int = 48) -> str:
     return (slug[:limit] or "drawing")
 
 
+def _suite(cfg):
+    suite = getattr(cfg, "_suite", None)
+    if suite is None:
+        return None
+    return suite
+
+
+def _tool_suite_history(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    needle = str(args.get("search") or "").lower()
+    try:
+        limit = max(1, min(int(args.get("limit") or 30), 200))
+    except (TypeError, ValueError):
+        limit = 30
+    rows = [f for f in suite.flows
+            if not needle or needle in f.url.lower()][-limit:]
+    if not rows:
+        return ToolResult("no matching suite flows")
+    lines = [f"{f.id}  {f.method}  {f.status or '-'}  {f.url}" for f in rows]
+    return ToolResult("\n".join(lines), meta={"flows": [f.id for f in rows]})
+
+
+def _tool_suite_flow(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    fid = str(args.get("id") or "")
+    flow = next((f for f in suite.flows if f.id == fid), None)
+    if flow is None:
+        return ToolResult(f"no flow {fid!r}", is_error=True)
+    return ToolResult(
+        flow.request_text() + "\n\n--- RESPONSE ---\n\n" + flow.response_text(),
+        meta={"flow": fid})
+
+
+def _tool_suite_repeater(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    try:
+        flow = suite.replay(str(args.get("method") or "GET"),
+                            str(args.get("url") or ""),
+                            dict(args.get("headers") or {}),
+                            str(args.get("body") or ""))
+    except Exception as e:  # noqa: BLE001
+        return ToolResult(f"repeater failed: {type(e).__name__}: {e}",
+                          is_error=True)
+    return ToolResult(
+        f"{flow.status} {flow.url}\n\n{flow.response_text()}",
+        meta={"flow": flow.id, "status": flow.status})
+
+
+def _tool_suite_intruder(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    payloads = args.get("payloads") or []
+    if isinstance(payloads, str):
+        payloads = [p.strip() for p in payloads.split(",") if p.strip()]
+    if not payloads:
+        return ToolResult("no payloads", is_error=True)
+    results = suite.intruder(
+        str(args.get("url") or ""), [str(p) for p in payloads],
+        marker=str(args.get("marker") or "FUZZ"),
+        method=str(args.get("method") or "GET"))
+    if not results:
+        return ToolResult("no responses", is_error=True)
+    return ToolResult("\n".join(f"{f.status}  {f.url}" for f in results),
+                      meta={"flows": [f.id for f in results]})
+
+
+def _tool_suite_crawl(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    try:
+        limit = max(1, min(int(args.get("limit") or 25), 60))
+    except (TypeError, ValueError):
+        limit = 25
+    found = suite.crawl(str(args.get("url") or ""), limit=limit)
+    return ToolResult(
+        f"crawled {len(found)} URL(s)\n" +
+        "\n".join(f"{f.status}  {f.url}" for f in found),
+        meta={"flows": [f.id for f in found]})
+
+
+def _tool_suite_intercept(args: dict, cfg) -> ToolResult:
+    suite = _suite(cfg)
+    if suite is None:
+        return ToolResult("ZimSuite is not open", is_error=True)
+    on = bool(args.get("on"))
+    suite.set_intercept(on)
+    return ToolResult(f"intercept {'on' if on else 'off'}")
+
+
 def _tool_show_image(args: dict, cfg) -> ToolResult:
     """Put a picture in the operator's viewer. Display, not analysis."""
     from . import browser as browser_mod
@@ -2424,6 +2608,12 @@ _DISPATCH = {
     "browse": _tool_browse,
     "view_image": _tool_view_image,
     "draw_image": _tool_draw_image,
+    "suite_history": _tool_suite_history,
+    "suite_flow": _tool_suite_flow,
+    "suite_repeater": _tool_suite_repeater,
+    "suite_intruder": _tool_suite_intruder,
+    "suite_crawl": _tool_suite_crawl,
+    "suite_intercept": _tool_suite_intercept,
     "show_image": _tool_show_image,
     "watch_video": _tool_watch_video,
     "generate_image": _tool_generate_image,

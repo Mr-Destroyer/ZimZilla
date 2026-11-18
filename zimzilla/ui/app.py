@@ -87,6 +87,7 @@ from .complete import CompletionPopup, _iter_files
 from .palette_cmd import CommandPalette, PaletteEntry
 from .rails import LoopRail, TelemetryRail
 from .web import WaveWeb
+from .suiteui import SuiteScreen
 from .widgets import (ChatPane, HeaderBar, ImagePane, PromptInput,
                       StatusBar, ZimPane)
 
@@ -1003,6 +1004,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
     ]),
     ("hunts", "HUNTS & REPORTING", "multi-agent campaigns and their output", [
         ("/bug-hunt <target>", "recon, then one wave of 10 agents"),
+        ("/zimsuite <target>", "proxy workbench — history, repeater, intruder, crawl"),
         ("/bug-hunt <target> --wave N", "run wave N specifically"),
         ("/stop-hunt", "end a running hunt (works while busy)"),
         ("/summary-hunt", "the hunt report (works while busy)"),
@@ -2905,6 +2907,8 @@ class ZimZillaApp(App):
         "respan-api-setup", "respan-models", "zim-respan",
         "numes-api-setup", "numes-models", "zim-numes",
         "crownllm-api-key", "crownllm-models", "zim-crownllm",
+        # The suite owns its own agent and proxy; it can open mid-turn.
+        "zimsuite",
         "kenari-api-setup", "kenari-models", "zim-kenari",
         "aihubmix-api-setup", "aihubmix-models", "zim-aihubmix",
         "beatapi-api-setup", "beatapi-models", "zim-beatapi",
@@ -3032,6 +3036,7 @@ class ZimZillaApp(App):
             "image-gen": lambda a: self._cmd_image_gen(a),
             "payload": lambda a: self._cmd_payload(a),
             "bug-hunt": lambda a: self._cmd_bug_hunt(a),
+            "zimsuite": lambda a: self._cmd_zimsuite(a),
             "scope-validator": lambda a: self._cmd_scope_validator(a),
             "ad": lambda a: self._cmd_ad(a),
             "crack": lambda a: self._cmd_crack(a),
@@ -4194,6 +4199,16 @@ class ZimZillaApp(App):
             self._sys_line("operator memory cleared", ok=True)
             return
         self.query_one(ChatPane).write_block(self.memory.render())
+
+    def _cmd_zimsuite(self, args) -> None:
+        """/zimsuite <target> — open the proxy workbench for this target."""
+        target = str(args[0]).strip() if args else ""
+        if not target:
+            self._sys_line("usage: /zimsuite <target.com>", warn=True)
+            return
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        self.push_screen(SuiteScreen(target, self.cfg, self.palette))
 
     def _cmd_mcp(self, args) -> None:
         """/mcp — connect MCP servers and list the tools they offer.
