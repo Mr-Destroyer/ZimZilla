@@ -5352,7 +5352,7 @@ class ZimZillaApp(App):
             else:
                 ok = True
                 detail = f"{len(models)} models"
-                ids = [m.id for m in models if m.chat]
+                ids = [m.id for m in models if m.free]
         elif src.key == "flex":
             # Neither of the two cases above, because there is no credential to
             # check and no Models route to probe: the playground authenticates
@@ -6244,8 +6244,8 @@ class ZimZillaApp(App):
                 t.append("https://aistudio.google.com/apikey\n", style=p.primary)
                 t.append("  keys start    ", style=p.dim)
                 t.append(f"{gm_mod.KEY_PREFIX}  · free tier, no card. The catalog "
-                         "lists 61 models\n                but only ~12 answer "
-                         "on a free key — /gemini-models says which\n",
+                         "lists 66 models\n                but only the free "
+                         "Flash/Gemma set is offered — /gemini-models says which\n",
                          style=p.dim)
                 t.append("  note:        ", style=p.dim)
                 t.append(
@@ -7024,7 +7024,7 @@ class ZimZillaApp(App):
             creds = gm_mod.load_credentials()
             if creds is None:
                 return None, "no key — set one with /gemini-api-setup <key>"
-            return gm_mod.chat_models(creds[0])
+            return gm_mod.usable_free_models(creds[0])
         if kind == "flex":
             # No key and no fetch: the playground publishes no catalog, so this
             # is the module's declared list. `usable_free_models` filters it to

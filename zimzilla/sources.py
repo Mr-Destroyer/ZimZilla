@@ -1061,11 +1061,17 @@ def catalog_price_for(base_url: str, model: str) -> tuple[float, float] | None:
         # catalog is a constant, so it is never cold.
         return (0.0, 0.0)
     if key == "gemini":
-        # NVIDIA's case exactly: the catalog publishes no per-model price, and
-        # the free tier is a quota on the *account* rather than a rate on the
-        # model. A cold cache answering None would fall through to the estimate
-        # table and bill a free model at DEFAULT_PRICE.
-        return (0.0, 0.0)
+        # The catalog publishes no price, and most listed ids are not free.
+        # A cold cache answers zero for the free default; a warm cache answers
+        # zero only for a measured-free id.
+        cached = catalog_models(key)
+        if not cached:
+            return (0.0, 0.0)
+        from . import gemini as gm_mod
+        found = gm_mod.model_for(model, cached)
+        if found is None:
+            return None
+        return (0.0, 0.0) if found.free else None
     if key == "coarena":
         # The catalog prices every listed model at $0 in and $0 out, and the
         # account is metered against a $5/day allowance instead — so (0, 0) is

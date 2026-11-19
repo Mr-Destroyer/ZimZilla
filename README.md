@@ -1153,6 +1153,11 @@ Switch with `/zim-logfare`, `/zim-tokenjuice`, `/zim-iteracompute`,
 `/zim-beatapi`, `/zim-moonmath`, `/zim-coarena` or `/zim-antseed`; the choice is
 remembered, so the next launch comes back to the one that was working.
 
+Gemini's catalog lists paid Pro/Gemini-4 models beside the free Flash/Gemma
+ones. ZimZilla gates the picker on the measured free set (`FREE_MODEL_IDS`), so
+`/model` and `/gemini-models` only offer ids that answer on the free AI Studio
+tier — never the 429/`limit: 0` paid entries.
+
 Logfare, Token Juice, NVIDIA, wandb, InferX, Inferbase, Gemini and Flex are
 reached **directly** — their upstreams serve Chat Completions themselves, so
 there is no proxy to start.

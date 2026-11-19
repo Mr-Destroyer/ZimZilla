@@ -26,9 +26,9 @@ Protects what is particular about this provider:
   ``chat_completions_url`` would mangle into ``.../v1beta/openai/v1/chat/
   completions``. The special case is asserted here, and so is the fact that it
   did not disturb any other route.
-* **Free is the account tier, not a per-model price.** The catalog publishes no
-  price, so ``Model.free`` is True by construction and
-  ``sources.catalog_price_for`` must answer (0, 0) *even on a cold cache*.
+* **Only the measured free set is offered.** The catalog has no price field and
+  lists paid Pro/Gemini-4 ids beside free Flash/Gemma ones. ``FREE_MODEL_IDS``
+  is the gate; ``/model``/``/gemini-models`` must never show the paid ids.
 * **The key never ships.** ``~/.zimzilla/gemini/source`` is written by
   ``/gemini-api-setup`` and nothing under ``packaging/`` contains a credential.
 
@@ -71,6 +71,10 @@ CATALOG = {
          "owned_by": "google", "display_name": "Gemini 3.5 Flash"},
         {"id": "models/gemma-4-31b-it", "object": "model",
          "owned_by": "google", "display_name": "Gemma 4 31B"},
+        {"id": "models/gemini-3.1-pro-preview", "object": "model",
+         "owned_by": "google", "display_name": "Gemini 3.1 Pro"},
+        {"id": "models/gemini-4-argon", "object": "model",
+         "owned_by": "google", "display_name": "Gemini 4 Argon"},
         {"id": "models/gemini-robotics-er-2-preview", "object": "model",
          "owned_by": "google"},
         # --- non-chat families, one per marker shape ---------------------
@@ -103,7 +107,11 @@ CATALOG = {
 
 #: Every chat-capable id, catalog order preserved, prefix stripped.
 CHAT = ["gemini-flash-lite-latest", "gemini-3.5-flash", "gemma-4-31b-it",
+        "gemini-3.1-pro-preview", "gemini-4-argon",
         "gemini-robotics-er-2-preview"]
+
+#: The measured free subset. Pro/Gemini-4 ids are chat-capable but paid.
+FREE = ["gemini-flash-lite-latest", "gemini-3.5-flash", "gemma-4-31b-it"]
 
 #: The non-chat ids, each of which a marker-only filter must catch.
 NON_CHAT = ["gemini-embedding-001", "gemini-3-pro-image",
@@ -176,7 +184,7 @@ def test_parser_drops_malformed_rows() -> None:
 
     models = gm._parse_models(CATALOG)
     ids = [m.id for m in models]
-    check("parse: every well-formed row kept", len(models) == 15, str(len(models)))
+    check("parse: every well-formed row kept", len(models) == 17, str(len(models)))
     check("parse: a bare string is dropped", "not-a-row" not in ids)
     check("parse: a row with no id is dropped", len(ids) == len(set(ids)))
     check("parse: a whitespace id is dropped", "   " not in ids)
@@ -203,8 +211,8 @@ def test_non_chat_families_are_filtered() -> None:
     with mock.patch("urllib.request.urlopen", _stub()):
         gm.clear_cache()
         ids, err = gm.model_ids("AQ.fake")
-    check("chat: model_ids keeps exactly the chat set",
-          ids is not None and ids == CHAT, str(ids))
+    check("chat: model_ids keeps exactly the free chat set",
+          ids is not None and ids == FREE, str(ids))
     check("chat: model_ids reports no error", err == "", err)
     check("chat: an embedding model is not offered",
           ids is not None and "gemini-embedding-001" not in ids)
@@ -225,20 +233,34 @@ def test_thinking_models_are_identified() -> None:
           gm.MIN_OUTPUT_TOKENS >= 200, str(gm.MIN_OUTPUT_TOKENS))
 
 
-def test_free_is_the_account_tier() -> None:
-    """No price in the catalog, so free is True and price_for is (0, 0)."""
+def test_free_is_measured_not_every_listed_model() -> None:
+    """Only the measured free set is offered; paid chat ids stay out."""
     from zimzilla import gemini as gm, sources
 
     models = gm._parse_models(CATALOG)
-    check("free: every entry is free", all(m.free for m in models))
-    check("free: price_for is (0, 0)",
+    by_id = {m.id: m for m in models}
+    check("free: the free set is marked free",
+          all(by_id[mid].free for mid in FREE), str(FREE))
+    check("free: the paid Pro id is not free",
+          not by_id["gemini-3.1-pro-preview"].free)
+    check("free: the paid Gemini 4 id is not free",
+          not by_id["gemini-4-argon"].free)
+    check("free: price_for is (0, 0) for a free id",
           gm.price_for("gemini-flash-lite-latest", models) == (0.0, 0.0))
+    check("free: price_for is None for a paid id",
+          gm.price_for("gemini-3.1-pro-preview", models) is None)
     # The cold-cache case is the one that matters: None here would fall through
     # to the estimate table and bill a free model at DEFAULT_PRICE.
     gm.clear_cache()
     price = sources.catalog_price_for(gm.API_BASE_URL, "gemini-flash-lite-latest")
     check("free: catalog_price_for is (0, 0) on a cold cache",
           price == (0.0, 0.0), str(price))
+    with mock.patch("urllib.request.urlopen", _stub()):
+        gm.clear_cache()
+        free, err = gm.free_models("AQ.fake")
+    check("free: free_models excludes paid chat ids",
+          free is not None and [m.id for m in free] == FREE, str(free))
+    check("free: free_models reports no error", err == "", err)
 
 
 def test_context_is_never_none() -> None:
@@ -618,7 +640,7 @@ def main() -> int:
         test_parser_drops_malformed_rows()
         test_non_chat_families_are_filtered()
         test_thinking_models_are_identified()
-        test_free_is_the_account_tier()
+        test_free_is_measured_not_every_listed_model()
         test_context_is_never_none()
         test_catalog_is_key_gated_and_the_url_is_right()
         test_fetch_is_total()

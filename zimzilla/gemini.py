@@ -35,11 +35,12 @@ Studio key:
   completions``. :func:`zimzilla.openai_compat.chat_completions_url` special-
   cases this host for exactly that reason.
 
-**Free is an account property, not a per-model price.** The catalog publishes no
-price at all, and the free tier is a quota on the *account*. So
-:attr:`Model.free` is true for every entry, and :func:`price_for` returns
-``(0.0, 0.0)`` so the harness's cost line reads ``free`` instead of billing a
-model at ``DEFAULT_PRICE``.
+**Not every listed model is free.** The catalog publishes no price at all and
+lists paid Pro/Gemini-4 models beside free Flash/Gemma ones. Measured on a free
+key, the Pro and Gemini-4 entries answer ``429 limit: 0``. :data:`FREE_MODEL_IDS`
+is the measured set; :attr:`Model.free` is membership in it, so the picker can
+never offer a paid id. :func:`price_for` returns ``(0.0, 0.0)`` only for a free
+model and ``None`` otherwise.
 
 Nothing here echoes a key. The profile is written mode 600 and read back the
 same way every other source's is.
@@ -86,10 +87,31 @@ PROFILE = ZIMZILLA_HOME / "gemini" / "source"
 KEY_PREFIX = "AQ."
 
 #: The model to fall back to when the chosen one is gone from the catalog.
-#: ``flash-lite-latest`` is the cheapest thing that answers on a free key and
-#: does not spend its budget thinking, which makes it the right default for a
-#: harness that sends many small turns.
+#: ``flash-lite-latest`` is a free-tier id and does not spend its budget
+#: thinking, which makes it the right default for many small turns.
 DEFAULT_MODEL = "gemini-flash-lite-latest"
+
+#: The chat ids that answered on a free AI Studio key, measured 2026-11-19.
+#: The catalog itself has no price field: it lists Pro and Gemini 4 models that
+#: return ``429 limit: 0`` on the free tier. Treating every listed chat id as
+#: free was wrong, so the picker is gated by this measured set instead.
+#:
+#: ``flash`` / ``flash-lite`` and Gemma are the free families. A new free id
+#: needs adding here; a paid id can never leak in by being listed.
+FREE_MODEL_IDS: frozenset[str] = frozenset({
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
+    "gemma-4-26b-a4b-it",
+    "gemma-4-31b-it",
+})
 
 #: How long a fetched catalog is reused. The lineup turns over on Google's
 #: schedule, not ours, and a stale list costs one 404 on a switch — which the
@@ -147,18 +169,14 @@ class Model:
 
     @property
     def free(self) -> bool:
-        """Whether this model costs money to call.
+        """Whether this id is in the measured free AI Studio set.
 
-        Always true on the free tier: the catalog publishes no per-model price,
-        and the tier is a quota on the *account* rather than a price on the
-        model. This is what makes ``/model`` and ``/cost`` read ``free``
-        instead of billing a model at ``DEFAULT_PRICE``.
-
-        It is **not** a claim that every listed model answers — 49 of the 61 do
-        not, with ``limit: 0``. That is a quota fact the catalog cannot express,
-        and :func:`explain_error` is where it is told.
+        The catalog has no price field and lists paid Pro/Gemini-4 models beside
+        free Flash/Gemma ones; ``pricing`` cannot answer this. ``FREE_MODEL_IDS``
+        is the measured answer: an id outside it is not offered by the picker,
+        so a paid model cannot be selected by accident.
         """
-        return True
+        return self.id in FREE_MODEL_IDS
 
     @property
     def chat(self) -> bool:
@@ -185,7 +203,7 @@ class Model:
     @property
     def blurb(self) -> str:
         """A one-line description for the picker."""
-        bits = ["free (AI Studio tier)"]
+        bits = ["free (AI Studio tier)" if self.free else "paid tier"]
         if self.thinking:
             bits.append("thinking")
         bits.append(f"{self.context_length // 1000}k ctx")
@@ -479,25 +497,27 @@ def chat_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
     return [m for m in models if m.chat], ""
 
 
-def usable_free_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
-    """The models this harness can drive, which are also the free ones.
+def free_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
+    """Chat entries that are in the measured free AI Studio set."""
+    models, err = chat_models(token, **kw)
+    if models is None:
+        return None, err
+    return [m for m in models if m.free], ""
 
-    Kept as its own name because every other source's ``/models`` path calls
-    it, and the two filters coincide here by construction: a chat-capable entry
-    is callable on the free tier, and the tier charges the account's quota
-    rather than the model. See :attr:`Model.free`.
+
+def usable_free_models(token: str = "", **kw) -> tuple[list[Model] | None, str]:
+    """The models ``/model`` and ``/gemini-models`` may offer.
+
+    Only the measured free set. The catalog lists paid Pro/Gemini-4 ids beside
+    the free ones and publishes no price, so membership in ``FREE_MODEL_IDS``
+    is the gate rather than a guess from the name.
     """
-    return chat_models(token, **kw)
+    return free_models(token, **kw)
 
 
 def model_ids(token: str = "", **kw) -> tuple[list[str] | None, str]:
-    """Every chat model id, catalog order preserved — what ``/model`` offers.
-
-    Chat entries only. An operator who names a non-chat id deliberately still
-    gets it accepted by ``/model`` (the harness only refuses names absent from
-    the list); this list is the picker, not a gate.
-    """
-    models, err = chat_models(token, **kw)
+    """Free chat model ids, catalog order preserved — what ``/model`` offers."""
+    models, err = free_models(token, **kw)
     if models is None:
         return None, err
     return [m.id for m in models], ""
@@ -524,7 +544,7 @@ def cached_ids() -> list[str] | None:
     models = cached_models()
     if models is None:
         return None
-    return [m.id for m in models if m.chat]
+    return [m.id for m in models if m.free]
 
 
 def clear_cache() -> None:
@@ -541,14 +561,14 @@ def model_for(model: str, models: list[Model] | None) -> Model | None:
 
 
 def price_for(model: str, models: list[Model] | None) -> tuple[float, float] | None:
-    """``(input, output)`` per 1M tokens — always ``(0.0, 0.0)`` here.
+    """``(input, output)`` per 1M tokens, or ``None`` for a paid id.
 
-    The catalog publishes no price, and the free tier is a quota on the account
-    rather than a price on the model. Returning ``None`` would fall through to
-    the harness's estimate table and bill a free model at ``DEFAULT_PRICE``,
-    which is the exact discrepancy this function exists to prevent.
+    The catalog publishes no price. A free id is ``(0, 0)``; a paid id is
+    deliberately ``None`` rather than a made-up rate, because the estimator has
+    no reliable number for it either. The picker never offers the paid ids.
     """
-    return (0.0, 0.0)
+    found = model_for(model, models)
+    return (0.0, 0.0) if found is not None and found.free else None
 
 
 def default_free_model() -> str:
