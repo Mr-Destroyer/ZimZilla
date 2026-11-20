@@ -8081,10 +8081,9 @@ class ZimZillaApp(App):
         credentials. The session is suspended while claude runs, and ZimZilla
         resumes when you quit it.
 
-        Everything you type goes straight to claude — use ``--model <id>`` to
-        pin a model, or args after ``--`` for claude's own flags.
+        Everything you type goes straight to claude untouched.
         """
-        self._zim_claude_worker(args, None)
+        self._zim_claude_worker(args)
 
     def _cmd_load(self, args) -> None:
         p = self.palette
