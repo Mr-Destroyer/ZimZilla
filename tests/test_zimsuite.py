@@ -200,6 +200,12 @@ def test_wiring() -> None:
           (ROOT / "zimzilla" / "agent.py").read_text(encoding="utf-8"))
     check("wiring: suite tools are registered", "suite_history" in
           (ROOT / "zimzilla" / "tools.py").read_text(encoding="utf-8"))
+    check("wiring: mitmdump discovery includes the venv sibling",
+          "_Path(sys.executable).with_name" in
+          (ROOT / "zimzilla" / "suite.py").read_text(encoding="utf-8"))
+    req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    check("wiring: mitmproxy is declared for Python 3.12+",
+          'mitmproxy>=12; python_version >= "3.12"' in req)
     check("wiring: Ctrl+S closes the suite", 'Binding("ctrl+s"' in
           (ROOT / "zimzilla" / "ui" / "suiteui.py").read_text(encoding="utf-8"))
     check("wiring: hunt URLs seed on mount", "seed_hunt_flows()" in

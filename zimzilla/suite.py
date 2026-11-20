@@ -19,6 +19,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -231,9 +232,11 @@ class Suite:
 
     # ---- lifecycle --------------------------------------------------------
     def start(self) -> bool:
-        binary = shutil.which("mitmdump")
+        binary = _mitmdump()
         if not binary:
-            self.error = "mitmdump not found — install mitmproxy"
+            self.error = (
+                "mitmdump not found — install it with `pip install mitmproxy` "
+                "(Python 3.12+) or put it on PATH")
             return False
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.decisions_dir.mkdir(parents=True, exist_ok=True)
@@ -673,6 +676,26 @@ class Suite:
             files.extend(campaign.glob(pattern))
         return sorted({p for p in files if p.is_file()},
                       key=lambda p: p.stat().st_mtime, reverse=True)[:20]
+
+
+def _mitmdump() -> str | None:
+    """Find mitmdump even when the venv's bin/ is not on PATH.
+
+    The installed launcher runs the venv's Python directly; it does not source
+    `activate`, so `shutil.which` alone misses a mitmproxy installed into that
+    venv. Check the sibling of sys.executable and ~/.local/bin too.
+    """
+    import shutil as _shutil
+    from pathlib import Path as _Path
+    candidates = [
+        _shutil.which("mitmdump"),
+        str(_Path(sys.executable).with_name("mitmdump")),
+        str(_Path.home() / ".local" / "bin" / "mitmdump"),
+    ]
+    for candidate in candidates:
+        if candidate and _Path(candidate).is_file():
+            return candidate
+    return None
 
 
 def _free_port() -> int:

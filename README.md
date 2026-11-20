@@ -443,6 +443,35 @@ If you are developing ZimZilla itself, `ZIMZILLA_NO_UPDATE=1` in your shell
 profile is the setting you want — otherwise a commit you push from elsewhere
 will restart the checkout under you on the next launch.
 
+### Missing commands after an update (`/zimsuite`, etc.)
+
+If a command exists on GitHub but not for a user, check the two things that
+actually cause it:
+
+1. **They are running an old checkout.** `zimzilla --version` prints
+   `1.1.0` on current code; an install that still says `1.0.0` predates
+   ZimSuite. Re-run the installer, or in their install:
+   ```bash
+   cd ~/.local/share/zimzilla
+   git pull --ff-only
+   .venv/bin/pip install -r requirements.txt
+   ```
+   A dirty checkout makes the self-update refuse by design. `git status` shows
+   it; commit or stash, then re-run the installer.
+2. **ZimSuite's proxy is missing.** It needs the `mitmdump` binary, not just
+   Python. `requirements.txt` now installs `mitmproxy` on Python 3.12+, and the
+   suite also looks beside the interpreter and in `~/.local/bin`, so a venv
+   install works without activating it. If `/zimsuite` says
+   `mitmdump not found`, run:
+   ```bash
+   .venv/bin/pip install "mitmproxy>=12"
+   ```
+   On Python 3.11 the dependency marker skips mitmproxy; ZimSuite requires
+   3.12+.
+
+The launcher refreshes its own venv when `requirements.txt` changes, so a
+normal update should install mitmproxy automatically.
+
 ---
 
 ## Usage

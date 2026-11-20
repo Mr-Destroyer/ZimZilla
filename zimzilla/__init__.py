@@ -5,5 +5,5 @@ sandboxed tools behind a permission gate, and enforces an optional network
 scope file for bug-bounty work.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["__version__"]

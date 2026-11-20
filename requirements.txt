@@ -52,6 +52,12 @@ edge-tts>=7.0
 # package is small; the browser download is the part that is opt-in.
 playwright>=1.49
 
+# ZimSuite's intercepting proxy. It is a separate binary (mitmdump), not a
+# Python import; `suite.py` also looks beside sys.executable and in
+# ~/.local/bin so the installed launcher finds a venv install without PATH.
+# mitmproxy 12 needs Python >=3.12; on 3.11 the rest of ZimZilla still works.
+mitmproxy>=12; python_version >= "3.12"
+
 # zimzilla itself, editable, so the `zimzilla` console script is installed and
 # the package is importable from any directory.
 -e .
