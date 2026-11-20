@@ -67,9 +67,11 @@ def child_env(base_url: str | None, auth_token: str | None,
             return None
 
     env = dict(os.environ)
-    # Make sure no stale credential from a previous source leaks in.
+    # Make sure no stale credential or model preference from a previous source
+    # leaks in — Claude Code would otherwise try a model id it doesn't know.
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
     env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("ANTHROPIC_MODEL", None)
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
     if auth_token:
