@@ -922,6 +922,8 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-wandb", "switch upstream to wandb.ai inference (direct, free)"),
         ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
         ("/zim-zimthegoat [model]", "switch upstream to DeepAI Code's free models (direct, unmetered)"),
+        ("/deepai-api-setup <key|clear>", "store your DeepAI Code api_key"),
+        ("/deepai-models", "the live catalog — free models are unmetered"),
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
         ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
@@ -2944,6 +2946,7 @@ class ZimZillaApp(App):
         # DeepAI Code's free models: switching source and landing on a model is
         # a config write and a client rebuild — no turn is started.
         "zim-zimthegoat",
+        "deepai-api-setup", "deepai-models",
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
         # /<source>-api-setup; it starts no turn.
@@ -3134,6 +3137,8 @@ class ZimZillaApp(App):
             "zim-wandb": lambda a: self._cmd_zim_source("wandb", a),
             "wandb-api-setup": lambda a: self._cmd_gateway_key("wandb", a),
             "wandb-models": lambda a: self._cmd_models(["wandb"]),
+            "deepai-api-setup": lambda a: self._cmd_deepai_key(a),
+            "deepai-models": lambda a: self._cmd_models(["deepai"]),
             "zim-inferx": lambda a: self._cmd_zim_source("inferx", a),
             "inferx-api-setup": lambda a: self._cmd_gateway_key("inferx", a),
             "inferx-models": lambda a: self._cmd_models(["inferx"]),
@@ -3446,6 +3451,12 @@ class ZimZillaApp(App):
         # free, and size the context gauge against the model's own window.
         ib_catalog = (ib_mod.cached_models()
                       if active == "inferbase" else None)
+        # DeepAI Code's is fetched too, and is read once here for the same
+        # reason: the fetch is the slow part and this is a render. Every entry
+        # is free on the unmetered tier, so this is what makes /model say "free"
+        # instead of billing at the estimate table.
+        dc_catalog = (deepcode_mod.cached_models()
+                      if active == "deepai" else None)
         # Logfare's is fetched too, and carries per-model health. Read once for
         # the same reason: the fetch is the slow part and this is a render.
         lf_catalog = sources_mod.catalog_for(self.cfg.base_url)
@@ -3474,7 +3485,8 @@ class ZimZillaApp(App):
                 th_catalog or as_catalog or uno_catalog or unr_catalog
                 or resp_catalog or nm_catalog or cl_catalog or kn_catalog or ah_catalog
                 or bp_catalog or ic_catalog or inf_catalog or nv_catalog
-                or mm_catalog or co_catalog or ix_catalog or ib_catalog)
+                or mm_catalog or co_catalog or ix_catalog or ib_catalog
+                or dc_catalog)
             for m in order:
                 mark = "◉" if m == self.cfg.model else "○"
                 style = f"bold {p.accent}" if m == self.cfg.model else p.primary
@@ -3621,6 +3633,12 @@ class ZimZillaApp(App):
                     "per-token charge, and the account is metered\n"
                     "  against a $5/day allowance instead\n",
                     style=p.dim)
+            elif active == "deepai":
+                t.append(
+                    f"  catalog {_catalog_clause(deepcode_mod.catalog_age(), deepcode_mod.CACHE_TTL)}"
+                    " — /deepai-models shows the free\nones; free means unmetered "
+                    "(theosPerRequest == 0), paid ids are not offered\n",
+                    style=p.dim)
             self.query_one(ChatPane).write_block(t)
             return
         name = args[0]
@@ -3663,7 +3681,7 @@ class ZimZillaApp(App):
         if active in ("tokenharbour", "openrouter", "unorouter", "antseed",
                       "logfare", "aihubmix", "beatapi", "unrestricted",
                       "respan", "moonmath", "coarena", "iteracompute",
-                      "infronai", "nvidia", "inferx", "inferbase") and (
+                      "infronai", "nvidia", "inferx", "inferbase", "deepai") and (
                 models is None or check_name not in models):
             fetched = None
             if active == "tokenharbour":
@@ -3825,6 +3843,15 @@ class ZimZillaApp(App):
                     fetched = [m for m in (got or []) if m.chat] or None
                 else:
                     fetched = list(co_catalog)
+            elif active == "deepai":
+                # Keyless for browsing: the catalog is public, and the key is
+                # sent when there is one so the listing matches this session.
+                if dc_catalog is None:
+                    creds = deepcode_mod.load_credentials()
+                    fetched, _ = deepcode_mod.fetch_models(
+                        creds[0] if creds else "")
+                else:
+                    fetched = list(dc_catalog)
             elif active == "logfare":
                 if lf_catalog is None:
                     # The status API is public — no key, so this works before
@@ -3869,6 +3896,8 @@ class ZimZillaApp(App):
                     co_catalog = fetched
                 elif active == "logfare":
                     lf_catalog = fetched
+                elif active == "deepai":
+                    dc_catalog = fetched
                 models = tuple(m.id for m in fetched)
         # Only police this on a known source. A custom endpoint (ZIMZILLA_NO_PROXY,
         # a direct ANTHROPIC_BASE_URL) has no catalog to check against, and the
@@ -3988,6 +4017,11 @@ class ZimZillaApp(App):
             # and deepseek is $0.00/$0.00, so the estimate is wrong in both
             # directions at once.
             live = unr_mod.price_for(name, unr_catalog)
+        if live is None:
+            # DeepAI Code's free models are unmetered — priced at $0/$0 — and
+            # the paid ones are not offered by /model, so every catalog entry
+            # reads as free rather than billing at DEFAULT_PRICE.
+            live = deepcode_mod.price_for(name, dc_catalog)
         if live is not None:
             pin, pout = live
             note = "free" if (pin == 0.0 and pout == 0.0) \
@@ -6152,6 +6186,89 @@ class ZimZillaApp(App):
         self._sys_line(
             "the shared key in the tree was not modified — it stays public")
 
+    def _cmd_deepai_key(self, args) -> None:
+        """/deepai-api-setup <key|clear> — store your DeepAI Code api_key.
+
+        The key is the one the DeepAI Code app saved after sign-in
+        (``~/.deepai-code/userdata/secrets/deepai-account.bin``), or a fresh
+        one from the app's device-code flow. Written to
+        ``$ZIMZILLA_HOME/deepai/source``, mode 600, in the same
+        ``export VAR="value"`` format as every other profile.
+
+        ``clear`` removes the personal profile and the app's saved key is used
+        instead. The key is never echoed — the confirmation names the file and
+        the last four characters only.
+        """
+        p = self.palette
+        word = str(args[0]).strip() if args else ""
+
+        if not word or word.lower() in ("status", "show"):
+            creds = deepcode_mod.load_credentials()
+            t = Text()
+            t.append("  DEEPAI CODE API KEY\n\n", style=f"bold {p.accent}")
+            if creds is None:
+                t.append("  no key set — the DeepAI Code app's saved secret "
+                         "is used if present\n\n", style=p.amber)
+            else:
+                _, _, origin = creds
+                t.append("  source: ", style=p.dim)
+                t.append(origin + "\n\n", style=p.primary)
+            t.append("  set it with  ", style=p.dim)
+            t.append("/deepai-api-setup <key>\n", style=f"bold {p.primary}")
+            t.append("  fall back to the app's saved key with  ", style=p.dim)
+            t.append("/deepai-api-setup clear\n", style=f"bold {p.primary}")
+            t.append("  stored in    ", style=p.dim)
+            t.append("~/.zimzilla/deepai/source  (mode 600)\n", style=p.dim)
+            self.query_one(ChatPane).write_block(t)
+            return
+
+        if word.lower() in ("clear", "reset"):
+            from . import sources as sources_mod
+            profile = sources_mod.ZIMZILLA_HOME / "deepai" / "source"
+            try:
+                profile.unlink()
+            except FileNotFoundError:
+                self._sys_line("no personal key to clear", warn=True)
+                return
+            except OSError as e:
+                self._sys_line(f"could not remove the personal key: {e}",
+                               warn=True)
+                return
+            self._sys_line(
+                "removed ~/.zimzilla/deepai/source — the DeepAI Code app's "
+                "saved key is used instead", ok=True)
+            if sources_mod.active_key(self.cfg.base_url) == "deepai":
+                self.cfg.extra_headers = {
+                    "api-key": deepcode_mod.load_api_key(),
+                    "X-DeepAI-Code-Theos": "7",
+                    "X-DeepAI-Code-Instance": "00" * 16,
+                    "X-DeepAI-Code-Machine": deepcode_mod.load_machine_id(),
+                }
+                self.agent._client = None
+                self._sys_line("applied to this session — no restart", ok=True)
+            else:
+                self._sys_line("switch to it with /zim-zimthegoat")
+            return
+
+        try:
+            path = deepcode_mod.save_key(word)
+        except OSError as e:
+            self._sys_line(f"could not save the DeepAI key: {e}", warn=True)
+            return
+        self._sys_line(
+            f"DeepAI key saved (…{word[-4:]}) to {path} (mode 600)", ok=True)
+        if sources_mod.active_key(self.cfg.base_url) == "deepai":
+            self.cfg.extra_headers = {
+                "api-key": word,
+                "X-DeepAI-Code-Theos": "7",
+                "X-DeepAI-Code-Instance": "00" * 16,
+                "X-DeepAI-Code-Machine": deepcode_mod.load_machine_id(),
+            }
+            self.agent._client = None
+            self._sys_line("applied to this session — no restart", ok=True)
+        else:
+            self._sys_line("switch to it with /zim-zimthegoat")
+
     def _cmd_gateway_key(self, kind: str, args) -> None:
         """/openrouter-api-setup and /unorouter-api-setup [key] — store the key.
 
@@ -6944,7 +7061,7 @@ class ZimZillaApp(App):
                  "aihubmix",
                  "beatapi", "coarena",
                  "moonmath", "iteracompute", "infronai", "nvidia", "wandb",
-                 "inferx", "inferbase", "flex", "gemini"}
+                 "inferx", "inferbase", "flex", "gemini", "deepai"}
         if key not in known:
             self._sys_line(
                 f"unknown upstream: {key} — try one of "
@@ -7098,6 +7215,12 @@ class ZimZillaApp(App):
             if creds is None:
                 return None, "no key — set one with /gemini-api-setup <key>"
             return gm_mod.usable_free_models(creds[0])
+        if kind == "deepai":
+            # Keyless for browsing: the catalog is public, and the key is sent
+            # when there is one so the listing matches what this session would
+            # be charged (nothing — free models are unmetered).
+            creds = deepcode_mod.load_credentials()
+            return deepcode_mod.chat_models(creds[0] if creds else "")
         if kind == "flex":
             # No key and no fetch: the playground publishes no catalog, so this
             # is the module's declared list. `usable_free_models` filters it to
@@ -7147,7 +7270,7 @@ class ZimZillaApp(App):
                  "moonmath": "ZRO (MOONMATH.AI)",
                  "coarena": "COARENA",
                  "tokenharbour": "TOKENHARBOUR", "logfare": "LOGFARE",
-                 "antseed": "ANTSEED"}.get(kind, kind.upper())
+                 "antseed": "ANTSEED", "deepai": "DEEPAI CODE"}.get(kind, kind.upper())
         t = Text()
         t.append(f"  {label} — FREE MODELS\n\n", style=f"bold {p.accent}")
         if not models:

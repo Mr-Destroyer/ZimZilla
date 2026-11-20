@@ -302,11 +302,21 @@ LOGFARE_DIRECT = DirectRoute(
 GEMINI_DIRECT = DirectRoute(
     base_url="https://generativelanguage.googleapis.com/v1beta/openai")
 
+#: DeepAI Code's route, declared rather than read from a proxy config.
+#:
+#: ``https://api.deepai.org`` serves Chat Completions at
+#: ``/deepai_code/chat/completions`` itself, so there is no LiteLLM hop and
+#: nothing to start. The alias map is empty: the catalog's ids are already the
+#: ids that go on the wire (``deepai/glm-5.3-flash``, ``deepai/deepseek-v4.1-flash``,
+#: …). See :mod:`zimzilla.deepcode`.
+DEEPAI_DIRECT = DirectRoute(base_url="https://api.deepai.org")
+
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
 #: where they go.
 DIRECT_ONLY: frozenset[str] = frozenset({"logfare", "tokenjuice", "nvidia", "wandb",
-                                         "inferx", "inferbase", "flex", "gemini"})
+                                         "inferx", "inferbase", "flex", "gemini",
+                                         "deepai"})
 
 #: Declared routes for the direct-only sources, keyed like ``MODELS_BY_KEY``.
 DECLARED_ROUTES: dict[str, DirectRoute] = {
@@ -318,6 +328,7 @@ DECLARED_ROUTES: dict[str, DirectRoute] = {
     "inferbase": INFERBASE_DIRECT,
     "flex": FLEX_DIRECT,
     "gemini": GEMINI_DIRECT,
+    "deepai": DEEPAI_DIRECT,
 }
 
 
@@ -673,6 +684,38 @@ COARENA_MODELS: tuple[str, ...] = (
     "qwen3-8-2-4t-a95b",
 )
 
+#: DeepAI Code's declared fallback — the free models verified working on this
+#: build, plus the paid ones observed in the catalog. The live fetch (see
+#: ``deepcode.py``) replaces it as soon as the switch or a warm-up runs.
+DEEPAI_MODELS: tuple[str, ...] = (
+    "deepai/glm-5.3-flash",
+    "deepai/deepseek-v4.1-flash",
+    "deepai/mimo-2.6-flash",
+    "deepai/qwen-3.8-flash",
+    "deepai/minimax-m3.1-flash",
+    "deepai/muse-ember",
+    "deepai/solar-mini-4",
+    "deepai/gpt-6-luna",
+    "deepai/mimo-2.6-pro",
+    "deepai/glyph-cluster",
+    "deepai/deepai-cyber",
+    "deepai/minimax-m3",
+    "deepai/gpt-6.1-sol",
+    "deepai/gemini-4-argon",
+    "deepai/glm-5.3",
+    "deepai/kimi-k3",
+    "deepai/kimi-k3.1-pro",
+    "deepai/gpt-6.1-terra",
+    "deepai/muse-spark-1.3",
+    "deepai/gemini-4-hydrogen",
+    "deepai/gemini-4-carbon",
+    "deepai/claude-sonnet-5-5",
+    "deepai/claude-opus-5-5",
+    "deepai/muse-wonder",
+    "deepai/qwen-3.8-max-prime",
+    "deepai/claude-fable-5-2",
+)
+
 MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "logfare": LOGFARE_MODELS,
     "tokenjuice": TOKENJUICE_MODELS,
@@ -685,6 +728,7 @@ MODELS_BY_KEY: dict[str, tuple[str, ...]] = {
     "inferx": INFERX_MODELS,
     "inferbase": INFERBASE_MODELS,
     "flex": FLEX_MODELS,
+    "deepai": DEEPAI_MODELS,
 }
 
 
@@ -806,6 +850,13 @@ def models_for(base_url: str) -> tuple[str, ...] | None:
     if key in DIRECT_ONLY:
         # Declared, not fetched — but a switch probes the Models route, and what
         # the upstream actually answered is better than the declared fallback.
+        # DeepAI Code's Models route is at /deepai_code/models, not /v1/models,
+        # so the generic probe cache keyed on base_url would never hit it — the
+        # deepai module's own cache is the source of truth here.
+        if key == "deepai":
+            from . import deepcode as deepai_mod
+            cached = deepai_mod.cached_ids()
+            return tuple(cached) if cached else (MODELS_BY_KEY.get(key) or None)
         from . import openai_compat as oa_mod
         probed = oa_mod.cached_ids(DECLARED_ROUTES[key].base_url)
         return tuple(probed) if probed else (MODELS_BY_KEY.get(key) or None)
@@ -1418,6 +1469,12 @@ def discover() -> dict[str, Source]:
     gemini = _build("gemini", "Google Gemini", 0, "gemini-flash-lite-latest")
     if gemini:
         found["gemini"] = gemini
+    # And DeepAI Code: direct-only, and its catalog is fetched from the upstream
+    # itself. The profile is the whole install — absent until /deepai-api-setup
+    # has run, which is the honest state: a route with no key cannot answer.
+    deepai = _build("deepai", "DeepAI Code", 0, "deepai/glm-5.3-flash")
+    if deepai:
+        found["deepai"] = deepai
     return found
 
 
@@ -1653,6 +1710,7 @@ def active_key(base_url: str) -> str | None:
     from . import numes as nm_mod
     from . import crownllm as cl_mod
     from . import kenari as kn_mod
+    from . import deepcode as deepai_mod
     from . import wandb as wb_mod
     if th_mod.is_tokenharbour(base_url):
         return "tokenharbour"
@@ -1726,6 +1784,11 @@ def active_key(base_url: str) -> str | None:
     # profile has no file for discover() to find.
     if gm_mod.is_gemini(base_url):
         return "gemini"
+    # DeepAI Code is reached directly and identified by host, for the same
+    # reason: there is no port to match on, and a session launched from an
+    # environment profile has no file for discover() to find.
+    if deepai_mod.is_deepai(base_url):
+        return "deepai"
     # Checked before the port match, and by port rather than by name: the buyer
     # hands out a plain http://localhost:8377 with no "antseed" in it, and the
     # regex below would otherwise find port 8377, miss it in source_for_port()
