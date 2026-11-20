@@ -74,6 +74,13 @@ CACHE_TTL = 300.0
 #: The window to plan against when neither the catalog nor the table knows.
 DEFAULT_CONTEXT = 320_000
 
+#: The model recorded in the profile when a key is saved without naming one.
+#: This is the *harness* name — the first free lane of the catalog — so the
+#: alias map in ``sources`` strips the ``deepai/`` prefix on the way upstream,
+#: the same id ``default_free_model`` returns and ``sources.DEEPAI_MODELS``
+#: opens with. Every sibling source module defines this; ``save_key`` reads it.
+DEFAULT_MODEL = "deepai/glm-5.3-flash"
+
 SECRETS_PATH = Path(
     os.path.expanduser("~/.deepai-code/userdata/secrets/deepai-account.bin")
 )
@@ -456,7 +463,7 @@ def model_for(model: str, models: list[Model] | None) -> Model | None:
 
 
 def default_free_model() -> str:
-    return "deepai/glm-5.3-flash"
+    return DEFAULT_MODEL
 
 
 def explain_error(status: int, body: str) -> str:

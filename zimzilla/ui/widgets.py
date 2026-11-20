@@ -12,6 +12,7 @@ from pathlib import Path
 from rich.cells import cell_len, get_character_cell_size
 from rich.text import Text
 from textual import events, work
+from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.events import Click, MouseDown, MouseMove, MouseUp

@@ -424,10 +424,15 @@ class SuiteScreen(ModalScreen):
                     for f in results:
                         log.write(f"  {f.status}  {f.url}\n")
                 self.app.call_from_thread(paint)
-            except Exception as e:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # The message is built here, not inside the lambda: the
+                # callback runs after this except block, where `exc` has been
+                # unbound, and a closure over it would raise NameError in the
+                # UI thread — hiding the original failure behind a new one.
+                message = f"  error: {exc}\n"
                 self.app.call_from_thread(
-                    lambda: self.query_one("#intruder-response", RichLog).write(
-                        f"  error: {e}\n"))
+                    lambda msg=message: self.query_one(
+                        "#intruder-response", RichLog).write(msg))
         run()
 
     def _run_crawler(self) -> None:
