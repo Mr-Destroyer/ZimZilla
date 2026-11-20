@@ -3908,6 +3908,13 @@ class ZimZillaApp(App):
                 warn=True,
             )
             return
+        # DeepAI Code's upstream answers to the prefix-stripped id
+        # (``mimo-2.6-flash``, not ``deepai/mimo-2.6-flash``), so translate
+        # through the route's alias map before it goes on the wire.
+        if active == "deepai":
+            route = sources_mod.direct_route(
+                sources_mod.discover().get("deepai"))
+            name = route.upstream_model(name) if route else name
         self.cfg.model = name
         self.agent.set_model(name)
         self.query_one(HeaderBar).set_model(self.cfg.display_model)
@@ -5320,7 +5327,10 @@ class ZimZillaApp(App):
                 return
             chosen = free[0].slug
 
-        self.cfg.base_url = "https://api.deepai.org"
+        # The chat endpoint is /deepai_code/chat/completions, not /v1/chat/
+        # completions — set the full endpoint as base_url so
+        # chat_completions_url returns it untouched.
+        self.cfg.base_url = "https://api.deepai.org/deepai_code/chat/completions"
         self.cfg.protocol = "openai"
         self.cfg.auth_token = None
         self.cfg.api_key = None
@@ -5330,10 +5340,13 @@ class ZimZillaApp(App):
             "X-DeepAI-Code-Instance": "00" * 16,
             "X-DeepAI-Code-Machine": machine_id,
         }
-        self.cfg.model = chosen
+        # Translate through the route's alias map: the harness names models
+        # ``deepai/mimo-2.6-flash`` but the upstream answers to ``mimo-2.6-flash``.
+        route = sources_mod.direct_route(sources_mod.discover().get("deepai"))
+        self.cfg.model = route.upstream_model(chosen) if route else chosen
         self.agent._client = None
         self._refresh_after_source_change(
-            "DeepAI Code", f"direct · {chosen}")
+            "DeepAI Code", f"direct · {self.cfg.model}")
         self._sys_line(
             "use /model to switch among the free models, /models deepcode "
             "to see the catalog")

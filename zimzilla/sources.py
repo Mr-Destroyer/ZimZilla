@@ -306,10 +306,41 @@ GEMINI_DIRECT = DirectRoute(
 #:
 #: ``https://api.deepai.org`` serves Chat Completions at
 #: ``/deepai_code/chat/completions`` itself, so there is no LiteLLM hop and
-#: nothing to start. The alias map is empty: the catalog's ids are already the
-#: ids that go on the wire (``deepai/glm-5.3-flash``, ``deepai/deepseek-v4.1-flash``,
-#: …). See :mod:`zimzilla.deepcode`.
-DEEPAI_DIRECT = DirectRoute(base_url="https://api.deepai.org")
+#: nothing to start. The alias map strips the ``deepai/`` prefix: the harness
+#: names models ``deepai/glm-5.3-flash`` but the upstream answers to
+#: ``glm-5.3-flash``. See :mod:`zimzilla.deepcode`.
+DEEPAI_DIRECT = DirectRoute(
+    base_url="https://api.deepai.org",
+    models={
+        "deepai/glm-5.3-flash": "glm-5.3-flash",
+        "deepai/deepseek-v4.1-flash": "deepseek-v4.1-flash",
+        "deepai/mimo-2.6-flash": "mimo-2.6-flash",
+        "deepai/qwen-3.8-flash": "qwen-3.8-flash",
+        "deepai/minimax-m3.1-flash": "minimax-m3.1-flash",
+        "deepai/muse-ember": "muse-ember",
+        "deepai/solar-mini-4": "solar-mini-4",
+        "deepai/gpt-6-luna": "gpt-6-luna",
+        "deepai/mimo-2.6-pro": "mimo-2.6-pro",
+        "deepai/glyph-cluster": "glyph-cluster",
+        "deepai/deepai-cyber": "deepai-cyber",
+        "deepai/minimax-m3": "minimax-m3",
+        "deepai/gpt-6.1-sol": "gpt-6.1-sol",
+        "deepai/gemini-4-argon": "gemini-4-argon",
+        "deepai/glm-5.3": "glm-5.3",
+        "deepai/kimi-k3": "kimi-k3",
+        "deepai/kimi-k3.1-pro": "kimi-k3.1-pro",
+        "deepai/gpt-6.1-terra": "gpt-6.1-terra",
+        "deepai/muse-spark-1.3": "muse-spark-1.3",
+        "deepai/gemini-4-hydrogen": "gemini-4-hydrogen",
+        "deepai/gemini-4-carbon": "gemini-4-carbon",
+        "deepai/claude-sonnet-5-5": "claude-sonnet-5-5",
+        "deepai/claude-opus-5-5": "claude-opus-5-5",
+        "deepai/muse-wonder": "muse-wonder",
+        "deepai/qwen-3.8-max-prime": "qwen-3.8-max-prime",
+        "deepai/claude-fable-5-2": "claude-fable-5-2",
+        "deepai/gpt-6-astra": "gpt-6-astra",
+    },
+)
 
 #: Sources with no proxy at all. Their credential profile is the only file that
 #: has to exist; service and config are absent by design, and ``direct`` says
