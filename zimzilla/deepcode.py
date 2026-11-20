@@ -378,6 +378,14 @@ def fetch_models(api_key: str = "", *, timeout: float = 20.0,
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             return None, "key rejected (401/403) — check it with /deepai-api-setup"
+        # The /deepai_code/models route 404s on this build — fall back to the
+        # catalog the app itself wrote to disk, which is the same list.
+        if e.code == 404:
+            cached = load_cached_models()
+            if cached:
+                models = _parse_models({"data": cached})
+                _CACHE[api_key] = (models, time.monotonic())
+                return models, ""
         return None, f"HTTP {e.code} from api.deepai.org"
     except (urllib.error.URLError, OSError, ValueError) as e:
         return None, f"could not reach api.deepai.org: {e}"
