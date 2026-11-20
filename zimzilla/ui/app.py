@@ -35,7 +35,7 @@ from .. import beatapi as bp_mod
 from .. import browser as browser_mod
 from .. import coarena as co_mod
 from .. import connect as connect_mod
-from .. import claude as claude_mod
+
 from .. import crack as crack_mod
 from .. import deepcode as deepcode_mod
 from .. import discord_rpc as discord_mod
@@ -925,7 +925,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-zimthegoat [model]", "switch upstream to DeepAI Code's free models (direct, unmetered)"),
         ("/deepai-api-setup <key|clear>", "store your DeepAI Code api_key"),
         ("/deepai-models", "the live catalog — free models are unmetered"),
-        ("/zim-claude [-- <claude args>]", "open Claude Code using the active upstream's credentials (active model forwarded as --model)"),
+
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
         ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
@@ -2951,7 +2951,7 @@ class ZimZillaApp(App):
         "deepai-api-setup", "deepai-models",
         # Claude Code hands the terminal to a child process and resumes when it
         # exits — no turn is started on the agent.
-        "zim-claude",
+
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
         # /<source>-api-setup; it starts no turn.
@@ -3067,7 +3067,7 @@ class ZimZillaApp(App):
             "reverse-engineer": lambda a: self._cmd_reverse_engineer(a),
             "reverse-engineer-tools": lambda a: self._cmd_reverse_engineer_tools(a),
             "zim-opencode": lambda a: self._cmd_zim_opencode(a),
-            "zim-claude": lambda a: self._cmd_zim_claude(a),
+
             "zim-logfare": lambda a: self._cmd_zim_source("logfare", a),
             "zim-tokenjuice": lambda a: self._cmd_zim_source("tokenjuice", a),
             # Two spellings, one handler. The shipped name carries the "e" its
@@ -7997,97 +7997,6 @@ class ZimZillaApp(App):
             self._sys_line("refreshing the proxy pool…")
         self._zim_opencode_worker(passthrough, model, refresh)
 
-    # ---- /zim-claude --------------------------------------------------------
-    @work(exclusive=True, thread=True)
-    def _zim_claude_worker(self, args: list[str]) -> None:
-        """Export the active upstream's credentials, then hand the terminal to claude.
-
-        Runs on a worker thread so the credential read and the binary check do
-        not block the UI. The terminal hand-off itself happens on the UI thread
-        through :meth:`_zim_claude_launch`.
-        """
-        binary = claude_mod.find_binary()
-        if binary is None:
-            self.call_from_thread(self._sys_line,
-                                  "claude not found - install it please !", True, False)
-            self.call_from_thread(self._sys_line,
-                                  "  npm install -g @anthropic-ai/claude-code", warn=True)
-            return
-
-        active = sources_mod.active_key(self.cfg.base_url)
-        if active is None:
-            self.call_from_thread(
-                self._sys_line,
-                "this endpoint is not a known upstream — /zim-source lists them",
-                warn=True)
-            return
-
-        # DeepAI Code's custom headers cannot be exported to the Claude CLI,
-        # which only understands bearer auth. Refuse before suspending the TUI
-        # so the operator is not left staring at a session that will 401.
-        src = sources_mod.discover().get(active)
-        if src is not None and src.is_direct_only:
-            route = sources_mod.direct_route(src)
-            if route is not None and active == "deepai":
-                self.call_from_thread(
-                    self._sys_line,
-                    "DeepAI Code uses custom auth headers the Claude CLI does "
-                    "not understand — /zim-claude cannot drive it",
-                    warn=True)
-                return
-
-        self.call_from_thread(self._sys_line,
-                              f"opening claude on {active} — quit it to come back", ok=True)
-
-        # Build the environment the child will inherit, then launch on the UI
-        # thread so suspend/resume happens there.
-        self.call_from_thread(self._zim_claude_launch, binary, args,
-                              self.cfg.model,
-                              self.cfg.base_url, self.cfg.auth_token,
-                              self.cfg.api_key, self.cfg.extra_headers)
-
-    def _zim_claude_launch(self, binary: str, args: list[str],
-                           model: str | None,
-                           base_url: str | None,
-                           auth_token: str | None, api_key: str | None,
-                           extra_headers: dict[str, str] | None) -> None:
-        """Suspend the TUI, run claude in the freed terminal, then resume."""
-        env_ok = claude_mod.child_env(base_url, auth_token, api_key,
-                                      extra_headers)
-        if env_ok is None:
-            self._sys_line(
-                "this source's auth shape cannot be exported to claude",
-                warn=True)
-            return
-
-        try:
-            with self.suspend():
-                rc = claude_mod.run(binary, args=args, model=model,
-                                    cwd=str(self.cfg.workdir),
-                                    base_url=base_url, auth_token=auth_token,
-                                    api_key=api_key,
-                                    extra_headers=extra_headers)
-        except Exception as e:  # noqa: BLE001
-            self._sys_line(f"claude could not start: {type(e).__name__}: {e}", warn=True)
-            return
-        if rc != 0:
-            self._sys_line(f"claude exited with status {rc}", warn=True)
-        else:
-            self._sys_line("back in zimzilla", ok=True)
-        self.refresh(layout=True)
-
-    def _cmd_zim_claude(self, args: list[str]) -> None:
-        """/zim-claude [-- <claude args>]
-
-        Opens Claude Code inside ZimZilla, using the active upstream's
-        credentials. The session is suspended while claude runs, and ZimZilla
-        resumes when you quit it.
-
-        The active ZimZilla model is forwarded as ``--model`` so the same
-        model loads in Claude Code. Anything you type after that goes straight
-        to claude untouched and can override it.
-        """
-        self._zim_claude_worker(args)
 
     def _cmd_load(self, args) -> None:
         p = self.palette

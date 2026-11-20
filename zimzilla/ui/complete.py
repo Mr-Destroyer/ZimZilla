@@ -71,7 +71,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-zimthegoat", "switch upstream to DeepAI Code's free models (direct, unmetered)"),
     ("/deepai-api-setup", "store your DeepAI Code api_key"),
     ("/deepai-models", "the live catalog — free models are unmetered"),
-    ("/zim-claude", "open Claude Code using the active upstream's credentials"),
+
     ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
     ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
     ("/zim-flex", "switch upstream to the Flex playground (direct, no key, chat only)"),
