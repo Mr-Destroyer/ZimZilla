@@ -921,6 +921,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-nvidia", "switch upstream to NVIDIA NIM (direct, free dev tier)"),
         ("/zim-wandb", "switch upstream to wandb.ai inference (direct, free)"),
         ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
+        ("/zim-zimthegoat [model]", "switch upstream to DeepAI Code's free models (direct, unmetered)"),
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
         ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
@@ -2940,6 +2941,9 @@ class ZimZillaApp(App):
         # rebuild, and neither starts a turn.
         "flex-models", "zim-flex",
         "zim-antseed", "antseed-models",
+        # DeepAI Code's free models: switching source and landing on a model is
+        # a config write and a client rebuild — no turn is started.
+        "zim-zimthegoat",
         "logfare-api-setup", "logfare-models",
         # The Shodan key is a mode-600 write and a local read, like every other
         # /<source>-api-setup; it starts no turn.
@@ -3146,6 +3150,7 @@ class ZimZillaApp(App):
             "flex-models": lambda a: self._cmd_models(["flex"]),
             "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "zim-wanbd": lambda a: self._cmd_zim_wanbd(a),
+            "zim-zimthegoat": lambda a: self._cmd_zim_zimthegoat(a),
             "protocol": lambda a: self._cmd_protocol(a),
             "openai-endpoint": lambda a: self._cmd_openai_endpoint(a),
             "antseed-models": lambda a: self._cmd_models(["antseed"]),
@@ -5231,6 +5236,73 @@ class ZimZillaApp(App):
             ok=True)
         self._sys_line(
             "use /wandb-models to see the catalog, /model to switch models")
+
+    def _cmd_zim_zimthegoat(self, args) -> None:
+        """/zim-zimthegoat — talk DeepAI Code's free models directly.
+
+        Switches the session to https://api.deepai.org/deepai_code and lands on
+        a free (unmetered) model. The api_key and machine-id fingerprint are
+        read from the DeepAI Code app's saved credentials, so no sign-in is
+        needed here — sign in once in the app, then this command just works.
+
+        Usage: /zim-zimthegoat [model]
+          with no model: switch to deepcode and land on the first free model
+          with a model name: switch to deepcode and land on that model
+        """
+        api_key = deepcode_mod.load_api_key()
+        if not api_key:
+            self._sys_line(
+                "no DeepAI api_key found — sign in to DeepAI Code once, or set "
+                "DEEPAI_API_KEY", warn=True)
+            return
+
+        machine_id = deepcode_mod.load_machine_id()
+        if not machine_id:
+            self._sys_line(
+                "could not read the machine id — /etc/machine-id is unreadable",
+                warn=True)
+            return
+
+        # Pick the model: an explicit one, else the first free model.
+        chosen = None
+        if args:
+            wanted = str(args[0]).strip()
+            # Accept both "deepai/glm-5.3-flash" and "glm-5.3-flash".
+            if not wanted.startswith("deepai/"):
+                wanted = "deepai/" + wanted
+            for m in deepcode_mod.all_models():
+                if m.slug == wanted:
+                    chosen = wanted
+                    break
+            if chosen is None:
+                self._sys_line(
+                    f"unknown deepcode model {wanted!r} — "
+                    f"use /models deepcode to see the catalog", warn=True)
+                return
+        else:
+            free = deepcode_mod.free_models()
+            if not free:
+                self._sys_line("no free deepcode models known", warn=True)
+                return
+            chosen = free[0].slug
+
+        self.cfg.base_url = "https://api.deepai.org"
+        self.cfg.protocol = "openai"
+        self.cfg.auth_token = None
+        self.cfg.api_key = None
+        self.cfg.extra_headers = {
+            "api-key": api_key,
+            "X-DeepAI-Code-Theos": "7",
+            "X-DeepAI-Code-Instance": "00" * 16,
+            "X-DeepAI-Code-Machine": machine_id,
+        }
+        self.cfg.model = chosen
+        self.agent._client = None
+        self._refresh_after_source_change(
+            "DeepAI Code", f"direct · {chosen}")
+        self._sys_line(
+            "use /model to switch among the free models, /models deepcode "
+            "to see the catalog")
 
     def _cmd_zim_wanbd(self, args) -> None:
         """/zim-wanbd — talk wandb.ai inference with your own API key.

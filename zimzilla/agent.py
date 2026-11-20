@@ -860,6 +860,7 @@ class Agent:
                     api_key=self.cfg.auth_token or self.cfg.api_key,
                     timeout=self.cfg.request_timeout,
                     stream=self.cfg.openai_stream,
+                    extra_headers=self.cfg.extra_headers,
                 )
                 return self._client
 

@@ -68,6 +68,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/zim-wandb", "switch upstream to wandb.ai inference (direct, free)"),
     ("/zim-deepseek", "talk DeepSeek on wandb.ai inference — operator key"),
     ("/zim-wanbd", "talk wandb.ai inference — your own key"),
+    ("/zim-zimthegoat", "switch upstream to DeepAI Code's free models (direct, unmetered)"),
     ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
     ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
     ("/zim-flex", "switch upstream to the Flex playground (direct, no key, chat only)"),

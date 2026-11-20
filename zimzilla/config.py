@@ -270,6 +270,11 @@ class Config:
     openai_stream: bool = True
     workdir: Path = field(default_factory=Path.cwd)
     unsafe: bool = False
+    #: Extra headers sent on every request to this endpoint, in addition to the
+    #: standard ones. DeepAI Code needs ``api-key`` and ``X-DeepAI-Code-*``
+    #: headers rather than ``Authorization: Bearer``, so this is how a direct
+    #: source carries its own auth shape without changing the transport.
+    extra_headers: dict[str, str] = field(default_factory=dict)
     # Target scope. `allow_path` is the operator's declared, authorised targets
     # and its PRESENCE arms the session (tools run unattended); `deny_path` is
     # the never-touch list. See zimzilla/scope.py.
