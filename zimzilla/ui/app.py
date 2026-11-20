@@ -925,7 +925,7 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/zim-zimthegoat [model]", "switch upstream to DeepAI Code's free models (direct, unmetered)"),
         ("/deepai-api-setup <key|clear>", "store your DeepAI Code api_key"),
         ("/deepai-models", "the live catalog — free models are unmetered"),
-        ("/zim-claude [--model <id>]", "open Claude Code using the active upstream's credentials"),
+        ("/zim-claude [-- <claude args>]", "open Claude Code using the active upstream's credentials"),
         ("/zim-wanbd", "talk wandb.ai inference — your own key"),
         ("/zim-inferx", "switch upstream to InferX (direct, tenant key)"),
         ("/zim-inferbase", "switch upstream to Inferbase (direct, free price band)"),
@@ -7999,7 +7999,7 @@ class ZimZillaApp(App):
 
     # ---- /zim-claude --------------------------------------------------------
     @work(exclusive=True, thread=True)
-    def _zim_claude_worker(self, args: list[str], model: str | None) -> None:
+    def _zim_claude_worker(self, args: list[str]) -> None:
         """Export the active upstream's credentials, then hand the terminal to claude.
 
         Runs on a worker thread so the credential read and the binary check do
@@ -8041,12 +8041,12 @@ class ZimZillaApp(App):
 
         # Build the environment the child will inherit, then launch on the UI
         # thread so suspend/resume happens there.
-        self.call_from_thread(self._zim_claude_launch, binary, args, model,
+        self.call_from_thread(self._zim_claude_launch, binary, args,
                               self.cfg.base_url, self.cfg.auth_token,
                               self.cfg.api_key, self.cfg.extra_headers)
 
     def _zim_claude_launch(self, binary: str, args: list[str],
-                           model: str | None, base_url: str | None,
+                           base_url: str | None,
                            auth_token: str | None, api_key: str | None,
                            extra_headers: dict[str, str] | None) -> None:
         """Suspend the TUI, run claude in the freed terminal, then resume."""
@@ -8060,7 +8060,7 @@ class ZimZillaApp(App):
 
         try:
             with self.suspend():
-                rc = claude_mod.run(binary, args=args, model=model,
+                rc = claude_mod.run(binary, args=args,
                                     cwd=str(self.cfg.workdir),
                                     base_url=base_url, auth_token=auth_token,
                                     api_key=api_key,
@@ -8075,32 +8075,16 @@ class ZimZillaApp(App):
         self.refresh(layout=True)
 
     def _cmd_zim_claude(self, args: list[str]) -> None:
-        """/zim-claude [--model <id>] [-- <claude args>]
+        """/zim-claude [-- <claude args>]
 
         Opens Claude Code inside ZimZilla, using the active upstream's
         credentials. The session is suspended while claude runs, and ZimZilla
         resumes when you quit it.
 
-        The model pinned with ``--model`` is passed to claude; otherwise it
-        uses whatever the active source named. Extra args after ``--`` go to
-        claude untouched.
+        Everything you type goes straight to claude — use ``--model <id>`` to
+        pin a model, or args after ``--`` for claude's own flags.
         """
-        model = None
-        passthrough: list[str] = []
-        i = 0
-        while i < len(args):
-            a = args[i]
-            if a == "--model" and i + 1 < len(args):
-                model = args[i + 1]
-                i += 2
-                continue
-            if a == "--":
-                passthrough.extend(args[i + 1:])
-                break
-            passthrough.append(a)
-            i += 1
-
-        self._zim_claude_worker(passthrough, model)
+        self._zim_claude_worker(args, None)
 
     def _cmd_load(self, args) -> None:
         p = self.palette

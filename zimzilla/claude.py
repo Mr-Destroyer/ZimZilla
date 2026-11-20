@@ -82,23 +82,21 @@ def child_env(base_url: str | None, auth_token: str | None,
 
 
 def run(binary: str, args: list[str] | None = None,
-        model: str | None = None, cwd: str | None = None,
+        cwd: str | None = None,
         base_url: str | None = None, auth_token: str | None = None,
         api_key: str | None = None,
         extra_headers: dict[str, str] | None = None) -> int:
     """Run claude, returning its exit status.
 
     The child inherits the current environment with the upstream's credentials
-    layered on top. With no proxy concerns here (unlike opencode), the env is
-    always passed.
+    layered on top. All args go straight to claude untouched. With no proxy
+    concerns here (unlike opencode), the env is always passed.
     """
     env = child_env(base_url, auth_token, api_key, extra_headers)
     if env is None:
         return 126
 
     argv = [binary]
-    if model:
-        argv.extend(["--model", model])
     if args:
         argv.extend(args)
     try:
