@@ -62,7 +62,14 @@ from typing import Optional
 
 DEFAULT_API_ORIGIN = "https://api.deepai.org"
 CHAT_PATH = "/deepai_code/chat/completions"
-MODELS_PATH = "/deepai_code/models"
+#: The catalog route on the API root. It has its own name because the disk
+#: cache below is a ``Path`` and was *also* called ``MODELS_PATH`` in the first
+#: cut: the second definition won, ``f-string`` happily stringified the Path,
+#: and ``fetch_models`` requested
+#: ``https://api.deepai.org/home/<user>/.deepai-code/.../models.json`` — a 404
+#: on every fetch, on a host that had never run the DeepAI Code app. Probing
+#: with the operator's key confirmed the real route answers 200.
+MODELS_ROUTE = "/deepai_code/models"
 
 #: The upstream API root. No proxy sits in front of it: this is the address the
 #: session itself is pointed at.
@@ -84,7 +91,8 @@ DEFAULT_MODEL = "deepai/glm-5.3-flash"
 SECRETS_PATH = Path(
     os.path.expanduser("~/.deepai-code/userdata/secrets/deepai-account.bin")
 )
-MODELS_PATH = Path(
+#: The catalog the DeepAI Code *app* wrote to disk, when it is installed.
+CACHE_FILE = Path(
     os.path.expanduser("~/.deepai-code/userdata/deepai/pi/deepai/models.json")
 )
 MACHINE_ID_PATHS = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
@@ -136,17 +144,33 @@ class DeepAIModel:
     theos_per_request: Optional[str]
 
 
-def load_api_key() -> Optional[str]:
-    """Read the api_key the DeepAI Code app saved after sign-in."""
-    env_key = os.environ.get("DEEPAI_API_KEY")
-    if env_key:
-        return env_key
+def _app_secret_key() -> Optional[str]:
+    """The key the DeepAI Code app saved after sign-in, if it is installed.
+
+    Split out because ``load_credentials`` needs the secret *without* calling
+    ``load_api_key``: the first cut had each call the other, so a host with no
+    profile and no ``DEEPAI_API_KEY`` recursed until the interpreter gave up.
+    """
     try:
         with open(SECRETS_PATH, "r") as f:
             data = json.load(f)
         return data.get("apiKey")
     except Exception:
         return None
+
+
+def load_api_key() -> Optional[str]:
+    """The api_key to send, in the same order ``load_credentials`` resolves.
+
+    ZimZilla's own profile first — that is what ``/deepai-api-setup`` writes —
+    then ``DEEPAI_API_KEY`` in the environment, then the DeepAI Code app's
+    saved secret. The first cut read only the last two, so on a host without
+    the app installed the key the operator had just saved was invisible to
+    ``/zim-zimthegoat``, which answered "no DeepAI api_key found" over a key
+    sitting in ``~/.zimzilla/deepai/source``.
+    """
+    creds = load_credentials()
+    return creds[0] if creds else None
 
 
 def load_machine_id() -> Optional[str]:
@@ -168,7 +192,7 @@ def load_machine_id() -> Optional[str]:
 def load_cached_models() -> list[dict]:
     """Return the model list the app wrote to models.json (if present)."""
     try:
-        with open(MODELS_PATH, "r") as f:
+        with open(CACHE_FILE, "r") as f:
             data = json.load(f)
         return data.get("providers", {}).get("deepai", {}).get("models", [])
     except Exception:
@@ -275,6 +299,12 @@ def load_credentials() -> tuple[str, str, str] | None:
         text = profile.read_text(encoding="utf-8")
     except OSError:
         text = ""
+    # The whole file is scanned before anything returns: the profile is
+    # written key, origin, model — reading the key on its line would drop the
+    # model that ``/deepai-api-setup`` saved with it, and nothing could then
+    # land on it.
+    found_key = ""
+    found_model = ""
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("export "):
@@ -286,14 +316,18 @@ def load_credentials() -> tuple[str, str, str] | None:
         name, value = name.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        if name == "DEEPAI_API_KEY" and value:
-            return value, "", str(profile)
+        if name == "DEEPAI_API_KEY" and value and not found_key:
+            found_key = value
+        elif name == "DEEPAI_MODEL" and value and not found_model:
+            found_model = value
+    if found_key:
+        return found_key, found_model, str(profile)
 
     env_key = os.environ.get("DEEPAI_API_KEY")
     if env_key:
-        return env_key, "", "environment"
+        return env_key, os.environ.get("DEEPAI_MODEL", ""), "environment"
 
-    app_key = load_api_key()
+    app_key = _app_secret_key()
     if app_key:
         return app_key, "", "DeepAI Code app"
 
@@ -337,7 +371,11 @@ _CACHE: dict[str, tuple[list[Model], float]] = {}
 
 def _parse_models(payload: dict) -> list[Model]:
     out: list[Model] = []
-    for entry in payload.get("data") or []:
+    # The live route answers ``{"models": [...]}`` while the app's cache — and
+    # the 404 fallback's call site — is wrapped as ``{"data": [...]}``. Reading
+    # only ``data`` turned every 200 into an empty catalog.
+    entries = payload.get("models") or payload.get("data") or []
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         mid = str(entry.get("id") or "").strip()
@@ -359,6 +397,23 @@ def _parse_models(payload: dict) -> list[Model]:
     return out
 
 
+def declared_models() -> list[Model]:
+    """The reverse-engineered table as catalog entries — no network, no app.
+
+    Last resort when the live route cannot be reached *and* the DeepAI Code
+    app is not installed here: the free lanes are the ones verified working on
+    this build, so the picker still offers a list that answers rather than
+    refusing on a host that has the key but not the app. ``context_window`` is
+    ``DEFAULT_CONTEXT`` because neither source knows the real one.
+    """
+    out: list[Model] = []
+    for table, free in ((FREE_MODELS, True), (PAID_MODELS, False)):
+        for mid, name in table.items():
+            out.append(Model(id=f"deepai/{mid}", name=name, free=free,
+                             context_window=DEFAULT_CONTEXT))
+    return out
+
+
 def fetch_models(api_key: str = "", *, timeout: float = 20.0,
                  use_cache: bool = True) -> tuple[list[Model] | None, str]:
     """Fetch DeepAI Code's model catalog. Returns ``(models, error)``."""
@@ -377,7 +432,7 @@ def fetch_models(api_key: str = "", *, timeout: float = 20.0,
     headers["X-DeepAI-Code-Theos"] = "7"
     headers["X-DeepAI-Code-Instance"] = "00" * 16
 
-    url = f"{API_BASE_URL}{MODELS_PATH}"
+    url = f"{API_BASE_URL}{MODELS_ROUTE}"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -385,14 +440,18 @@ def fetch_models(api_key: str = "", *, timeout: float = 20.0,
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             return None, "key rejected (401/403) — check it with /deepai-api-setup"
-        # The /deepai_code/models route 404s on this build — fall back to the
-        # catalog the app itself wrote to disk, which is the same list.
         if e.code == 404:
+            # The app's own cache is the better list when it exists; without
+            # the app installed, the declared table keeps the catalog usable.
+            # A note rides along so the pane can say which one it is showing.
             cached = load_cached_models()
             if cached:
                 models = _parse_models({"data": cached})
                 _CACHE[api_key] = (models, time.monotonic())
                 return models, ""
+            models = declared_models()
+            _CACHE[api_key] = (models, time.monotonic())
+            return models, "live catalog unreachable (404) — declared list"
         return None, f"HTTP {e.code} from api.deepai.org"
     except (urllib.error.URLError, OSError, ValueError) as e:
         return None, f"could not reach api.deepai.org: {e}"
@@ -407,7 +466,22 @@ def chat_models(api_key: str = "", **kw) -> tuple[list[Model] | None, str]:
     models, err = fetch_models(api_key, **kw)
     if models is None:
         return None, err
-    return [m for m in models if m.chat], ""
+    return [m for m in models if m.chat], err
+
+
+def usable_free_models(api_key: str = "", **kw) -> tuple[list[Model] | None, str]:
+    """The free lanes that can answer a chat turn — what the pane promises.
+
+    ``/models deepai`` sits under a heading that says FREE MODELS while the
+    catalog answers with the paid lanes as well (they return 200 and spend
+    Theos). Every other source is handed to that pane through a
+    ``usable_free_models``; this is DeepAI Code's, with the error carried
+    through so a fallback still reports itself.
+    """
+    models, err = fetch_models(api_key, **kw)
+    if models is None:
+        return None, err
+    return [m for m in models if m.free and m.chat], err
 
 
 def model_ids(api_key: str = "", **kw) -> tuple[list[str] | None, str]:

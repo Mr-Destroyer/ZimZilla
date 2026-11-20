@@ -42,6 +42,27 @@ nothing had ever exercised.
    when the ``except`` block exits, so the failure being reported was replaced
    by a ``NameError``. The message is built before the callback is.
 
+4. **`/models deepai` answered `HTTP 404 from api.deepai.org` on a key that
+   works.** `MODELS_PATH` was defined twice in `deepcode.py` — first the API
+   route, then the DeepAI Code app's cache as a `Path`. The second definition
+   won, the f-string stringified the Path, and every fetch requested
+   `https://api.deepai.org/home/<user>/.deepai-code/.../models.json`. Probing
+   the real route with the operator's key answers **200**: 11 free lanes, 27
+   entries. Three faults sat behind that one:
+
+   * the live body is `{"models": [...]}` while `_parse_models` read `data`,
+     so even a 200 parsed into an empty catalog;
+   * `load_api_key()` read only the environment and the app's own secret file,
+     so the profile `/deepai-api-setup` writes was invisible to
+     `/zim-zimthegoat`, which answered "no DeepAI api_key found" over a key
+     sitting in `~/.zimzilla/deepai/source`;
+   * `/models deepai` was handed `chat_models` where every other source gets
+     `usable_free_models`, so the paid lanes — which answer 200 and spend
+     Theos — would have been listed under a heading that says FREE MODELS.
+
+   The 404 branch now falls back to the app's cache and then to the declared
+   table, and says which one it is showing.
+
 No network: msfvenom is only *listed* (``--list encoders``), never asked to
 build, and its absence is a pass — the report has to arrive either way.
 """
@@ -51,6 +72,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import os
 import signal
 import sys
@@ -67,6 +89,7 @@ os.environ["ZIMZILLA_HOME"] = str(_HOME)
 
 from zimzilla import deepcode, obfuscate          # noqa: E402
 from zimzilla.config import Config                # noqa: E402
+from unittest import mock                        # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -129,6 +152,9 @@ def test_deepai_profile() -> None:
           [ln for ln in body.splitlines() if "MODEL" in ln])
     check("deepai: a named model wins", deepcode.save_key(KEY, "deepai/gpt-6-luna")
           and 'DEEPAI_MODEL="deepai/gpt-6-luna"' in path.read_text(encoding="utf-8"))
+    # Put the profile back on the default: every later check reads it back and
+    # must not inherit this deliberate override.
+    deepcode.save_key(KEY)
     creds = deepcode.load_credentials()
     check("deepai: the key round-trips",
           creds is not None and creds[0] == KEY, str(creds and creds[0][-4:]))
@@ -174,6 +200,97 @@ def test_obfuscate_module() -> None:
           and hasattr(obfuscate, "generate") and hasattr(obfuscate, "analyze_payload_file"))
 
 
+class _FakeResponse:
+    """Just enough of an HTTP response for ``fetch_models`` to read."""
+
+    def __init__(self, payload: dict) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def test_catalog() -> None:
+    """The reported `HTTP 404 from api.deepai.org` on `/models deepai`."""
+    import urllib.error
+    import urllib.request
+
+    check("catalog: the API route is a route, not a file",
+          not isinstance(deepcode.MODELS_ROUTE, Path)
+          and deepcode.MODELS_ROUTE == "/deepai_code/models",
+          str(deepcode.MODELS_ROUTE))
+    check("catalog: the app's cache is a file, under its own name",
+          isinstance(deepcode.CACHE_FILE, Path)
+          and deepcode.CACHE_FILE.suffix == ".json",
+          str(deepcode.CACHE_FILE))
+
+    live = {"models": [
+        {"id": "glm-5.3-flash", "name": "GLM 5.3 Flash",
+         "theosPerRequest": "0", "contextWindow": 320000},
+        {"id": "claude-opus-5-5", "name": "Claude Opus 5.5",
+         "theosPerRequest": "9", "contextWindow": 320000},
+    ]}
+    seen: dict[str, str] = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        return _FakeResponse(live)
+
+    deepcode._CACHE.clear()
+    with mock.patch.object(urllib.request, "urlopen", fake_urlopen):
+        models, err = deepcode.fetch_models("test-key", use_cache=False)
+        free_only, free_err = deepcode.usable_free_models(
+            "test-key", use_cache=False)
+
+    check("catalog: fetch requests the API route",
+          seen.get("url") == "https://api.deepai.org/deepai_code/models",
+          seen.get("url", "(not called)"))
+    check("catalog: a 200 body of {models: [...]} parses",
+          err == "" and models is not None and len(models) == 2,
+          f"n={len(models) if models is not None else None} err={err!r}")
+    check("catalog: the free lane keeps its context window",
+          bool(models) and models[0].free and models[0].context_window == 320000,
+          str(models[0] if models else None))
+    check("catalog: the pane's list leaves the paid lanes out",
+          free_only is not None
+          and [m.id for m in free_only] == ["deepai/glm-5.3-flash"],
+          str([m.id for m in (free_only or [])]))
+    check("catalog: the free list still carries the fallback note",
+          free_err == err, repr(free_err))
+
+    # No DeepAI Code app on this host, so the app's own cache is absent — the
+    # 404 branch has to land somewhere instead of refusing the command.
+    def raise_404(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found",
+                                     hdrs=None, fp=io.BytesIO(b"{}"))
+
+    deepcode._CACHE.clear()
+    with mock.patch.object(urllib.request, "urlopen", raise_404):
+        models, err = deepcode.fetch_models("test-key-404", use_cache=False)
+
+    declared = len(deepcode.FREE_MODELS) + len(deepcode.PAID_MODELS)
+    check("catalog: a 404 falls back to the declared table",
+          models is not None and len(models) == declared,
+          f"n={len(models) if models is not None else None} err={err!r}")
+    check("catalog: the fallback says what it is showing",
+          "declared" in (err or ""), err or "")
+    deepcode._CACHE.clear()
+
+    creds = deepcode.load_credentials()
+    check("catalog: load_api_key reads ZimZilla's own profile",
+          creds is not None and deepcode.load_api_key() == creds[0],
+          (deepcode.load_api_key() or "no key")[:6])
+    check("catalog: the profile's saved model is read back",
+          creds is not None and creds[1] == deepcode.DEFAULT_MODEL,
+          repr(creds[1] if creds else None))
+
+
 def test_wiring() -> None:
     app = (ROOT / "zimzilla" / "ui" / "app.py").read_text(encoding="utf-8")
     check("wiring: one /obfuscate definition, and it takes self",
@@ -185,6 +302,10 @@ def test_wiring() -> None:
     check("wiring: deepcode defines its own default",
           'DEFAULT_MODEL = "deepai/' in
           (ROOT / "zimzilla" / "deepcode.py").read_text(encoding="utf-8"))
+    check("wiring: /models deepai is handed the free lanes",
+          "usable_free_models(creds[0] if creds else \"\")" in app)
+    check("wiring: /zim-zimthegoat points at the setup command",
+          "no DeepAI api_key — save yours with /deepai-api-setup" in app)
     suite = (ROOT / "zimzilla" / "ui" / "suiteui.py").read_text(encoding="utf-8")
     check("wiring: the intruder error message is built before the callback",
           "message = f\"  error: {exc}\\n\"" in suite
@@ -243,6 +364,30 @@ async def test_screen(tmp: Path) -> None:
         check("screen: /deepai-api-setup clear answers and removes it",
               not err and not profile.exists(), err or str(profile))
 
+        # The command the operator ran next. With only ZimZilla's profile key
+        # — no DeepAI Code app on this host — it must repoint the session, not
+        # answer "no DeepAI api_key found" over a key we had just saved.
+        err = raised(app._handle_command, f"/deepai-api-setup {KEY}")
+        await pilot.pause()
+        seen.clear()
+        err = raised(app._handle_command, "/zim-zimthegoat")
+        await pilot.pause()
+        check("screen: /zim-zimthegoat accepts the profile key", not err, err)
+        check("screen: the session points at the chat endpoint",
+              app.cfg.base_url.endswith("/deepai_code/chat/completions"),
+              app.cfg.base_url)
+        check("screen: the saved key travels with it",
+              (app.cfg.extra_headers or {}).get("api-key", "").endswith("9f12"))
+        check("screen: no false 'no DeepAI api_key' refusal",
+              not any("no DeepAI api_key" in b for b in seen),
+              next((b.strip() for b in seen if "DeepAI" in b), "clean"))
+        # …and on the lane the profile names, not whichever free slug sorts
+        # first (alphabetically `deepai-cyber`, which nothing asked for).
+        check("screen: it lands on the profile's saved model",
+              app.cfg.model in (deepcode.DEFAULT_MODEL,
+                                deepcode.DEFAULT_MODEL.split("/", 1)[-1]),
+              app.cfg.model)
+
         seen.clear()
         err = raised(app._handle_command, "/obfuscate virus.apk")
         await pilot.pause()
@@ -289,6 +434,7 @@ def main() -> int:
         base = Path(td)
         test_deepai_profile()
         test_obfuscate_module()
+        test_catalog()
         test_wiring()
         asyncio.run(test_screen(base / "screen"))
     failed = [n for n, ok, _ in RESULTS if not ok]

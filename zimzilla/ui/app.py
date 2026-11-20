@@ -5293,8 +5293,8 @@ class ZimZillaApp(App):
         api_key = deepcode_mod.load_api_key()
         if not api_key:
             self._sys_line(
-                "no DeepAI api_key found — sign in to DeepAI Code once, or set "
-                "DEEPAI_API_KEY", warn=True)
+                "no DeepAI api_key — save yours with /deepai-api-setup <key>, "
+                "or sign in to the DeepAI Code app once", warn=True)
             return
 
         machine_id = deepcode_mod.load_machine_id()
@@ -5321,11 +5321,23 @@ class ZimZillaApp(App):
                     f"use /models deepcode to see the catalog", warn=True)
                 return
         else:
-            free = deepcode_mod.free_models()
-            if not free:
-                self._sys_line("no free deepcode models known", warn=True)
-                return
-            chosen = free[0].slug
+            # The profile's own lane first: `/deepai-api-setup` saves one, and
+            # a bare `/zim-zimthegoat` should land on what was saved rather
+            # than on whichever free slug sorts first (alphabetically that is
+            # deepai-cyber, not the default the profile names). The declared
+            # default is the next preference; a free lane last.
+            creds = deepcode_mod.load_credentials()
+            preferred = ((creds[1] if creds else "").strip()
+                         or deepcode_mod.default_free_model())
+            known = {m.slug for m in deepcode_mod.all_models()}
+            if preferred in known:
+                chosen = preferred
+            else:
+                free = deepcode_mod.free_models()
+                if not free:
+                    self._sys_line("no free deepcode models known", warn=True)
+                    return
+                chosen = free[0].slug
 
         # The chat endpoint is /deepai_code/chat/completions, not /v1/chat/
         # completions — set the full endpoint as base_url so
@@ -7239,11 +7251,13 @@ class ZimZillaApp(App):
                 return None, "no key — set one with /gemini-api-setup <key>"
             return gm_mod.usable_free_models(creds[0])
         if kind == "deepai":
-            # Keyless for browsing: the catalog is public, and the key is sent
-            # when there is one so the listing matches what this session would
-            # be charged (nothing — free models are unmetered).
+            # Key-gated, not public: the catalog answers 401 without a
+            # credential, so the key is read from ZimZilla's own profile when
+            # one exists. `usable_free_models` rather than `chat_models`: the
+            # pane it feeds is titled FREE MODELS and the catalog also lists
+            # the paid lanes, which answer 200 and spend Theos.
             creds = deepcode_mod.load_credentials()
-            return deepcode_mod.chat_models(creds[0] if creds else "")
+            return deepcode_mod.usable_free_models(creds[0] if creds else "")
         if kind == "flex":
             # No key and no fetch: the playground publishes no catalog, so this
             # is the module's declared list. `usable_free_models` filters it to
@@ -7453,6 +7467,11 @@ class ZimZillaApp(App):
                     t.append(f"      → {m.id}\n", style=p.dim)
             t.append("\n  pick one with  ", style=p.dim)
             t.append("/model <name>\n", style=f"bold {p.primary}")
+        # A non-empty error beside a real list means the fetch fell back — the
+        # app's cache or the declared table, for DeepAI Code. Saying it keeps
+        # a fallback from reading as a live catalog the upstream just sent.
+        if err:
+            t.append(f"\n  note: {err}\n", style=p.amber)
         if kind == "openrouter":
             t.append("  free = :free suffix and a zero price · tools-capable only\n",
                      style=p.dim)
