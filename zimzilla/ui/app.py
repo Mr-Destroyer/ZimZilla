@@ -36,6 +36,7 @@ from .. import browser as browser_mod
 from .. import coarena as co_mod
 from .. import connect as connect_mod
 from .. import crack as crack_mod
+from .. import deepcode as deepcode_mod
 from .. import discord_rpc as discord_mod
 from .. import crownllm as cl_mod
 from .. import kenari as kn_mod
