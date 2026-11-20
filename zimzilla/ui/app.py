@@ -3505,7 +3505,7 @@ class ZimZillaApp(App):
                                         inf_catalog, nv_catalog, mm_catalog,
                                         co_catalog, ix_catalog, ib_catalog,
                                         unr_catalog, resp_catalog, nm_catalog,
-                                        cl_catalog, kn_catalog)
+                                        cl_catalog, kn_catalog, dc_catalog)
                 t.append(note + "\n", style=p.dim)
             t.append("\n  usage: /model <name>\n", style=p.dim)
             # Say how current the list is, not merely that one exists. A cache
@@ -3963,7 +3963,8 @@ class ZimZillaApp(App):
                     nv_catalog=None, mm_catalog=None, co_catalog=None,
                     ix_catalog=None, ib_catalog=None,
                     unr_catalog=None, resp_catalog=None,
-                    nm_catalog=None, cl_catalog=None, kn_catalog=None) -> str:
+                    nm_catalog=None, cl_catalog=None, kn_catalog=None,
+                    dc_catalog=None) -> str:
         """The price/context note beside a model in /model.
 
         TokenHarbour's catalog is authoritative for its own models — it is the
