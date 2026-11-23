@@ -3770,6 +3770,8 @@ python tests/test_zimsuite.py      # proxy history, repeater tool, workbench scr
 python tests/test_sandbox_default.py  # --sandbox is opt-in; default is unrestricted
 python tests/test_discord_rpc.py   # Discord presence payload, profile, logo, wiring
 python tests/test_draw_image.py    # draw_image — SVG/HTML render, pixels, plan denial
+python tests/test_clip.py          # /clip — the parse, the signals, the ranking, a real cut
+python tests/test_deepai_obfuscate.py  # /deepai-api-setup and /obfuscate through the dispatcher
 ```
 
 `test_agent_limits.py` stubs `_stream_once` and drives `run_turn` directly, so
@@ -3885,4 +3887,7 @@ actually serving.
 
 <div align="center">
 <sub>Built by <b>Mr-Destroyer / ZIM</b> · yt <b>@Study_Hard69</b> · ig <b>zimthegoat</b></sub>
+
+<sub>Contributors: <a href="https://github.com/keshmiguelusa-pro">keshmiguelusa-pro</a>
+— <code>/deepai-api-setup</code> and <code>/obfuscate</code> crash fixes (PR #4)</sub>
 </div>

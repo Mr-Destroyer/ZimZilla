@@ -264,22 +264,43 @@ def test_catalog() -> None:
     check("catalog: the free list still carries the fallback note",
           free_err == err, repr(free_err))
 
-    # No DeepAI Code app on this host, so the app's own cache is absent — the
-    # 404 branch has to land somewhere instead of refusing the command.
+    # The 404 branch has two rungs — the app's own cache, then the declared
+    # table — and which one answers depends on whether the DeepAI Code app is
+    # installed on the host running this. That is not a property of the code,
+    # so both rungs are pinned explicitly: `load_cached_models` is stubbed
+    # rather than left to read whatever is in the operator's home directory.
+    # (Left unpinned, this check passed only on a host without the app, and
+    # failed on one with it — the cache answered and the note said nothing.)
     def raise_404(req, timeout=None):
         raise urllib.error.HTTPError(req.full_url, 404, "Not Found",
                                      hdrs=None, fp=io.BytesIO(b"{}"))
 
+    declared = len(deepcode.FREE_MODELS) + len(deepcode.PAID_MODELS)
+
+    # Rung 2: no app installed, so the declared table keeps the catalog usable.
     deepcode._CACHE.clear()
-    with mock.patch.object(urllib.request, "urlopen", raise_404):
+    with mock.patch.object(urllib.request, "urlopen", raise_404), \
+            mock.patch.object(deepcode, "load_cached_models", lambda: []):
         models, err = deepcode.fetch_models("test-key-404", use_cache=False)
 
-    declared = len(deepcode.FREE_MODELS) + len(deepcode.PAID_MODELS)
     check("catalog: a 404 falls back to the declared table",
           models is not None and len(models) == declared,
           f"n={len(models) if models is not None else None} err={err!r}")
     check("catalog: the fallback says what it is showing",
           "declared" in (err or ""), err or "")
+
+    # Rung 1: the app's cache is the better list when it exists, and it is
+    # preferred over the declared table.
+    deepcode._CACHE.clear()
+    with mock.patch.object(urllib.request, "urlopen", raise_404), \
+            mock.patch.object(deepcode, "load_cached_models",
+                              lambda: [{"id": "cached-lane", "name": "Cached"}]):
+        models, err = deepcode.fetch_models("test-key-404b", use_cache=False)
+
+    check("catalog: the app's cache is preferred over the declared table",
+          models is not None and [m.id for m in models] == ["deepai/cached-lane"],
+          str([m.id for m in (models or [])]))
+    check("catalog: a cache hit reports no fallback note", err == "", repr(err))
     deepcode._CACHE.clear()
 
     creds = deepcode.load_credentials()
