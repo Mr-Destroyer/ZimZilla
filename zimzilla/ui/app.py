@@ -3063,7 +3063,6 @@ class ZimZillaApp(App):
             "crack": lambda a: self._cmd_crack(a),
             "clip": lambda a: self._cmd_clip(a),
             "obfuscate": lambda a: self._cmd_obfuscate(a),
-            "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
             "summary-hunt": lambda a: self._cmd_summary_hunt(a),
             "findings": lambda a: self._cmd_findings(a),
@@ -5305,8 +5304,8 @@ class ZimZillaApp(App):
         api_key = deepcode_mod.load_api_key()
         if not api_key:
             self._sys_line(
-                "no DeepAI api_key found — sign in to DeepAI Code once, or set "
-                "DEEPAI_API_KEY", warn=True)
+                "no DeepAI api_key — save yours with /deepai-api-setup <key>, "
+                "or sign in to the DeepAI Code app once", warn=True)
             return
 
         machine_id = deepcode_mod.load_machine_id()
@@ -5333,11 +5332,23 @@ class ZimZillaApp(App):
                     f"use /models deepcode to see the catalog", warn=True)
                 return
         else:
-            free = deepcode_mod.free_models()
-            if not free:
-                self._sys_line("no free deepcode models known", warn=True)
-                return
-            chosen = free[0].slug
+            # The profile's own lane first: `/deepai-api-setup` saves one, and
+            # a bare `/zim-zimthegoat` should land on what was saved rather
+            # than on whichever free slug sorts first (alphabetically that is
+            # deepai-cyber, not the default the profile names). The declared
+            # default is the next preference; a free lane last.
+            creds = deepcode_mod.load_credentials()
+            preferred = ((creds[1] if creds else "").strip()
+                         or deepcode_mod.default_free_model())
+            known = {m.slug for m in deepcode_mod.all_models()}
+            if preferred in known:
+                chosen = preferred
+            else:
+                free = deepcode_mod.free_models()
+                if not free:
+                    self._sys_line("no free deepcode models known", warn=True)
+                    return
+                chosen = free[0].slug
 
         # The chat endpoint is /deepai_code/chat/completions, not /v1/chat/
         # completions — set the full endpoint as base_url so
@@ -6226,6 +6237,12 @@ class ZimZillaApp(App):
         """
         p = self.palette
         word = str(args[0]).strip() if args else ""
+        # `sources_mod` is the module-level import (line 72), deliberately: a
+        # `from . import sources` inside the `clear` branch made the name local
+        # to this whole method, so the path that *saves* a key reached
+        # `sources_mod.active_key(...)` with the binding never executed and
+        # died with UnboundLocalError — the second crash this command had,
+        # hidden behind the NameError in `save_key` that stopped it first.
 
         if not word or word.lower() in ("status", "show"):
             creds = deepcode_mod.load_credentials()
@@ -6248,7 +6265,6 @@ class ZimZillaApp(App):
             return
 
         if word.lower() in ("clear", "reset"):
-            from . import sources as sources_mod
             profile = sources_mod.ZIMZILLA_HOME / "deepai" / "source"
             try:
                 profile.unlink()
@@ -6275,8 +6291,13 @@ class ZimZillaApp(App):
                 self._sys_line("switch to it with /zim-zimthegoat")
             return
 
+        # Keep whatever model is current, so setting a key does not silently
+        # reset the model the operator was on — the same rule every gateway
+        # key path follows. Off the route, the profile keeps the default.
+        current = (self.cfg.model
+                   if deepcode_mod.active_endpoint(self.cfg.base_url) else "")
         try:
-            path = deepcode_mod.save_key(word)
+            path = deepcode_mod.save_key(word, current)
         except OSError as e:
             self._sys_line(f"could not save the DeepAI key: {e}", warn=True)
             return
@@ -7241,11 +7262,13 @@ class ZimZillaApp(App):
                 return None, "no key — set one with /gemini-api-setup <key>"
             return gm_mod.usable_free_models(creds[0])
         if kind == "deepai":
-            # Keyless for browsing: the catalog is public, and the key is sent
-            # when there is one so the listing matches what this session would
-            # be charged (nothing — free models are unmetered).
+            # Key-gated, not public: the catalog answers 401 without a
+            # credential, so the key is read from ZimZilla's own profile when
+            # one exists. `usable_free_models` rather than `chat_models`: the
+            # pane it feeds is titled FREE MODELS and the catalog also lists
+            # the paid lanes, which answer 200 and spend Theos.
             creds = deepcode_mod.load_credentials()
-            return deepcode_mod.chat_models(creds[0] if creds else "")
+            return deepcode_mod.usable_free_models(creds[0] if creds else "")
         if kind == "flex":
             # No key and no fetch: the playground publishes no catalog, so this
             # is the module's declared list. `usable_free_models` filters it to
@@ -7455,6 +7478,11 @@ class ZimZillaApp(App):
                     t.append(f"      → {m.id}\n", style=p.dim)
             t.append("\n  pick one with  ", style=p.dim)
             t.append("/model <name>\n", style=f"bold {p.primary}")
+        # A non-empty error beside a real list means the fetch fell back — the
+        # app's cache or the declared table, for DeepAI Code. Saying it keeps
+        # a fallback from reading as a live catalog the upstream just sent.
+        if err:
+            t.append(f"\n  note: {err}\n", style=p.amber)
         if kind == "openrouter":
             t.append("  free = :free suffix and a zero price · tools-capable only\n",
                      style=p.dim)
@@ -10414,194 +10442,47 @@ class ZimZillaApp(App):
                 f"no report found — case kept for inspection: {case}", warn=True)
 
     def _cmd_obfuscate(self, args) -> None:
-        """Handle /obfuscate <file>"""
+        """`/obfuscate` — run a payload through msfvenom encoders, or read a file.
+
+        Three shapes, told apart by what stands in front of the command:
+
+        `/obfuscate <file>`   analyse a payload file by extension and name the
+                              encoders that fit it — no payload ids needed.
+        `/obfuscate <payload> <encoder> [--iterations N] [--lhost IP] [--lport N]`
+                              build it; `--dry-run` prints the exact msfvenom
+                              command and builds nothing.
+        `/obfuscate list`     every measured pairing, `--analyze <payload>`
+                              reads one payload.
+
+        `zimzilla.obfuscate` prints its report, so the text is captured and
+        replayed into the pane rather than left on a stdout the TUI owns. The
+        capture runs on a worker: `list`, `--analyze` and a real build shell
+        out to msfvenom, which answers in seconds, and a tool that slow must
+        not hold the UI thread while it works.
+        """
+        import contextlib
+        import io
+
         from zimzilla import obfuscate as ob_mod
 
-        if not args:
-            ob_mod.print_usage()
-            return
+        argv = [str(a) for a in (args or [])]
 
-        filepath = args[0]
-
-        if not os.path.isfile(filepath):
-            self._sys_line(f"error: '{filepath}' is not a file", warn=True)
-            return
-
-        # Analyze the file
-        analysis = ob_mod.analyze_payload_file(filepath)
-
-        # Display analysis in the TUI
-        self._sys_line(f"  Obfuscation Analysis: {filepath}", ok=True)
-        self._sys_line(f"    Extension: .{__import__('pathlib').Path(filepath).suffix.lstrip('.').lower()}", ok=False)
-        self._sys_line(f"    Category: {analysis['category'].upper()}", ok=False)
-        self._sys_line(f"    Description: {analysis['description']}", ok=False)
-
-        if analysis['default_payload']:
-            self._sys_line(f"    Default payload: {analysis['default_payload']}", ok=False)
-
-        self._sys_line("")
-        self._sys_line("  Recommended encoders:", ok=False)
-        for rec in analysis['encoders']:
-            enc = rec["name"]
-            it = rec["iterations"]
-            notes = rec["notes"] if rec["notes"] else ""
-            self._sys_line(f"    - {enc} (iterations={it})", ok=False)
-            if notes:
-                self._sys_line(f"      Notes: {notes}", ok=False)
-
-        self._sys_line("")
-        self._sys_line("  Usage: place the file in a directory you own and test delivery", ok=True)
-    def _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run):
-        """Run the obfuscation or print the command."""
-        from zimzilla import obfuscate as ob_mod
-
-        # Validate the pairing exists in the table (optional but helpful)
-        key = f"{payload}+{encoder}"
-        spec = ob_mod.SPECS.get(key)
-
-        lhost_val = lhost or "127.0.0.1"
-        lport_val = lport or 4444
-
-        if dry_run:
-            argv = ob_mod.build_argv(payload, encoder, iterations, lhost_val, lport_val)
-            print("  COMMAND (copy-paste this into your shell):")
-            print("  " + " ".join(argv))
-            print()
-            print("  NOTES:")
-            if spec:
-                for note in spec.notes:
-                    print(f"  · {note}")
-            else:
-                print("  · (no table entry -- verify the pairing with a real msfvenom run)")
-            print()
-            print("  The output will be the encoder-encoded payload.")
-            return
-
-        # Run the build
-        result = ob_mod.generate(payload, encoder, iterations, lhost_val, lport_val)
-
-        if not result["ok"]:
-            print(f"  build failed: {result['error']}")
-            print()
-            print("  full stderr:")
-            print(f"  {result['stderr']}")
-            print()
-            print("  full stdout (first 500 chars):")
-            print(f"  {result['stdout'][:500]}")
-            return
-
-        print("  build succeeded")
-        print()
-        print("  argv: " + " ".join(result["argv"]))
-        print()
-        print("  encoded output (first 500 chars):")
-        print(f"  {result['stdout'][:500]}")
-        print()
-        if result["sha256"]:
-            print(f"  sha256: {result['sha256']}")
-        if result["size"]:
-            from zimzilla.reverse import human_size
-            print(f"  size: {human_size(result['size'])}")
-        print()
-        print("  stderr (notes from msfvenom):")
-        print(f"  {result['stderr'][:500]}")
-
-    def _cmd_obfuscate_list():
-        """List every encoder/payload pairing this can run."""
-        ob_mod = __import__('zimzilla.obfuscate', fromlist=['SPECS'])
-        SPECS = ob_mod.SPECS
-
-        print("  /obfuscate <payload> <encoder> [--iterations N] [--lhost IP] [--lport N]")
-        print("  /obfuscate <payload> <encoder> --dry-run")
-        print()
-        print("  Available pairings (payload + encoder):")
-        print()
-
-        # Show all entries from SPECS, grouped by payload
-        payloads_seen = set()
-        for key, spec in sorted(SPECS.items()):
-            payload = spec.payload
-            if payload not in payloads_seen:
-                payloads_seen.add(payload)
-                print(f"  {payload}:")
-            enc_name = f"{spec.encoder} (it={spec.iterations})"
-            notes = "  " + "; ".join(spec.notes) if spec.notes else "  (no notes)"
-            print(f"    - {enc_name}: {notes}")
-
-        # Also list available encoders
-        print()
-        print("  Available msfvenom encoders:")
-        encoders_list = ob_mod.encoders()
-        if encoders_list:
-            for e in encoders_list[:20]:
-                print(f"    - {e}")
-            if len(encoders_list) > 20:
-                print(f"    ... and {len(encoders_list) - 20} more")
-        else:
-            print("    (msfvenom not installed)")
-
-        print()
-        print("  Every pairing above was measured against a real msfvenom run.")
-        print("  Point it at targets you own or are authorised to test.")
-
-    def _cmd_obfuscate(argv):
-        """Entry point for /obfuscate command."""
-        from zimzilla import obfuscate as ob_mod
-
-        if not argv:
-            _cmd_obfuscate_list()
-            return
-
-        # argv[0] = payload, argv[1] = encoder, rest = flags
-        if len(argv) < 2:
-            print("error: /obfuscate requires a payload and an encoder")
-            print(_cmd_obfuscate.__doc__.split('"""')[1] if '"""' in _cmd_obfuscate.__doc__ else "")
-            return
-
-        payload = argv[0]
-        encoder = argv[1]
-
-        # Parse flags from argv[2:]
-        dry_run = False
-        iterations = 1
-        lhost = None
-        lport = None
-
-        i = 2
-        while i < len(argv):
-            arg = argv[i]
-            if arg == "--dry-run":
-                dry_run = True
-            elif arg == "--iterations" and i + 1 < len(argv):
-                try:
-                    iterations = int(argv[i + 1])
-                    if iterations < 1:
-                        print("error: --iterations must be >= 1")
-                        return
-                except ValueError:
-                    print(f"error: --iterations takes a positive integer, not {argv[i + 1]!r}")
-                    return
-                i += 2
-            elif arg == "--lhost" and i + 1 < len(argv):
-                lhost = argv[i + 1]
-                i += 2
-            elif arg == "--lport" and i + 1 < len(argv):
-                try:
-                    lport = int(argv[i + 1])
-                    if not (1 <= lport <= 65535):
-                        print(f"error: --lport must be 1-65535, not {lport}")
-                        return
-                except ValueError:
-                    print(f"error: --lport takes a port number, not {argv[i + 1]!r}")
-                    return
-                i += 2
-            else:
-                print(f"error: unexpected argument {arg!r}")
+        def _run() -> None:
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    ob_mod.handle(argv)
+            except Exception as exc:  # noqa: BLE001 — a command never takes the TUI down
+                self.call_from_thread(
+                    self._sys_line, f"/obfuscate: {exc}", warn=True)
                 return
+            out = buf.getvalue().rstrip()
+            self.call_from_thread(
+                self._sys_line, out or "  (nothing to report)")
 
-        _cmd_obfuscate_run(payload, encoder, iterations, lhost, lport, dry_run)
+        self.run_worker(_run, thread=True, exclusive=True,
+                        group="obfuscate", name="obfuscate")
 
-    
     # ---- /ad ---------------------------------------------------------------
     def _cmd_ad(self, args) -> None:
         """/ad <domain> --ack <domain> — an Active Directory campaign.
