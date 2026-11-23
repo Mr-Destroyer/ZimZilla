@@ -36,6 +36,7 @@ from .. import browser as browser_mod
 from .. import coarena as co_mod
 from .. import connect as connect_mod
 
+from .. import clip as clip_mod
 from .. import crack as crack_mod
 from .. import deepcode as deepcode_mod
 from .. import discord_rpc as discord_mod
@@ -1023,6 +1024,9 @@ HELP_GROUPS: list[tuple[str, str, str, list[tuple[str, str]]]] = [
         ("/reverse-engineer-tools [kind]", "RE tooling: what is here, what is missing"),
         ("/image-gen <prompt>", "generate an image and save it under images/"),
         ("/image-gen --models", "list the image models the route serves"),
+        ("/clip <url> [count]", "find the best moments in a video and cut them"),
+        ("/clip <url> --show N", "cut by duration, show the top N"),
+        ("/clip <url> --dry-run", "rank and print the shortlist, cut nothing"),
     ]),
     ("connect", "CONNECT", "MCP bridges for applications that do not speak MCP", [
         ("/connect", "list bridges and configured MCP servers"),
@@ -3057,6 +3061,7 @@ class ZimZillaApp(App):
             "scope-validator": lambda a: self._cmd_scope_validator(a),
             "ad": lambda a: self._cmd_ad(a),
             "crack": lambda a: self._cmd_crack(a),
+            "clip": lambda a: self._cmd_clip(a),
             "obfuscate": lambda a: self._cmd_obfuscate(a),
             "zim-deepseek": lambda a: self._cmd_zim_deepseek(a),
             "stop-hunt": lambda a: self._cmd_stop_hunt(a),
@@ -9978,6 +9983,315 @@ class ZimZillaApp(App):
         t.append("  says what each wave aimed at and what it found\n", style=p.dim)
         self.query_one(ChatPane).write_block(t)
 
+    # ---- /clip -------------------------------------------------------------
+    def _cmd_clip(self, args) -> None:
+        """/clip <url> [count] — find the best moments and cut them.
+
+        A router with a worker, like `/see`: the download and the two analysis
+        passes are minutes of subprocess work, so they run off the UI thread and
+        the result comes back as one normal turn. The ranking is computed here
+        rather than by the model — see ``clip.py`` for why — and the model is
+        asked for the part a signal cannot do: naming what each moment is.
+        """
+        opts, err = clip_mod.parse_args(args)
+        if err:
+            self._sys_line(err, warn=True)
+            self._sys_line(clip_mod.usage_lines()[0])
+            return
+        if opts.help:
+            for line in clip_mod.usage_lines():
+                self._sys_line(line)
+            return
+
+        missing = clip_mod.missing_tools()
+        if missing:
+            self._sys_line(
+                f"/clip needs {' and '.join(missing)} — install "
+                f"{'them' if len(missing) > 1 else 'it'} and run it again",
+                warn=True)
+            return
+
+        if self.busy:
+            self._sys_line("harness is busy — Ctrl+C to interrupt", warn=True)
+            return
+
+        # The scope guard applies here as it does to every other network tool:
+        # a URL is a host, and a host that is out of scope is not fetched.
+        from urllib.parse import urlsplit
+        try:
+            clean = browser_mod.normalise_url(opts.url)
+        except browser_mod.BrowserError as e:
+            self._sys_line(str(e), warn=True)
+            return
+        host = urlsplit(clean).hostname or ""
+        allowed, reason = self.agent.scope.allows(host)
+        if not allowed:
+            self._sys_line(f"⛔ BLOCKED — SCOPE GUARD — {host}: {reason}", warn=True)
+            return
+        opts.url = clean
+
+        self.busy = True
+        bar = self._status_bar()
+        if bar is not None:
+            bar.set_activity("reading the video", busy=True)
+        self._sys_line(f"clip: reading {clean}")
+        self._clip_worker(opts)
+
+    @work(exclusive=True, thread=True, group="clip")
+    def _clip_worker(self, opts) -> None:
+        """The blocking half: probe, download, analyse, rank, cut.
+
+        Every step reports through ``_clip_note`` so the transcript shows what
+        is happening — a two-hour source is a minute of work before the first
+        clip exists, and a silent minute reads as a hang.
+        """
+        try:
+            self._clip_run(opts)
+        except clip_mod.ClipError as e:
+            self.call_from_thread(self._clip_failed, str(e))
+        except Exception as e:  # noqa: BLE001 - a worker must not kill the app
+            self.call_from_thread(
+                self._clip_failed, f"{type(e).__name__}: {e}")
+
+    def _clip_note(self, message: str) -> None:
+        """A progress line from the worker, on the UI thread."""
+        self.call_from_thread(self._sys_line, message)
+
+    def _clip_run(self, opts) -> None:
+        """The worker body. Runs on a thread; touches no widget directly."""
+        video, err = clip_mod.probe(opts.url)
+        if video is None:
+            self.call_from_thread(self._clip_failed, err)
+            return
+
+        if video.is_live and not opts.live:
+            self.call_from_thread(
+                self._clip_failed,
+                "that stream is live — there is no end to rank against. "
+                "Use /clip <url> --live to capture a bounded window from the "
+                "live edge, or wait for the VOD.")
+            return
+
+        case = clip_mod.case_dir(self.cfg, video)
+        work = case / "work"
+        work.mkdir(parents=True, exist_ok=True)
+
+        self._clip_note(
+            f"  {video.title or video.url}\n"
+            f"  {video.channel or 'unknown channel'} · "
+            f"{clip_mod.human_time(video.duration) if video.duration else 'live'}")
+
+        # A live window is captured as a section; an ordinary video is
+        # downloaded once and cut locally, which is what makes N clips cost one
+        # download rather than N.
+        if video.is_live and opts.live:
+            start, end, note = clip_mod.plan_live(video)
+            if note:
+                self._clip_note(f"  {note}")
+            self._clip_note("  capturing the window…")
+            source, err = clip_mod.download_section(
+                opts.url, work, start, end, height=opts.height)
+            if source is None:
+                self.call_from_thread(self._clip_failed, err)
+                return
+            audio_path = source
+            video_path = source
+        elif opts.dry_run:
+            # A dry run only ranks, so it only needs the audio: ~30 MB for two
+            # hours against ~1.5 GB for the video. Paying for the video to
+            # print a shortlist would make the cheap mode the expensive one.
+            self._clip_note("  downloading the audio track…")
+            audio_path, err = clip_mod.download_audio(opts.url, work)
+            if audio_path is None:
+                self.call_from_thread(self._clip_failed, err)
+                return
+            video_path = None
+        else:
+            # One download, at the delivery height, serving three jobs: the
+            # audio ranking, the visual pass, and the cut itself. The audio
+            # track is inside it, so a separate audio download would be a
+            # second transfer of data already on disk.
+            self._clip_note(f"  downloading the video at {opts.height}p…")
+            video_path, verr = clip_mod.download_video(
+                opts.url, work, height=opts.height)
+            if video_path is None:
+                self.call_from_thread(
+                    self._clip_failed,
+                    f"could not download the video to cut from: {verr}")
+                return
+            audio_path = video_path
+
+        self._clip_note("  measuring audio energy…")
+        audio = clip_mod.audio_energy(audio_path)
+        visual = None
+        if video_path is not None:
+            self._clip_note("  measuring visual change…")
+            try:
+                visual = clip_mod.visual_change(video_path)
+            except clip_mod.ClipError as e:
+                self._clip_note(f"  visual pass failed ({e}) — ranking on audio")
+
+        # Two tiers: how many to *cut* scales with the source, how many to
+        # *show* is the operator's count or the default ten. `plan_count`
+        # resolves the first; `opts.show` is the second.
+        #
+        # The length to scale against is the *rankable* length, not the
+        # video's: a live stream reports duration 0 and is ranked inside the
+        # captured window, so scaling against 0 would ask for the floor of 3
+        # clips from half an hour of material.
+        rankable = video.duration
+        if video.is_live and opts.live:
+            _s, _e, _n = clip_mod.plan_live(video)
+            rankable = max(0.0, _e - _s)
+        if opts.start is not None or opts.end is not None:
+            lo = opts.start or 0.0
+            hi = opts.end if opts.end is not None else rankable
+            rankable = max(0.0, hi - lo)
+        cut_count = clip_mod.plan_count(
+            rankable, asked=opts.count, length=opts.length)
+        self._clip_note(
+            f"  cutting {cut_count} clips from "
+            f"{clip_mod.human_time(rankable) if rankable else 'the source'}"
+            f" · showing the top {min(opts.show, cut_count)}")
+
+        moments = clip_mod.rank(
+            audio, visual, count=cut_count, length=opts.length,
+            min_gap=opts.min_gap, start=opts.start, end=opts.end)
+        if not moments:
+            self.call_from_thread(
+                self._clip_failed,
+                "no moments were found — the range may be too short, or the "
+                "audio may be silent throughout")
+            return
+
+        # Captions and chat are context for the model, never a ranking signal.
+        # Both are best-effort: a 429 on the subtitle endpoint is the normal
+        # case, not a failure.
+        cues: list = []
+        cap_path, _ = clip_mod.fetch_captions(opts.url, work)
+        if cap_path is not None:
+            try:
+                cues = clip_mod.parse_vtt(cap_path.read_text(errors="replace"))
+            except OSError:
+                cues = []
+        chat_path, _ = clip_mod.fetch_chat(opts.url, work)
+        for moment in moments:
+            if cues:
+                moment.transcript = clip_mod.transcript_between(
+                    cues, moment.start, moment.end)
+            if chat_path is not None:
+                moment.title = clip_mod.chat_between(
+                    chat_path, moment.start, moment.end)
+
+        if opts.dry_run:
+            self.call_from_thread(
+                self._clip_done, video, moments, [], case, True, opts.show)
+            return
+
+        outdir = Path(opts.out).expanduser() if opts.out else (case / "clips")
+        self._clip_note(f"  cutting {len(moments)} clips…")
+        made, errors = clip_mod.cut_all(
+            video_path, moments, outdir, height=opts.height,
+            quality=opts.quality)
+        for line in errors:
+            self._clip_note(f"  {line}")
+        self.call_from_thread(
+            self._clip_done, video, moments, made, case, False, opts.show)
+
+    def _clip_failed(self, message: str) -> None:
+        """The worker failed: say why, and hand the prompt back."""
+        self.busy = False
+        bar = self._status_bar()
+        if bar is not None:
+            bar.set_activity("idle", busy=False)
+        self._sys_line(f"/clip failed: {message}", warn=True)
+        self.query_one("#input", Input).focus()
+
+    def _clip_done(self, video, moments, made, case: Path, dry_run: bool,
+                   show: int = clip_mod.DEFAULT_CLIPS) -> None:
+        """The UI half: show the shortlist, then ask the model to name them.
+
+        *moments* is everything that was cut; *show* is how many of them the
+        operator asked to see. The rest are on disk and listed in moments.json,
+        which is the point of cutting more than is shown: the shortlist is the
+        ten worth reading, and the hundred are there if one of them is wanted.
+        """
+        p = self.palette
+        chat = self.query_one(ChatPane)
+        self.busy = False
+        bar = self._status_bar()
+        if bar is not None:
+            bar.set_activity("idle", busy=False)
+
+        t = Text()
+        t.append("  ◈ CLIP      ", style=f"bold {p.accent}")
+        t.append((video.title or video.url)[:100] + "\n", style=p.primary)
+        t.append("  ◈ SOURCE    ", style=f"bold {p.accent}")
+        t.append(f"{video.channel or 'unknown'} · "
+                 f"{clip_mod.human_time(video.duration)}\n", style=p.dim)
+        t.append("  ◈ CASE      ", style=f"bold {p.accent}")
+        t.append(str(case) + "\n", style=p.dim)
+        t.append("  ◈ RANKED    ", style=f"bold {p.accent}")
+        t.append(f"{len(moments)} moment(s) by audio energy, audio change and "
+                 f"visual change\n", style=p.dim)
+        if len(moments) > show:
+            t.append("  ◈ SHOWING   ", style=f"bold {p.accent}")
+            t.append(f"the top {show} of {len(moments)} — the rest are on disk "
+                     f"and in moments.json\n", style=p.dim)
+        if dry_run:
+            t.append("  ◈ DRY RUN   ", style=f"bold {p.amber}")
+            t.append("nothing was cut\n", style=p.dim)
+        chat.write_block(t)
+
+        # The shortlist is the top *show*; everything cut is still written to
+        # moments.json and left in clips/, so nothing is lost by showing ten.
+        shortlist = moments[:show]
+        for line in clip_mod.summary_lines(video, shortlist, made):
+            self._sys_line(line)
+
+        if dry_run:
+            self.query_one("#input", Input).focus()
+            return
+
+        # The ranking is written as data as well as shown as prose, so a later
+        # run, a script or the model can read the numbers without parsing the
+        # transcript.
+        try:
+            clip_mod.write_moments(case, video, moments, made)
+        except OSError as e:
+            self._sys_line(f"could not write moments.json: {e}", warn=True)
+
+        prompt = clip_mod.build_prompt(video, case, shortlist,
+                                       count=len(shortlist),
+                                       cut=len(moments))
+        label = video.title or video.url
+        if len(label) > 60:
+            label = label[:59] + "…"
+        self._run_turn(
+            prompt,
+            display=f"⚑ /clip {label}",
+            finalise=lambda: self._finalise_clip(case),
+            deliverable=Deliverable(path=case / "report.md", label="report.md"),
+        )
+
+    def _finalise_clip(self, case: Path) -> None:
+        """Archive the run's report, and keep the case directory.
+
+        Deliberately not osint's policy: osint deletes its case because the
+        clones and API dumps have no further use, but a clip case holds the
+        clips, and a report that outlived the files it describes would be a
+        catalogue of things that no longer exist. So the report is copied out
+        to ``<state_dir>/reports/`` and the case stays.
+        """
+        report = clip_mod.finalise_case(self.cfg, case)
+        if report is not None:
+            self._sys_line(f"report archived: {report}", ok=True)
+            self._sys_line(f"clips kept: {case / 'clips'}")
+        else:
+            self._sys_line(
+                f"no report found — clips kept for inspection: {case / 'clips'}",
+                warn=True)
+
     # ---- /crack ------------------------------------------------------------
     def _cmd_crack(self, args) -> None:
         """/crack <file|dir> [--mode N] [--max-time S] [--deep] — crack hashes offline.
@@ -11897,6 +12211,7 @@ class ZimZillaApp(App):
             ("/bug-hunt", "recon, then one wave of 10 agents", "bug-hunt"),
             ("/ad", "Active Directory campaign — gated and interlocked", "ad"),
             ("/crack", "crack hashes offline — CPU only, budgeted", "crack"),
+            ("/clip", "find the best moments in a video and cut them", "clip"),
             ("/stop-hunt", "end a running hunt", "stop-hunt"),
             ("/summary-hunt", "the hunt report — what each wave did", "summary-hunt"),
             ("/report-bug-hunt", "evidence-only report, every wave", "report-bug-hunt"),

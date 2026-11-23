@@ -151,6 +151,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/reverse-engineer", "map an artifact, then choose what to change"),
     ("/reverse-engineer-tools", "RE tooling: what is here, what is missing"),
     ("/crack", "crack hashes offline — CPU only, budgeted"),
+    ("/clip", "find the best moments in a video and cut them"),
     ("/stop-hunt", "end a running hunt"),
     ("/summary-hunt", "the hunt report — what each wave did"),
     ("/report-bug-hunt", "evidence-only report, every wave"),
